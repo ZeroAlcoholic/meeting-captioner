@@ -1,0 +1,65 @@
+# --- Node / pnpm ---
+node_modules/
+.pnpm-store/
+*.tsbuildinfo
+dist/
+build/
+coverage/
+.vite/
+.turbo/
+.cache/
+
+# --- Python / uv ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.uv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# --- Environment / Secrets ---
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# --- ML Models / Audio Data ---
+models/
+*.bin
+*.pt
+*.onnx
+*.safetensors
+*.wav
+*.mp3
+*.flac
+*.opus
+recordings/
+
+# --- Logs / Tmp ---
+*.log
+logs/
+tmp/
+.tmp/
+
+# --- IDE / OS ---
+.vscode/*
+!.vscode/settings.example.json
+!.vscode/extensions.json
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Playwright ---
+test-results/
+playwright-report/
+playwright/.cache/
+
+# --- Claude / Plans ---
+.claude/local/
+.claude/settings.local.json
