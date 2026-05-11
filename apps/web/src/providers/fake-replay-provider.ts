@@ -1,11 +1,23 @@
-import { TranscriptEvent, TranslationEvent } from '@meeting-audio/contracts';
+import {
+  AudioLevelEvent,
+  HealthEvent,
+  TranscriptEvent,
+  TranslationEvent,
+} from '@meeting-audio/contracts';
 import { z } from 'zod';
 import type { CaptionProvider, CaptionProviderHandlers, ProviderStatus } from './types.js';
 
 const TimedTranscript = TranscriptEvent.extend({ tMs: z.number().int().nonnegative() });
 const TimedTranslation = TranslationEvent.extend({ tMs: z.number().int().nonnegative() });
+const TimedHealth = HealthEvent.extend({ tMs: z.number().int().nonnegative() });
+const TimedAudioLevel = AudioLevelEvent.extend({ tMs: z.number().int().nonnegative() });
 
-export const FakeReplayEntry = z.discriminatedUnion('kind', [TimedTranscript, TimedTranslation]);
+export const FakeReplayEntry = z.discriminatedUnion('kind', [
+  TimedTranscript,
+  TimedTranslation,
+  TimedHealth,
+  TimedAudioLevel,
+]);
 export type FakeReplayEntry = z.infer<typeof FakeReplayEntry>;
 
 export const FakeReplayScript = z.array(FakeReplayEntry);
@@ -37,12 +49,27 @@ export class FakeReplayProvider implements CaptionProvider {
   }
 
   private dispatch(entry: FakeReplayEntry): void {
-    if (entry.kind === 'transcript') {
-      const { tMs: _tMs, ...event } = entry;
-      this.handlers.onTranscript(event);
-    } else {
-      const { tMs: _tMs, ...event } = entry;
-      this.handlers.onTranslation(event);
+    switch (entry.kind) {
+      case 'transcript': {
+        const { tMs: _t, ...event } = entry;
+        this.handlers.onTranscript(event);
+        return;
+      }
+      case 'translation': {
+        const { tMs: _t, ...event } = entry;
+        this.handlers.onTranslation(event);
+        return;
+      }
+      case 'health': {
+        const { tMs: _t, ...event } = entry;
+        this.handlers.onHealth(event);
+        return;
+      }
+      case 'audio_level': {
+        const { tMs: _t, ...event } = entry;
+        this.handlers.onAudioLevel(event);
+        return;
+      }
     }
   }
 }

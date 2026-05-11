@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { settingsStore } from '../settings/use-settings-store.js';
 import { captionStore } from '../store/use-caption-store.js';
 import {
   FakeReplayProvider,
@@ -29,6 +30,8 @@ export function useFakeReplay() {
       const provider = new FakeReplayProvider(script, {
         onTranscript: (e) => captionStore.getState().applyTranscript(e),
         onTranslation: (e) => captionStore.getState().applyTranslation(e),
+        onHealth: (e) => settingsStore.getState().applyHealth(e),
+        onAudioLevel: (e) => settingsStore.getState().applyAudioLevel(e),
       });
       providerRef.current = provider;
       provider.start();
