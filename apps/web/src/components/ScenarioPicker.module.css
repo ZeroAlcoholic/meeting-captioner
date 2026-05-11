@@ -61,6 +61,12 @@
   color: #e6e8eb;
 }
 
+.labelZh {
+  font-size: 0.8125rem;
+  color: #8a93a3;
+  font-weight: 400;
+}
+
 .hint {
   font-size: 0.75rem;
   color: #6e7889;

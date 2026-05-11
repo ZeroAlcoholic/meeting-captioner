@@ -26,8 +26,11 @@ export function ModeSelector() {
               data-testid={`mode-${opt.id}`}
               className={styles.radio}
             />
-            <span className={styles.label}>{opt.label}</span>
-            <span className={styles.desc}>{opt.description}</span>
+            <span className={styles.label}>
+              {opt.label}
+              <span className={styles.labelZh}> {opt.labelZh}</span>
+            </span>
+            <span className={styles.desc}>{opt.descriptionZh}</span>
           </label>
         ))}
       </div>

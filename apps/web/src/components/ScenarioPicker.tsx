@@ -29,9 +29,10 @@ export function ScenarioPicker() {
             />
             <span className={styles.label}>
               {opt.label}
+              <span className={styles.labelZh}> {opt.labelZh}</span>
               {opt.hint && <span className={styles.hint}> · {opt.hint}</span>}
             </span>
-            <span className={styles.desc}>{opt.description}</span>
+            <span className={styles.desc}>{opt.descriptionZh}</span>
           </label>
         ))}
       </div>
