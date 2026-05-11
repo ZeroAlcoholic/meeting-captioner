@@ -1,0 +1,11 @@
+node_modules
+dist
+build
+coverage
+.pnpm-store
+.venv
+__pycache__
+*.lock
+pnpm-lock.yaml
+test-results
+playwright-report
