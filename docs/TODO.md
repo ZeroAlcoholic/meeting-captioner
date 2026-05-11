@@ -7,8 +7,8 @@
 
 ## Now
 
-- [ ] Close P1 with commits (suggested 5-commit sequence in
-      [`PROJECT_STATE.md`](PROJECT_STATE.md) §"Closing P1 — Suggested Commit Sequence")
+- [ ] Close P2 with commits (suggested 6-commit sequence in
+      [`PROJECT_STATE.md`](PROJECT_STATE.md) §"Closing P2 — Suggested Commit Sequence")
 
 ## P0 (done)
 
@@ -20,34 +20,29 @@
 11 tasks complete. Web 46 unit + 8 Playwright e2e tests green. See
 [`PROJECT_STATE.md`](PROJECT_STATE.md) and [`PLAN_P1.md`](PLAN_P1.md).
 
-## Next phase — P2: OpenAI Realtime mic path
+## P2 (done)
 
-P2 is where real OpenAI usage begins. Per CLAUDE.md, the API key stays
-server-side (`services/online`); the browser receives a short-lived
-client_secret and connects directly to OpenAI Realtime over WebRTC.
+6 tasks complete. Web 57 unit + online 8 unit + 15 Playwright e2e tests green.
+Real OpenAI Realtime WebRTC path wired. See
+[`PROJECT_STATE.md`](PROJECT_STATE.md) and [`PLAN_P2.md`](PLAN_P2.md).
 
-- [ ] `services/online` `POST /session` — replace stub with real OpenAI
-      session creation (returns `client_secret` for Realtime Translation)
-- [ ] Add OpenAI dependency only to `services/online` (NEVER to web)
-- [ ] `apps/web/src/providers/openai-realtime-provider.ts` — implements
-      `CaptionProvider` over WebRTC + data channel
-- [ ] `apps/web/src/providers/microphone-audio-provider.ts` — wraps
-      `getUserMedia({ audio: true })`; handles permission states
-- [ ] Surface `requesting_permission` / `connecting` / `connected` /
-      `failed` / `api_error` / `silence_detected` via existing HealthRow
-- [ ] Audio level meter wired to real `AnalyserNode` from MediaStream
-- [ ] App-level mode switch: when `modeId === 'online_full'`, show
-      a "Use real OpenAI" toggle (gated by `OPENAI_API_KEY` server check)
-- [ ] e2e: skipped if no `OPENAI_API_KEY`; replaced by mocked WebRTC
-      contract test
-- [ ] Reliability: reconnect on transient failure, fall back to fake on
-      hard failure, never blank captions
+## Next phase — P3: WhisperLiveKit + WASAPI Loopback
+
+P3 wires the offline STT path. Real audio source selection for "Physical Meeting" and
+"Hybrid Meeting" scenarios. No cloud dependency.
+
+- [ ] WhisperLiveKit spike — evaluate as offline STT backend, wrap behind OfflineSTTProvider
+- [ ] `services/offline` FastAPI + WhisperLiveKit integration (replace uv stub)
+- [ ] `apps/web/src/providers/whisper-live-provider.ts` — implements CaptionProvider via WebSocket
+- [ ] Windows WASAPI loopback via PyAudioWPatch (jt-live-whisper reference)
+- [ ] WASAPI source available as "Online Meeting Caption Box" scenario
+- [ ] `apps/web/src/providers/microphone-audio-provider.ts` — already exists for mic; WASAPI exposed via online service sidecar
+- [ ] Surface `model_loading` / `offline_engine_unavailable` states via HealthRow
+- [ ] Re-enable "Physical Meeting" scenario → real mic → WhisperLiveKit → TranscriptEvent
+- [ ] e2e: mocked WebSocket STT contract test
 
 ## Backlog (later phases)
 
-- [ ] P3 — WhisperLiveKit spike + OfflineSTTProvider adapter
-- [ ] P3 — WASAPI loopback via PyAudioWPatch (Windows-first)
-- [ ] P3 — Re-enable Advanced Manual scenario (real source picker)
 - [ ] P4 — Argos Translate integration
 - [ ] P4 — Traditional Chinese / Taiwan post-processing
 - [ ] P4 — Glossary hook
