@@ -2,180 +2,136 @@
 
 > Single source of truth for **what is built / in progress / blocked**.
 > Update at the end of every meaningful task.
-> Plan: [`PLAN_P0.md`](PLAN_P0.md). Backlog: [`TODO.md`](TODO.md).
+> Plans: [`PLAN_P0.md`](PLAN_P0.md), [`PLAN_P1.md`](PLAN_P1.md). Backlog: [`TODO.md`](TODO.md).
 
 ---
 
 ## Current Phase
 
-**P0 — Foundation skeleton** ✅ **COMPLETE** (pending commit only)
+**P1 — Scenario / Mode / Health UI Shell** ✅ **COMPLETE** (pending commit)
 
-Single P0 metric — **achieved**: `pnpm -F @meeting-audio/web dev` →
-http://localhost:5173 → click **Start Fake Replay** → see partial →
-revised → final captions render with bilingual translation, completely
-without OpenAI or Whisper. Validated by user on 2026-05-11.
+Single P1 metric — **achieved**: open `http://localhost:5173` → click ⚙ →
+see ScenarioPicker (4 presets, Advanced disabled) + ModeSelector (3
+modes) + HealthRow (6 components with state-driven dots) + AudioLevelMeter
+(RMS bar, peak marker, dB). Click Start Fake Replay → all four UI
+elements update from the same fake script. Switch scenario or mode →
+caption history preserved.
 
-Test status (validated by user):
+Test status:
 - `@meeting-audio/contracts`: 19 tests passed
-- `@meeting-audio/web`: 13 tests passed
-- Browser run: 4 sentences (English source + Traditional Chinese
-  translation) rendered with status transitions and history fall-back
+- `@meeting-audio/web`: **46 tests passed** (P0 13 + P1 +33)
+- **Playwright e2e: 8 tests passed** (P0 2 + P1 +6)
 
 ---
 
-## P0 Task Status
-
-| # | Task | Status | Notes |
-|---|------|--------|-------|
-| 0.1 | git init + root files | 🟡 6/7 | files done, git init done, **commit pending user `git config user.email/name`** |
-| 0.2 | 11 docs/*.md skeletons | ✅ done | + `PLAN_P0.md` mirror |
-| 0.3 | pnpm monorepo setup | ✅ done | package.json, workspace, tsconfig.base, eslint flat, prettier, .npmrc |
-| 0.4 | packages/contracts | ✅ done | 5 zod schemas + NormalizedEvent union; **19 vitest cases green** |
-| 0.5 | apps/web Vite skeleton | ✅ done | React 18 + Vite 5; project tsconfig refs |
-| 0.6 | caption store + Vitest | ✅ done | Zustand vanilla + bounded ring buffer (default 500); **8 vitest cases** |
-| 0.7 | FakeReplayProvider | ✅ done | zod-validated script; 14 events / 4 sentences; **5 vitest cases** |
-| 0.8 | CaptionBoard component | ✅ done | bilingual large/small + 5-line history + cursor blink for non-final |
-| 0.9 | services/online Fastify stub | ✅ done | `/healthz` + `/session` stub (refuses to leak API key); 2 vitest cases |
-| 0.10 | services/offline FastAPI stub | ✅ done | `/healthz`; uv-managed; 1 pytest case |
-| 0.11 | Playwright e2e fake-replay | ✅ done | 2 specs: full caption flow + Stop button |
-| 0.12 | RUNBOOK + PROJECT_STATE update | ✅ done | this file + TODO.md updated; RUNBOOK skeleton sufficient for P0 |
-| 0.13 | bootstrap scripts | ✅ done | `setup.ps1`, `doctor.ps1`, `setup.sh`, `doctor.sh` |
-
-Legend: ✅ done · 🟡 partial · ⏳ pending · ⛔ blocked
-
----
-
-## What Exists On Disk
-
-```
-meeting_audio/
-├── .git/                              ✅ initialized (no commits yet)
-├── CLAUDE.md  REFERENCE.md            ✅ pre-existing
-├── README.md  AGENTS.md  MEMORY.md    ✅
-├── .gitignore  .env.example  .editorconfig  .npmrc
-├── .prettierrc.json  .prettierignore  eslint.config.js
-├── package.json  pnpm-workspace.yaml  tsconfig.base.json
-│
-├── apps/web/
-│   ├── package.json  vite.config.ts
-│   ├── tsconfig.json  tsconfig.app.json  tsconfig.node.json
-│   ├── index.html
-│   └── src/
-│       ├── main.tsx  App.tsx  index.css  vite-env.d.ts
-│       ├── caption-board/   CaptionBoard.tsx + .module.css
-│       ├── store/           caption-store.ts (+ test) + use-caption-store.ts
-│       ├── providers/       types.ts, fake-replay-provider.ts (+ test), use-fake-replay.ts
-│       └── dev/             fake-transcript.json
-│
-├── services/
-│   ├── online/   package.json + tsconfig + src/{server,config,routes/*}.ts (+ test) + README
-│   └── offline/  pyproject.toml + app/{__init__,main}.py + tests/test_healthz.py + README
-│
-├── packages/contracts/
-│   ├── package.json + tsconfig.json
-│   └── src/   common, transcript-event, translation-event, health-event,
-│              audio-level-event, index  (+ 4 *.test.ts)
-│
-├── docs/                              ✅ 12 files
-│   ├── PLAN_P0.md  PROJECT_STATE.md  TODO.md  DECISIONS.md
-│   ├── ARCHITECTURE.md  AUDIO_SOURCES.md  ONLINE_OFFLINE_MODES.md
-│   ├── OFFLINE_STT.md  OFFLINE_TRANSLATION.md  FAILURE_MODES.md
-│   ├── TEST_PLAN.md  RUNBOOK.md
-│
-├── scripts/                           ✅ setup + doctor (Win + Unix)
-│
-└── tests/e2e/                         ✅ playwright.config.ts + fake-replay.spec.ts + README
-```
-
----
-
-## How to Resume After Session/Model Switch
-
-A new Claude session can pick up by reading, in order:
-
-1. [`../CLAUDE.md`](../CLAUDE.md) — non-negotiable rules
-2. [`PLAN_P0.md`](PLAN_P0.md) — the approved plan
-3. **This file** — what's done vs pending
-4. [`TODO.md`](TODO.md) — short backlog (now points at P1)
-5. [`DECISIONS.md`](DECISIONS.md) — D1–D10
-
-P0 is structurally complete. Next concrete action is **either**
-finishing the P0 commit (waiting on `git config`) or starting P1 work
-(scenario picker UI + audio level meter).
-
----
-
-## Phase Roadmap
+## Phase Status
 
 | Phase | Scope | Status |
 |-------|-------|--------|
-| **P0** | Foundation skeleton | ✅ complete (commit pending) |
-| P1 | Scenario picker UI + audio level meter | ⏳ next |
-| P2 | OpenAI Realtime mic path (WebRTC + session bridge) | pending |
+| **P0** | Foundation skeleton | ✅ complete (8 commits in git) |
+| **P1** | Scenario picker + Mode selector + Health row + Audio level meter | ✅ complete (commits pending) |
+| P2 | OpenAI Realtime mic path (WebRTC + session bridge real) | ⏳ next |
 | P3 | WhisperLiveKit spike + OfflineSTTProvider + WASAPI loopback | pending |
-| P4 | Argos Translate (English → zh-Hant) | pending |
+| P4 | Argos Translate + zh-Hant post-process + glossary | pending |
 | P5 | Summary draft/refined/stable pipeline | pending |
 | P6 | Reliability + long-running stability | pending |
 | P7 | Electron packaging | pending |
 
 ---
 
-## Recent Decisions
+## P1 Task Status
 
-See [`DECISIONS.md`](DECISIONS.md). D1–D10 accepted at start of P0:
-workspace tool (pnpm), styling (CSS Modules), schema (zod), state
-(Zustand vanilla), fake transcript shape, Python env (uv), lint/format,
-commit style (Conventional Commits), no Docker, remote git deferred.
-
-## Active Blockers
-
-- `git commit` waits on user setting `git config user.email` and
-  `git config user.name`. See RUNBOOK §"Git Identity" or §"Closing P0
-  with commits" below.
+| # | Task | Status | Notes |
+|---|------|--------|-------|
+| 1.1 | settings store | ✅ done | scenarioId / modeId / health / audioLevel + reset; **14 vitest** |
+| 1.2 | fake-replay-provider extended | ✅ done | 4-way discriminated union (transcript/translation/health/audio_level) |
+| 1.3 | ScenarioPicker | ✅ done | 4 presets; Advanced disabled with "(P2/P3)" hint |
+| 1.4 | ModeSelector | ✅ done | 3 modes; reuses ScenarioPicker.module.css |
+| 1.5 | HealthRow | ✅ done | 6 components × 13-state colour buckets + tooltip; **13 vitest** |
+| 1.6 | AudioLevelMeter | ✅ done | RMS bar + peak marker + dB label; **6 vitest** |
+| 1.7 | SettingsPanel | ✅ done | collapsible (open=false default) |
+| 1.8 | App.tsx refactor | ✅ done | ⚙ toggle in header; SettingsPanel below header |
+| 1.9 | Playwright e2e | ✅ done | scenario-switch + mode-switch + 2 new fake-replay assertions |
+| 1.10 | docs | ✅ done | this file + TODO.md + PLAN_P1.md mirror |
+| 1.11 | commits | ⏳ next | 5-6 conventional commits planned |
 
 ---
 
-## Closing P0 — Suggested Commit Sequence
+## What Exists On Disk (additions in P1)
 
-After setting `git config user.email/name` (repo-local OK), run from
-the repo root. Conventional Commits per [`DECISIONS.md`](DECISIONS.md) D8.
+```
+apps/web/src/
+├── settings/                            [NEW dir]
+│   ├── settings-store.ts
+│   ├── settings-store.test.ts
+│   └── use-settings-store.ts
+├── components/                          [NEW dir]
+│   ├── ScenarioPicker.tsx + .module.css
+│   ├── ModeSelector.tsx
+│   ├── HealthRow.tsx + .module.css + .test.ts
+│   ├── AudioLevelMeter.tsx + .module.css + .test.ts
+│   └── SettingsPanel.tsx + .module.css
+├── providers/                           [modified] types/fake-replay-provider/use-fake-replay
+├── dev/fake-transcript.json             [modified] +health +audio_level events (39 total)
+├── App.tsx                              [modified] settings toggle + panel
+└── index.css                            [modified] .settings-toggle styles
 
-```bash
-# 1. root + docs
-git add .gitignore .env.example .editorconfig README.md AGENTS.md MEMORY.md
-git add docs/
-git commit -m "chore: bootstrap repo with docs and root files"
+tests/e2e/
+├── fake-replay.spec.ts                  [modified] +settings/health assertions
+├── scenario-switch.spec.ts              [NEW]
+└── mode-switch.spec.ts                  [NEW]
 
-# 2. monorepo + tooling
-git add package.json pnpm-workspace.yaml .npmrc tsconfig.base.json \
-        .prettierrc.json .prettierignore eslint.config.js
-git commit -m "chore: configure pnpm workspaces, tsconfig base, eslint, prettier"
-
-# 3. shared contracts
-git add packages/
-git commit -m "feat(contracts): add normalized event schemas (transcript/translation/health/audio-level)"
-
-# 4. web app skeleton + caption path
-git add apps/
-git commit -m "feat(web): caption board with fake-replay provider and bounded ring-buffer store"
-
-# 5. services
-git add services/
-git commit -m "feat(services): add online (Fastify) and offline (FastAPI) P0 stubs"
-
-# 6. e2e + scripts
-git add tests/ scripts/
-git commit -m "test(e2e): add Playwright fake-replay spec; scripts: bootstrap + doctor"
-
-# 7. (optional) lockfile
-git add pnpm-lock.yaml
-git commit -m "chore: add pnpm-lock.yaml"
+docs/
+├── PLAN_P1.md                           [NEW]
+├── PROJECT_STATE.md                     [modified] this file
+└── TODO.md                              [modified] P1 done, P2 surfaced
 ```
 
-After all commits: `git log --oneline` should show ~7 lines.
+---
 
-If you prefer a single commit:
+## How to Resume After Session/Model Switch
+
+1. [`../CLAUDE.md`](../CLAUDE.md) — non-negotiable rules
+2. [`PLAN_P0.md`](PLAN_P0.md), [`PLAN_P1.md`](PLAN_P1.md) — approved plans
+3. **This file** — done / pending
+4. [`TODO.md`](TODO.md) — backlog (now points at P2)
+5. [`DECISIONS.md`](DECISIONS.md) — D1–D10
+
+---
+
+## Recent Decisions
+
+P1-D1 to P1-D7 captured in [`PLAN_P1.md`](PLAN_P1.md) §5. No new entry
+in [`DECISIONS.md`](DECISIONS.md) — those are project-wide architecture
+decisions; P1-D* are within-phase choices.
+
+## Active Blockers
+
+- P1 commits pending (waiting to be staged + commit). Will use the same
+  Conventional Commits convention as P0.
+
+---
+
+## Closing P1 — Suggested Commit Sequence
+
 ```bash
-git add -A
-git commit -m "feat: P0 foundation skeleton"
+# 1. settings store + extended provider
+git add apps/web/src/settings/ apps/web/src/providers/ apps/web/src/dev/fake-transcript.json
+git commit -m "feat(web): settings store + provider extension for health/audio_level"
+
+# 2. UI components
+git add apps/web/src/components/
+git commit -m "feat(web): ScenarioPicker, ModeSelector, HealthRow, AudioLevelMeter, SettingsPanel"
+
+# 3. App integration
+git add apps/web/src/App.tsx apps/web/src/index.css
+git commit -m "feat(web): integrate settings panel into App with ⚙ toggle"
+
+# 4. e2e
+git add tests/e2e/
+git commit -m "test(e2e): scenario-switch + mode-switch specs; extend fake-replay assertions"
+
+# 5. docs
+git add docs/PROJECT_STATE.md docs/TODO.md docs/PLAN_P1.md
+git commit -m "docs: mark P1 complete, surface P2 in TODO, mirror plan"
 ```
