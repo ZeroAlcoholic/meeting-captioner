@@ -1,0 +1,186 @@
+import { expect, test } from '@playwright/test';
+
+const MOCK_CLIENT_SECRET = 'mock-ephemeral-token-xyz';
+
+// Injected before each page load to mock browser APIs that OpenAIRealtimeProvider uses
+const INIT_SCRIPT = `
+(function () {
+  // Mock getUserMedia
+  Object.defineProperty(navigator, 'mediaDevices', {
+    configurable: true,
+    writable: true,
+    value: {
+      getUserMedia: () =>
+        Promise.resolve({
+          getTracks: () => [{ stop: () => {} }],
+        }),
+    },
+  });
+
+  // Mock AudioContext
+  window.AudioContext = class MockAudioContext {
+    createMediaStreamSource() { return { connect() {} }; }
+    createAnalyser() {
+      const buf = new Float32Array(2048).fill(0.05);
+      return {
+        fftSize: 2048,
+        getFloatTimeDomainData(out) { out.set(buf); },
+        connect() {},
+      };
+    }
+    close() { return Promise.resolve(); }
+  };
+
+  // Data channel reference — allows the test page to fire events via window.__fireDCMessage
+  let _dcOnMessage = null;
+  window.__fireDCMessage = (data) => {
+    if (_dcOnMessage) _dcOnMessage({ data: typeof data === 'string' ? data : JSON.stringify(data) });
+  };
+
+  // Mock RTCPeerConnection
+  window.RTCPeerConnection = class MockRTCPeerConnection {
+    constructor() {
+      this.oniceconnectionstatechange = null;
+    }
+    get iceConnectionState() { return 'connected'; }
+    createDataChannel() {
+      const dc = { onmessage: null };
+      // Keep ref so __fireDCMessage can call it
+      _dcOnMessage = (e) => dc.onmessage && dc.onmessage(e);
+      return dc;
+    }
+    addTrack() {}
+    async createOffer() { return { type: 'offer', sdp: 'mock-sdp' }; }
+    async setLocalDescription() {}
+    async setRemoteDescription() {}
+    restartIce() {}
+    close() {}
+  };
+
+  // Intercept fetch calls to OpenAI realtime SDP endpoint
+  const _origFetch = window.fetch.bind(window);
+  window.fetch = async function (url, opts) {
+    if (typeof url === 'string' && url.includes('api.openai.com')) {
+      return new Response('mock-answer-sdp', { status: 200 });
+    }
+    return _origFetch(url, opts);
+  };
+})();
+`;
+
+test.describe('OpenAI Realtime provider (mocked WebRTC)', () => {
+  test.beforeEach(async ({ page }) => {
+    // Mock server session endpoints before page load
+    await page.route('**/session/info', (route) =>
+      route.fulfill({ json: { hasApiKey: true } }),
+    );
+    await page.route('**/session', (route) =>
+      route.fulfill({
+        json: { client_secret: { value: MOCK_CLIENT_SECRET, expires_at: 9999999999 } },
+      }),
+    );
+    await page.addInitScript(INIT_SCRIPT);
+  });
+
+  test('"Start Real" button visible when online_full mode is active', async ({ page }) => {
+    await page.goto('/');
+    // Default mode is online_full — button should appear after hasApiKey resolves
+    await expect(page.getByTestId('start-real')).toBeVisible({ timeout: 3_000 });
+    await expect(page.getByTestId('start-real')).toBeEnabled();
+  });
+
+  test('"Start Real" button hidden when mode is not online_full', async ({ page }) => {
+    await page.goto('/');
+    // Open settings and switch to full_offline
+    await page.getByTestId('settings-toggle').click();
+    await page.getByTestId('mode-full_offline').click();
+    await expect(page.getByTestId('start-real')).toHaveCount(0);
+  });
+
+  test('Start Real → audio health: requesting_permission then connected', async ({ page }) => {
+    await page.goto('/');
+    await page.getByTestId('settings-toggle').click();
+
+    // Open settings to see HealthRow
+    await expect(page.getByTestId('health-audio')).toHaveAttribute('data-state', 'idle');
+
+    await page.getByTestId('start-real').click();
+
+    await expect(page.getByTestId('health-audio')).toHaveAttribute('data-state', 'connected', {
+      timeout: 5_000,
+    });
+  });
+
+  test('Start Real → transport health reaches connected', async ({ page }) => {
+    await page.goto('/');
+    await page.getByTestId('settings-toggle').click();
+
+    await page.getByTestId('start-real').click();
+
+    await expect(page.getByTestId('health-transport')).toHaveAttribute('data-state', 'connected', {
+      timeout: 5_000,
+    });
+  });
+
+  test('Realtime transcript event updates caption board', async ({ page }) => {
+    await page.goto('/');
+    await page.getByTestId('start-real').click();
+
+    // Wait for transport to be connected
+    await page.getByTestId('settings-toggle').click();
+    await expect(page.getByTestId('health-transport')).toHaveAttribute('data-state', 'connected', {
+      timeout: 5_000,
+    });
+
+    // Fire a transcript event via the data channel mock
+    await page.evaluate(() => {
+      const w = window as Window & { __fireDCMessage?: (d: string) => void };
+      w.__fireDCMessage?.(JSON.stringify({ type: 'input_audio_buffer.committed', item_id: 'seg-001' }));
+      w.__fireDCMessage?.(JSON.stringify({
+        type: 'conversation.item.input_audio_transcription.completed',
+        item_id: 'seg-001',
+        transcript: 'Testing the caption board.',
+      }));
+    });
+
+    await expect(page.getByTestId('caption-current')).toContainText('Testing the caption board.', {
+      timeout: 3_000,
+    });
+  });
+
+  test('Realtime translation event updates target caption', async ({ page }) => {
+    await page.goto('/');
+    await page.getByTestId('start-real').click();
+
+    await page.getByTestId('settings-toggle').click();
+    await expect(page.getByTestId('health-transport')).toHaveAttribute('data-state', 'connected', {
+      timeout: 5_000,
+    });
+
+    await page.evaluate(() => {
+      const w = window as Window & { __fireDCMessage?: (d: string) => void };
+      // Must fire a transcript first so caption-current/caption-target get rendered
+      w.__fireDCMessage?.(JSON.stringify({ type: 'input_audio_buffer.committed', item_id: 'seg-002' }));
+      w.__fireDCMessage?.(JSON.stringify({
+        type: 'conversation.item.input_audio_transcription.completed',
+        item_id: 'seg-002',
+        transcript: 'Translation test.',
+      }));
+      w.__fireDCMessage?.(JSON.stringify({ type: 'response.text.done', text: '測試字幕板。' }));
+    });
+
+    await expect(page.getByTestId('caption-target')).toContainText('測試字幕板。', { timeout: 3_000 });
+  });
+
+  test('No API key → "Start Real" shows disabled state with tooltip', async ({ page }) => {
+    await page.route('**/session/info', (route) =>
+      route.fulfill({ json: { hasApiKey: false } }),
+    );
+    await page.goto('/');
+
+    const btn = page.getByTestId('start-real');
+    await expect(btn).toBeVisible({ timeout: 3_000 });
+    await expect(btn).toBeDisabled();
+    await expect(btn).toContainText('No API Key');
+  });
+});
