@@ -1,0 +1,48 @@
+import { TranscriptEvent, TranslationEvent } from '@meeting-audio/contracts';
+import { z } from 'zod';
+import type { CaptionProvider, CaptionProviderHandlers, ProviderStatus } from './types.js';
+
+const TimedTranscript = TranscriptEvent.extend({ tMs: z.number().int().nonnegative() });
+const TimedTranslation = TranslationEvent.extend({ tMs: z.number().int().nonnegative() });
+
+export const FakeReplayEntry = z.discriminatedUnion('kind', [TimedTranscript, TimedTranslation]);
+export type FakeReplayEntry = z.infer<typeof FakeReplayEntry>;
+
+export const FakeReplayScript = z.array(FakeReplayEntry);
+export type FakeReplayScript = z.infer<typeof FakeReplayScript>;
+
+export class FakeReplayProvider implements CaptionProvider {
+  readonly name = 'fake-replay';
+  status: ProviderStatus = 'idle';
+  private timers: ReturnType<typeof setTimeout>[] = [];
+
+  constructor(
+    private readonly script: FakeReplayScript,
+    private readonly handlers: CaptionProviderHandlers,
+  ) {}
+
+  start(): void {
+    if (this.status === 'running') return;
+    this.status = 'running';
+    for (const entry of this.script) {
+      const timer = setTimeout(() => this.dispatch(entry), entry.tMs);
+      this.timers.push(timer);
+    }
+  }
+
+  stop(): void {
+    for (const t of this.timers) clearTimeout(t);
+    this.timers = [];
+    this.status = 'stopped';
+  }
+
+  private dispatch(entry: FakeReplayEntry): void {
+    if (entry.kind === 'transcript') {
+      const { tMs: _tMs, ...event } = entry;
+      this.handlers.onTranscript(event);
+    } else {
+      const { tMs: _tMs, ...event } = entry;
+      this.handlers.onTranslation(event);
+    }
+  }
+}

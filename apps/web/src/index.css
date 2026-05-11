@@ -1,0 +1,103 @@
+:root {
+  color-scheme: dark;
+  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', 'Noto Sans TC', sans-serif;
+  background: #0b0d12;
+  color: #e6e8eb;
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  padding: 1.5rem 2rem;
+  gap: 1.5rem;
+}
+
+.app-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.app-header h1 {
+  font-size: 1.75rem;
+  margin: 0;
+  letter-spacing: -0.02em;
+}
+
+.app-subtitle {
+  margin: 0.25rem 0 0;
+  color: #8a93a3;
+  font-size: 0.875rem;
+}
+
+.app-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.app-status {
+  font-size: 0.8125rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #6e7889;
+  padding: 0.25rem 0.625rem;
+  border-radius: 9999px;
+  border: 1px solid #2a3142;
+}
+
+.app-status[data-status='running'] {
+  color: #6cf09a;
+  border-color: #2a5a3b;
+  background: #11261a;
+}
+
+.app-status[data-status='stopped'] {
+  color: #f08c6c;
+  border-color: #5a2f2a;
+  background: #261511;
+}
+
+.app-controls button {
+  appearance: none;
+  border: 1px solid #2a3142;
+  background: #1a1f2c;
+  color: #e6e8eb;
+  font-size: 0.9375rem;
+  font-family: inherit;
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+
+.app-controls button:hover:not(:disabled) {
+  background: #232938;
+}
+
+.app-controls button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.app-error {
+  background: #2a1313;
+  border: 1px solid #5a2a2a;
+  color: #f4a3a3;
+  padding: 0.75rem 1rem;
+  border-radius: 0.5rem;
+  font-size: 0.9375rem;
+}
