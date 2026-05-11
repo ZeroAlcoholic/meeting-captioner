@@ -93,6 +93,16 @@ html, body, #root {
   cursor: not-allowed;
 }
 
+.settings-toggle {
+  font-size: 1.125rem;
+  padding: 0.5rem 0.75rem !important;
+}
+
+.settings-toggle[data-open='true'] {
+  background: #15243a !important;
+  border-color: #2a4a6f !important;
+}
+
 .app-error {
   background: #2a1313;
   border: 1px solid #5a2a2a;
