@@ -2,6 +2,7 @@
   "name": "meeting-audio",
   "version": "0.0.0",
   "private": true,
+  "type": "module",
   "description": "Meeting-grade live caption, translation, and semi-realtime summary system.",
   "license": "UNLICENSED",
   "engines": {
@@ -27,6 +28,7 @@
     "@typescript-eslint/parser": "^8.8.1",
     "concurrently": "^9.0.1",
     "eslint": "^9.12.0",
+    "globals": "^17.6.0",
     "prettier": "^3.3.3",
     "typescript": "^5.6.2",
     "vitest": "^2.1.2"
