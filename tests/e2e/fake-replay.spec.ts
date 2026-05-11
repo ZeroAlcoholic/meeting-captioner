@@ -39,4 +39,38 @@ test.describe('fake replay caption path', () => {
 
     await expect(stopButton).toBeDisabled();
   });
+
+  test('settings panel toggle reveals scenario / mode / health / audio level', async ({ page }) => {
+    await page.goto('/');
+
+    await expect(page.getByTestId('settings-panel')).toHaveCount(0);
+
+    await page.getByTestId('settings-toggle').click();
+
+    const panel = page.getByTestId('settings-panel');
+    await expect(panel).toBeVisible();
+    await expect(page.getByTestId('scenario-picker')).toBeVisible();
+    await expect(page.getByTestId('mode-selector')).toBeVisible();
+    await expect(page.getByTestId('health-row')).toBeVisible();
+    await expect(page.getByTestId('audio-level-meter')).toBeVisible();
+
+    await page.getByTestId('settings-toggle').click();
+    await expect(page.getByTestId('settings-panel')).toHaveCount(0);
+  });
+
+  test('health row reflects fake provider events', async ({ page }) => {
+    await page.goto('/');
+    await page.getByTestId('settings-toggle').click();
+
+    await expect(page.getByTestId('health-transport')).toHaveAttribute('data-state', 'idle');
+
+    await page.getByTestId('start-fake-replay').click();
+
+    await expect(page.getByTestId('health-transport')).toHaveAttribute('data-state', 'connected', {
+      timeout: 5_000,
+    });
+    await expect(page.getByTestId('health-stt')).toHaveAttribute('data-state', 'connected', {
+      timeout: 8_000,
+    });
+  });
 });
