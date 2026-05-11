@@ -47,6 +47,7 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
   constructor(
     private readonly sessionUrl: string,
     private readonly handlers: CaptionProviderHandlers,
+    private readonly langPair: string = 'en→zh-TW',
   ) {}
 
   get status(): ProviderStatus {
@@ -67,6 +68,7 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       const sessionRes = await fetch(this.sessionUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ langPair: this.langPair }),
       });
       if (!sessionRes.ok) {
         const text = await sessionRes.text();

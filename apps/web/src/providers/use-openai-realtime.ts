@@ -28,12 +28,17 @@ export function useOpenAIRealtime() {
     setError(null);
     captionStore.getState().clear();
 
-    const provider = new OpenAIRealtimeProvider(SESSION_URL, {
-      onTranscript: (e) => captionStore.getState().applyTranscript(e),
-      onTranslation: (e) => captionStore.getState().applyTranslation(e),
-      onHealth: (e) => settingsStore.getState().applyHealth(e),
-      onAudioLevel: (e) => settingsStore.getState().applyAudioLevel(e),
-    });
+    const { langPair } = settingsStore.getState();
+    const provider = new OpenAIRealtimeProvider(
+      SESSION_URL,
+      {
+        onTranscript: (e) => captionStore.getState().applyTranscript(e),
+        onTranslation: (e) => captionStore.getState().applyTranslation(e),
+        onHealth: (e) => settingsStore.getState().applyHealth(e),
+        onAudioLevel: (e) => settingsStore.getState().applyAudioLevel(e),
+      },
+      langPair,
+    );
     providerRef.current = provider;
     setStatus('running');
 
