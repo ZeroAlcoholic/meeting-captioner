@@ -1,0 +1,53 @@
+.meter {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #2a3142;
+  border-radius: 0.5rem;
+  background: #0e1117;
+}
+
+.label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #8a93a3;
+}
+
+.barWrap {
+  position: relative;
+  height: 0.5rem;
+  background: #161b27;
+  border-radius: 9999px;
+  overflow: hidden;
+}
+
+.bar {
+  height: 100%;
+  background: linear-gradient(90deg, #4ade80 0%, #facc15 70%, #f87171 100%);
+  transition: width 100ms linear;
+}
+
+.peak {
+  position: absolute;
+  top: -1px;
+  bottom: -1px;
+  width: 2px;
+  background: #f4f6f8;
+  transform: translateX(-1px);
+  pointer-events: none;
+}
+
+.value {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.8125rem;
+  color: #c8cdd8;
+  min-width: 4ch;
+  text-align: right;
+}
+
+.meter[data-active='false'] .value {
+  color: #5a6478;
+}
