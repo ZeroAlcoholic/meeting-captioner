@@ -3,33 +3,45 @@ import { CaptionBoard } from './caption-board/CaptionBoard.js';
 import { SettingsPanel } from './components/SettingsPanel.js';
 import { rmsToWidthPercent } from './components/AudioLevelMeter.js';
 import { useOpenAIRealtime } from './providers/use-openai-realtime.js';
+import { useOfflineSTT } from './providers/use-offline-stt.js';
 import { useFakeReplay } from './providers/use-fake-replay.js';
 import { useSettingsStore } from './settings/use-settings-store.js';
 
 export function App() {
   const fake = useFakeReplay();
   const realtime = useOpenAIRealtime();
+  const offline = useOfflineSTT();
   const modeId = useSettingsStore((s) => s.modeId);
   const audioLevel = useSettingsStore((s) => s.audioLevel);
   const audioState = useSettingsStore((s) => s.health.audio.state);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
-  const isRunning = fake.status === 'running' || realtime.status === 'running';
-  const activeError = fake.error ?? realtime.error;
+  const isRunning =
+    fake.status === 'running' || realtime.status === 'running' || offline.status === 'running';
+  const activeError = fake.error ?? realtime.error ?? offline.error;
 
   const handleStartFake = () => {
     realtime.stop();
+    offline.stop();
     void fake.start();
   };
 
   const handleStartReal = () => {
     fake.stop();
+    offline.stop();
     void realtime.start();
+  };
+
+  const handleStartOffline = () => {
+    fake.stop();
+    realtime.stop();
+    void offline.start();
   };
 
   const handleStop = () => {
     fake.stop();
     realtime.stop();
+    offline.stop();
   };
 
   const showRealButton = modeId === 'online_full';
@@ -40,6 +52,12 @@ export function App() {
       : realtime.hasApiKey === null
         ? 'Checking API key…'
         : undefined;
+
+  const showOfflineButton = modeId === 'full_offline';
+  const offlineButtonDisabled = !offline.hasWhisper || isRunning;
+  const offlineButtonTitle = !offline.hasWhisper
+    ? `WhisperLive: ${offline.whisperStatus ?? 'checking…'}`
+    : undefined;
 
   return (
     <main className="app-shell">
@@ -87,6 +105,17 @@ export function App() {
               data-testid="start-real"
             >
               {realtime.hasApiKey === false ? '🎤 No API Key' : '🎤 Start Real'}
+            </button>
+          )}
+          {showOfflineButton && (
+            <button
+              type="button"
+              onClick={handleStartOffline}
+              disabled={offlineButtonDisabled}
+              title={offlineButtonTitle}
+              data-testid="start-offline"
+            >
+              {offline.hasWhisper ? '🖥 Start Offline' : `🖥 Whisper: ${offline.whisperStatus ?? '…'}`}
             </button>
           )}
           <button
