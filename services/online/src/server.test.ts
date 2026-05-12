@@ -1,15 +1,6 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-const mockSessionCreate = vi.hoisted(() =>
-  vi.fn().mockResolvedValue({ client_secret: { value: 'tok', expires_at: 9999 } }),
-);
 const mockApiKey = vi.hoisted(() => ({ value: undefined as string | undefined }));
-
-vi.mock('openai', () => ({
-  default: vi.fn().mockImplementation(() => ({
-    beta: { realtime: { sessions: { create: mockSessionCreate } } },
-  })),
-}));
 
 vi.mock('./config.js', () => ({
   config: {
@@ -22,6 +13,8 @@ vi.mock('./config.js', () => ({
 }));
 
 import { buildApp } from './server.js';
+
+afterEach(() => vi.restoreAllMocks());
 
 describe('online service', () => {
   it('GET /healthz returns ok', async () => {

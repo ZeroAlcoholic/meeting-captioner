@@ -1,13 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const mockSessionCreate = vi.hoisted(() => vi.fn());
 const mockApiKey = vi.hoisted(() => ({ value: undefined as string | undefined }));
-
-vi.mock('openai', () => ({
-  default: vi.fn().mockImplementation(() => ({
-    beta: { realtime: { sessions: { create: mockSessionCreate } } },
-  })),
-}));
 
 vi.mock('../config.js', () => ({
   config: {
@@ -19,6 +12,20 @@ vi.mock('../config.js', () => ({
 
 import Fastify from 'fastify';
 import { registerSession } from './session.js';
+
+const FAKE_SECRET = { value: 'ephemeral-token-xyz', expires_at: 9999999999 };
+
+function stubFetchOk() {
+  // API returns flat { value, expires_at } — session.ts wraps it into { client_secret: { ... } }
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValueOnce(
+      new Response(JSON.stringify(FAKE_SECRET), { status: 200 }),
+    ),
+  );
+}
+
+afterEach(() => vi.restoreAllMocks());
 
 describe('GET /session/info', () => {
   it('returns hasApiKey false when no key configured', async () => {
@@ -52,34 +59,69 @@ describe('POST /session', () => {
   });
 
   it('returns client_secret and never exposes the raw API key', async () => {
-    const fakeSecret = { value: 'ephemeral-token-xyz', expires_at: 9999999999 };
-    mockSessionCreate.mockResolvedValueOnce({ client_secret: fakeSecret });
+    stubFetchOk();
     mockApiKey.value = 'sk-real-secret-do-not-leak';
-
     const app = Fastify({ logger: false });
     await registerSession(app);
     const res = await app.inject({ method: 'POST', url: '/session' });
 
     expect(res.statusCode).toBe(200);
-    const body = res.json<{ client_secret: { value: string; expires_at: number } }>();
-    expect(body.client_secret).toEqual(fakeSecret);
+    const body = res.json<{ client_secret: typeof FAKE_SECRET }>();
+    expect(body.client_secret).toEqual(FAKE_SECRET);
     expect(JSON.stringify(body)).not.toContain('sk-real-secret-do-not-leak');
   });
 
-  it('calls sessions.create with correct model, transcription, and turn_detection config', async () => {
-    mockSessionCreate.mockResolvedValueOnce({ client_secret: { value: 'tok', expires_at: 9999 } });
+  it('calls /v1/realtime/translations/client_secrets with gpt-realtime-translate model', async () => {
+    const mockFn = vi.fn().mockResolvedValueOnce(
+      new Response(JSON.stringify(FAKE_SECRET), { status: 200 }),
+    );
+    vi.stubGlobal('fetch', mockFn);
     mockApiKey.value = 'sk-test';
-
     const app = Fastify({ logger: false });
     await registerSession(app);
     await app.inject({ method: 'POST', url: '/session' });
 
-    expect(mockSessionCreate).toHaveBeenCalledOnce();
-    const arg = mockSessionCreate.mock.calls[0][0] as Record<string, unknown>;
-    expect(arg['model']).toBe('gpt-4o-realtime-preview-2024-12-17');
-    expect(arg['input_audio_transcription']).toMatchObject({ model: 'whisper-1' });
-    expect(arg['turn_detection']).toMatchObject({ type: 'server_vad' });
-    expect(arg['modalities']).toContain('audio');
-    expect(arg['modalities']).toContain('text');
+    expect(mockFn).toHaveBeenCalledOnce();
+    const [url, init] = mockFn.mock.calls[0] as [string, { body: string }];
+    expect(url).toContain('/v1/realtime/translations/client_secrets');
+    const body = JSON.parse(init.body) as {
+      session: { model: string; audio: { output: { language: string } } };
+    };
+    expect(body.session.model).toBe('gpt-realtime-translate');
+    // default langPair en→zh-TW maps to output language 'zh'
+    expect(body.session.audio.output.language).toBe('zh');
+  });
+
+  it('sets output language "en" when langPair is zh-TW→en', async () => {
+    const mockFn = vi.fn().mockResolvedValueOnce(
+      new Response(JSON.stringify(FAKE_SECRET), { status: 200 }),
+    );
+    vi.stubGlobal('fetch', mockFn);
+    mockApiKey.value = 'sk-test';
+    const app = Fastify({ logger: false });
+    await registerSession(app);
+    await app.inject({
+      method: 'POST',
+      url: '/session',
+      payload: { langPair: 'zh-TW→en' },
+    });
+
+    const [, init] = mockFn.mock.calls[0] as [string, { body: string }];
+    const body = JSON.parse(init.body) as {
+      session: { audio: { output: { language: string } } };
+    };
+    expect(body.session.audio.output.language).toBe('en');
+  });
+
+  it('forwards non-200 response from OpenAI back to caller', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValueOnce(new Response('Unauthorized', { status: 401 })),
+    );
+    mockApiKey.value = 'sk-test';
+    const app = Fastify({ logger: false });
+    await registerSession(app);
+    const res = await app.inject({ method: 'POST', url: '/session' });
+    expect(res.statusCode).toBe(401);
   });
 });

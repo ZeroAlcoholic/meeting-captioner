@@ -1,31 +1,25 @@
 import type { FastifyInstance } from 'fastify';
-import OpenAI from 'openai';
 import { config } from '../config.js';
 
-const REALTIME_MODEL = 'gpt-4o-realtime-preview-2024-12-17';
+const TRANSLATION_CLIENT_SECRETS_URL =
+  'https://api.openai.com/v1/realtime/translations/client_secrets';
 
-const LANG_PAIR_CONFIG = {
-  'en→zh-TW': {
-    instructions:
-      'You are a simultaneous English-to-Traditional-Chinese interpreter. ' +
-      'When the user speaks in English, respond ONLY with the Traditional Chinese (zh-TW) translation. ' +
-      'Output the translation alone — no explanations, no English echo.',
-    whisperLang: 'en',
-  },
-  'zh-TW→en': {
-    instructions:
-      'You are a simultaneous Mandarin-Chinese-to-English interpreter. ' +
-      'When the user speaks in Mandarin (Traditional or Simplified Chinese), respond ONLY with the English translation. ' +
-      'Output the translation alone — no explanations, no Chinese echo.',
-    whisperLang: 'zh',
-  },
-} as const;
+// Maps our langPair key to OpenAI output language code
+const LANG_OUTPUT: Record<string, string> = {
+  'en→zh-TW': 'zh',
+  'zh-TW→en': 'en',
+};
 
-type LangPair = keyof typeof LANG_PAIR_CONFIG;
-const DEFAULT_LANG_PAIR: LangPair = 'en→zh-TW';
+const DEFAULT_LANG_PAIR = 'en→zh-TW';
 
 interface SessionBody {
   langPair?: string;
+}
+
+// /v1/realtime/translations/client_secrets returns a flat object (not nested under client_secret)
+interface ClientSecretResponse {
+  value: string;
+  expires_at: number;
 }
 
 export async function registerSession(app: FastifyInstance): Promise<void> {
@@ -38,30 +32,40 @@ export async function registerSession(app: FastifyInstance): Promise<void> {
       return reply.status(503).send({ error: 'OPENAI_API_KEY not configured on server' });
     }
 
-    const langPair: LangPair =
-      req.body?.langPair && req.body.langPair in LANG_PAIR_CONFIG
-        ? (req.body.langPair as LangPair)
+    const langPair =
+      req.body?.langPair && req.body.langPair in LANG_OUTPUT
+        ? req.body.langPair
         : DEFAULT_LANG_PAIR;
 
-    const { instructions, whisperLang } = LANG_PAIR_CONFIG[langPair];
+    const outputLanguage = LANG_OUTPUT[langPair] ?? 'zh';
 
-    const client = new OpenAI({ apiKey: config.OPENAI_API_KEY });
-
-    const session = await client.beta.realtime.sessions.create({
-      model: REALTIME_MODEL,
-      modalities: ['audio', 'text'],
-      instructions,
-      voice: 'alloy',
-      turn_detection: {
-        type: 'server_vad',
-        threshold: 0.5,
-        prefix_padding_ms: 300,
-        silence_duration_ms: 500,
+    const res = await fetch(TRANSLATION_CLIENT_SECRETS_URL, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${config.OPENAI_API_KEY}`,
+        'Content-Type': 'application/json',
       },
-      input_audio_transcription: { model: 'whisper-1', language: whisperLang },
+      body: JSON.stringify({
+        session: {
+          model: 'gpt-realtime-translate',
+          audio: {
+            input: {
+              transcription: { model: 'gpt-realtime-whisper' },
+              noise_reduction: { type: 'near_field' },
+            },
+            output: { language: outputLanguage },
+          },
+        },
+      }),
     });
 
-    // Return ONLY the client_secret — NEVER expose OPENAI_API_KEY to the browser
-    return { client_secret: session.client_secret };
+    if (!res.ok) {
+      const err = await res.text();
+      return reply.status(res.status).send({ error: err });
+    }
+
+    const data = (await res.json()) as ClientSecretResponse;
+    // NEVER expose OPENAI_API_KEY — return only the ephemeral client_secret
+    return { client_secret: { value: data.value, expires_at: data.expires_at } };
   });
 }
