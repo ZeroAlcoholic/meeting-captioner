@@ -5,6 +5,12 @@ import { captionStore } from '../store/use-caption-store.js';
 import { OfflineSTTProvider } from './offline-stt-provider.js';
 import type { ProviderStatus } from './types.js';
 
+/** Map langPair → Whisper source language code */
+const LANG_PAIR_TO_STT: Record<string, string> = {
+  'en→zh-TW': 'en',
+  'zh-TW→en': 'zh',
+};
+
 const HEALTHZ_URL = `${OFFLINE_SERVICE_URL}/healthz`;
 const WS_URL = OFFLINE_SERVICE_URL.replace(/^http/, 'ws');
 
@@ -34,12 +40,15 @@ export function useOfflineSTT() {
     setError(null);
     captionStore.getState().clear();
 
+    const { langPair } = settingsStore.getState();
+    const sttLanguage = LANG_PAIR_TO_STT[langPair] ?? 'en';
+
     const provider = new OfflineSTTProvider(WS_URL, {
       onTranscript: (e) => captionStore.getState().applyTranscript(e),
       onTranslation: (e) => captionStore.getState().applyTranslation(e),
       onHealth: (e) => settingsStore.getState().applyHealth(e),
       onAudioLevel: (e) => settingsStore.getState().applyAudioLevel(e),
-    });
+    }, undefined, sttLanguage);
     providerRef.current = provider;
     setStatus('running');
 

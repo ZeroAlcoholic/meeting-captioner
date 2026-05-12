@@ -26,13 +26,14 @@ def _run_whisper_server() -> None:
         _whisper_status = "loading"
         server = _TranscriptionServer()
         _whisper_status = "ready"
-        # Blocking — exits only if the server crashes
+        # Blocking — exits only if the server crashes.
+        # language=None: each client specifies its own language in the WS config message.
         server.run(
             "0.0.0.0",
             port=9090,
             backend="faster_whisper",
             model="small",
-            language="en",
+            language=None,
             task="transcribe",
         )
         _whisper_status = "stopped"

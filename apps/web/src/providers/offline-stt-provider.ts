@@ -47,6 +47,7 @@ export class OfflineSTTProvider implements CaptionProvider {
     private readonly wsUrl: string,
     private readonly handlers: CaptionProviderHandlers,
     mic?: AudioSource,
+    private readonly language: string = 'en',
   ) {
     this.mic = mic ?? new MicrophoneAudioProvider();
     this.uid = `browser-${Date.now()}`;
@@ -100,7 +101,7 @@ export class OfflineSTTProvider implements CaptionProvider {
         ws.send(
           JSON.stringify({
             uid: this.uid,
-            language: 'en',
+            language: this.language,
             task: 'transcribe',
             model: WHL_MODEL,
             use_vad: true,
