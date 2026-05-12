@@ -45,7 +45,6 @@ const INIT_SCRIPT = `
     get iceConnectionState() { return 'connected'; }
     createDataChannel() {
       const dc = { onmessage: null };
-      // Keep ref so __fireDCMessage can call it
       _dcOnMessage = (e) => dc.onmessage && dc.onmessage(e);
       return dc;
     }
@@ -57,7 +56,7 @@ const INIT_SCRIPT = `
     close() {}
   };
 
-  // Intercept fetch calls to OpenAI realtime SDP endpoint
+  // Intercept fetch to api.openai.com (covers both /translations/calls and any other endpoint)
   const _origFetch = window.fetch.bind(window);
   window.fetch = async function (url, opts) {
     if (typeof url === 'string' && url.includes('api.openai.com')) {
@@ -70,7 +69,6 @@ const INIT_SCRIPT = `
 
 test.describe('OpenAI Realtime provider (mocked WebRTC)', () => {
   test.beforeEach(async ({ page }) => {
-    // Mock server session endpoints before page load
     await page.route('**/session/info', (route) =>
       route.fulfill({ json: { hasApiKey: true } }),
     );
@@ -84,14 +82,12 @@ test.describe('OpenAI Realtime provider (mocked WebRTC)', () => {
 
   test('"Start Real" button visible when online_full mode is active', async ({ page }) => {
     await page.goto('/');
-    // Default mode is online_full — button should appear after hasApiKey resolves
     await expect(page.getByTestId('start-real')).toBeVisible({ timeout: 3_000 });
     await expect(page.getByTestId('start-real')).toBeEnabled();
   });
 
   test('"Start Real" button hidden when mode is not online_full', async ({ page }) => {
     await page.goto('/');
-    // Open settings and switch to full_offline
     await page.getByTestId('settings-toggle').click();
     await page.getByTestId('mode-full_offline').click();
     await expect(page.getByTestId('start-real')).toHaveCount(0);
@@ -101,7 +97,6 @@ test.describe('OpenAI Realtime provider (mocked WebRTC)', () => {
     await page.goto('/');
     await page.getByTestId('settings-toggle').click();
 
-    // Open settings to see HealthRow
     await expect(page.getByTestId('health-audio')).toHaveAttribute('data-state', 'idle');
 
     await page.getByTestId('start-real').click();
@@ -122,24 +117,22 @@ test.describe('OpenAI Realtime provider (mocked WebRTC)', () => {
     });
   });
 
-  test('Realtime transcript event updates caption board', async ({ page }) => {
+  test('Realtime input transcript delta updates caption board', async ({ page }) => {
     await page.goto('/');
     await page.getByTestId('start-real').click();
 
-    // Wait for transport to be connected
+    // Wait for transport connected
     await page.getByTestId('settings-toggle').click();
     await expect(page.getByTestId('health-transport')).toHaveAttribute('data-state', 'connected', {
       timeout: 5_000,
     });
 
-    // Fire a transcript event via the data channel mock
+    // Fire input transcript delta — caption board renders partials immediately
     await page.evaluate(() => {
       const w = window as Window & { __fireDCMessage?: (d: string) => void };
-      w.__fireDCMessage?.(JSON.stringify({ type: 'input_audio_buffer.committed', item_id: 'seg-001' }));
       w.__fireDCMessage?.(JSON.stringify({
-        type: 'conversation.item.input_audio_transcription.completed',
-        item_id: 'seg-001',
-        transcript: 'Testing the caption board.',
+        type: 'session.input_transcript.delta',
+        delta: 'Testing the caption board.',
       }));
     });
 
@@ -148,7 +141,7 @@ test.describe('OpenAI Realtime provider (mocked WebRTC)', () => {
     });
   });
 
-  test('Realtime translation event updates target caption', async ({ page }) => {
+  test('Realtime output transcript delta updates target caption', async ({ page }) => {
     await page.goto('/');
     await page.getByTestId('start-real').click();
 
@@ -159,14 +152,15 @@ test.describe('OpenAI Realtime provider (mocked WebRTC)', () => {
 
     await page.evaluate(() => {
       const w = window as Window & { __fireDCMessage?: (d: string) => void };
-      // Must fire a transcript first so caption-current/caption-target get rendered
-      w.__fireDCMessage?.(JSON.stringify({ type: 'input_audio_buffer.committed', item_id: 'seg-002' }));
+      // input delta renders caption-current, output delta renders caption-target
       w.__fireDCMessage?.(JSON.stringify({
-        type: 'conversation.item.input_audio_transcription.completed',
-        item_id: 'seg-002',
-        transcript: 'Translation test.',
+        type: 'session.input_transcript.delta',
+        delta: 'Translation test.',
       }));
-      w.__fireDCMessage?.(JSON.stringify({ type: 'response.text.done', text: '測試字幕板。' }));
+      w.__fireDCMessage?.(JSON.stringify({
+        type: 'session.output_transcript.delta',
+        delta: '測試字幕板。',
+      }));
     });
 
     await expect(page.getByTestId('caption-target')).toContainText('測試字幕板。', { timeout: 3_000 });
