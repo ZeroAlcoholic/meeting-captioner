@@ -1,3 +1,4 @@
+import { Converter } from 'opencc-js';
 import type {
   AudioLevelEvent,
   HealthComponent,
@@ -7,12 +8,14 @@ import type {
   TranslationEvent,
 } from '@meeting-audio/contracts';
 import { MicrophoneAudioProvider } from './microphone-audio-provider.js';
-import type { CaptionProvider, CaptionProviderHandlers, ProviderStatus } from './types.js';
+import type { AudioSource, CaptionProvider, CaptionProviderHandlers, ProviderStatus } from './types.js';
 
-const OPENAI_REALTIME_URL =
-  'https://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17';
+// gpt-realtime-translate only outputs 'zh' (Simplified). Convert to Traditional Chinese (Taiwan).
+const s2tw = Converter({ from: 'cn', to: 'tw' });
 
-const SILENCE_TIMEOUT_MS = 5000;
+const OPENAI_TRANSLATION_CALLS_URL = 'https://api.openai.com/v1/realtime/translations/calls';
+
+const SEGMENT_FLUSH_MS = 1000;
 const ICE_RESTART_DELAY_MS = 3000;
 const AUDIO_LEVEL_INTERVAL_MS = 100;
 const PEAK_HOLD_MS = 2000;
@@ -22,33 +25,40 @@ function iso(): string {
   return new Date().toISOString();
 }
 
-// Shape of events arriving on the OpenAI Realtime data channel
 interface DCEvent {
   type: string;
-  item_id?: string;
   delta?: string;
-  text?: string;
-  transcript?: string;
+  elapsed_ms?: number;
   error?: { message?: string };
 }
+
+const LANG_PAIR_META: Record<string, { src: string; tgt: string }> = {
+  'en→zh-TW': { src: 'en', tgt: 'zh-TW' },
+  'zh-TW→en': { src: 'zh-TW', tgt: 'en' },
+};
+const DEFAULT_META = { src: 'en', tgt: 'zh-TW' };
 
 export class OpenAIRealtimeProvider implements CaptionProvider {
   readonly name = 'openai-realtime';
 
   private _status: ProviderStatus = 'idle';
   private pc: RTCPeerConnection | null = null;
-  private mic = new MicrophoneAudioProvider();
+  private readonly mic: AudioSource;
   private levelInterval: ReturnType<typeof setInterval> | null = null;
-  private silenceTimer: ReturnType<typeof setTimeout> | null = null;
-  private lastInputItemId = '';
-  private responseTextAcc = '';
+  private segmentFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  private inputAcc = '';
+  private outputAcc = '';
+  private currentSegmentId = '';
   private startMs = 0;
 
   constructor(
     private readonly sessionUrl: string,
     private readonly handlers: CaptionProviderHandlers,
     private readonly langPair: string = 'en→zh-TW',
-  ) {}
+    mic?: AudioSource,
+  ) {
+    this.mic = mic ?? new MicrophoneAudioProvider();
+  }
 
   get status(): ProviderStatus {
     return this._status;
@@ -57,7 +67,7 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
   async start(): Promise<void> {
     if (this._status === 'running') return;
     this._status = 'running';
-    this.startMs = Date.now();
+    this.newSegment();
 
     try {
       // Step 1: get mic + AnalyserNode
@@ -91,10 +101,10 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       stream.getTracks().forEach((t) => this.pc!.addTrack(t, stream));
       this.pc.oniceconnectionstatechange = () => this.handleIceState();
 
-      // Step 4: SDP exchange with OpenAI
+      // Step 4: SDP exchange with OpenAI gpt-realtime-translate
       const offer = await this.pc.createOffer();
       await this.pc.setLocalDescription(offer);
-      const sdpRes = await fetch(OPENAI_REALTIME_URL, {
+      const sdpRes = await fetch(OPENAI_TRANSLATION_CALLS_URL, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${client_secret.value}`,
@@ -108,9 +118,8 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       await this.pc.setRemoteDescription({ type: 'answer', sdp: await sdpRes.text() });
       this.emitHealth('transport', 'connected');
 
-      // Step 5: audio level polling + silence watchdog
+      // Step 5: audio level polling
       this.startLevelPolling();
-      this.resetSilenceTimer();
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unknown error starting Realtime';
       this.emitHealth('transport', 'api_error', message);
@@ -122,6 +131,7 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
   stop(): void {
     if (this._status === 'stopped') return;
     this._status = 'stopped';
+    this.flushSegment();
     this.cleanup();
     this.emitHealth('audio', 'stopped');
     this.emitHealth('transport', 'stopped');
@@ -129,9 +139,9 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
 
   private cleanup(): void {
     if (this.levelInterval !== null) clearInterval(this.levelInterval);
-    if (this.silenceTimer !== null) clearTimeout(this.silenceTimer);
+    if (this.segmentFlushTimer !== null) clearTimeout(this.segmentFlushTimer);
     this.levelInterval = null;
-    this.silenceTimer = null;
+    this.segmentFlushTimer = null;
     this.pc?.close();
     this.pc = null;
     this.mic.release();
@@ -154,84 +164,47 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
 
   private handleDCEvent(ev: DCEvent): void {
     switch (ev.type) {
-      case 'input_audio_buffer.committed':
-        if (ev.item_id) this.lastInputItemId = ev.item_id;
+      case 'session.created':
+        // OpenAI confirmed the translation session is active — already emitted connected on SDP
         break;
 
-      case 'input_audio_buffer.speech_started':
-        this.resetSilenceTimer();
-        this.emitHealth('audio', 'connected');
-        break;
-
-      case 'conversation.item.input_audio_transcription.delta': {
-        if (!ev.item_id || !ev.delta) break;
-        const t: TranscriptEvent = {
-          kind: 'transcript',
-          provider: 'openai-realtime',
-          mode: 'online_full',
-          source: 'microphone',
-          segmentId: ev.item_id,
-          status: 'partial',
-          text: ev.delta,
-          startMs: this.startMs,
-        };
-        this.handlers.onTranscript(t);
-        break;
-      }
-
-      case 'conversation.item.input_audio_transcription.completed': {
-        if (!ev.item_id || !ev.transcript) break;
-        const t: TranscriptEvent = {
-          kind: 'transcript',
-          provider: 'openai-realtime',
-          mode: 'online_full',
-          source: 'microphone',
-          segmentId: ev.item_id,
-          status: 'final',
-          text: ev.transcript,
-          startMs: this.startMs,
-          endMs: Date.now(),
-        };
-        this.handlers.onTranscript(t);
-        this.startMs = Date.now();
-        break;
-      }
-
-      case 'response.text.delta': {
+      case 'session.input_transcript.delta': {
         if (!ev.delta) break;
-        this.responseTextAcc += ev.delta;
-        const tr: TranslationEvent = {
-          kind: 'translation',
+        this.inputAcc += ev.delta;
+        const t: TranscriptEvent = {
+          kind: 'transcript',
           provider: 'openai-realtime',
           mode: 'online_full',
-          sourceSegmentId: this.lastInputItemId || 'unknown',
-          status: 'draft',
-          sourceText: '',
-          targetText: this.responseTextAcc,
-          sourceLanguage: 'en',
-          targetLanguage: 'zh-TW',
-          updatedAt: iso(),
+          source: 'microphone',
+          segmentId: this.currentSegmentId,
+          status: 'partial',
+          text: this.inputAcc,
+          startMs: this.startMs,
         };
-        this.handlers.onTranslation(tr);
+        this.handlers.onTranscript(t);
+        this.resetSegmentFlushTimer();
         break;
       }
 
-      case 'response.text.done': {
-        if (!ev.text) break;
+      case 'session.output_transcript.delta': {
+        if (!ev.delta) break;
+        this.outputAcc += ev.delta;
+        const meta = LANG_PAIR_META[this.langPair] ?? DEFAULT_META;
+        // Convert accumulated simplified Chinese to Traditional Chinese (Taiwan)
+        const targetText = meta.tgt === 'zh-TW' ? s2tw(this.outputAcc) : this.outputAcc;
         const tr: TranslationEvent = {
           kind: 'translation',
           provider: 'openai-realtime',
           mode: 'online_full',
-          sourceSegmentId: this.lastInputItemId || 'unknown',
-          status: 'final',
-          sourceText: '',
-          targetText: ev.text,
-          sourceLanguage: 'en',
-          targetLanguage: 'zh-TW',
+          sourceSegmentId: this.currentSegmentId,
+          status: 'draft',
+          sourceText: this.inputAcc,
+          targetText,
+          sourceLanguage: meta.src,
+          targetLanguage: meta.tgt,
           updatedAt: iso(),
         };
         this.handlers.onTranslation(tr);
-        this.responseTextAcc = '';
         break;
       }
 
@@ -244,6 +217,57 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       default:
         break;
     }
+  }
+
+  private resetSegmentFlushTimer(): void {
+    if (this.segmentFlushTimer !== null) clearTimeout(this.segmentFlushTimer);
+    this.segmentFlushTimer = setTimeout(() => {
+      if (this._status === 'running') this.flushSegment();
+    }, SEGMENT_FLUSH_MS);
+  }
+
+  private flushSegment(): void {
+    if (!this.inputAcc && !this.outputAcc) return;
+    const meta = LANG_PAIR_META[this.langPair] ?? DEFAULT_META;
+
+    const t: TranscriptEvent = {
+      kind: 'transcript',
+      provider: 'openai-realtime',
+      mode: 'online_full',
+      source: 'microphone',
+      segmentId: this.currentSegmentId,
+      status: 'final',
+      text: this.inputAcc,
+      startMs: this.startMs,
+      endMs: Date.now(),
+    };
+    this.handlers.onTranscript(t);
+
+    if (this.outputAcc) {
+      const targetText = meta.tgt === 'zh-TW' ? s2tw(this.outputAcc) : this.outputAcc;
+      const tr: TranslationEvent = {
+        kind: 'translation',
+        provider: 'openai-realtime',
+        mode: 'online_full',
+        sourceSegmentId: this.currentSegmentId,
+        status: 'final',
+        sourceText: this.inputAcc,
+        targetText,
+        sourceLanguage: meta.src,
+        targetLanguage: meta.tgt,
+        updatedAt: iso(),
+      };
+      this.handlers.onTranslation(tr);
+    }
+
+    this.newSegment();
+  }
+
+  private newSegment(): void {
+    this.inputAcc = '';
+    this.outputAcc = '';
+    this.currentSegmentId = `seg-${Date.now()}`;
+    this.startMs = Date.now();
   }
 
   private startLevelPolling(): void {
@@ -276,15 +300,6 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       };
       this.handlers.onAudioLevel(ev);
     }, AUDIO_LEVEL_INTERVAL_MS);
-  }
-
-  private resetSilenceTimer(): void {
-    if (this.silenceTimer !== null) clearTimeout(this.silenceTimer);
-    this.silenceTimer = setTimeout(() => {
-      if (this._status === 'running') {
-        this.emitHealth('audio', 'silence_detected');
-      }
-    }, SILENCE_TIMEOUT_MS);
   }
 
   private emitHealth(component: HealthComponent, state: HealthState, message?: string): void {

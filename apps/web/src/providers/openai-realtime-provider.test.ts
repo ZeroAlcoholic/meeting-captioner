@@ -21,7 +21,6 @@ function makeFakeRTCPeerConnectionClass() {
     }
 
     createDataChannel() {
-      // Capture dc reference so fireDCMessage can call onmessage after it's assigned
       const dc = { onmessage: null as ((e: MessageEvent<string>) => void) | null };
       fireDCMessage = (data: string) => dc.onmessage?.({ data } as MessageEvent<string>);
       return dc;
@@ -134,63 +133,114 @@ describe('OpenAIRealtimeProvider', () => {
     expect(healthEvents.some((e) => e.state === 'stopped')).toBe(true);
   });
 
-  it('transcript.delta event → onTranscript with status:partial', async () => {
+  it('session.input_transcript.delta → onTranscript with accumulated text and status:partial', async () => {
     mockFetch();
     const { handlers, transcripts } = makeHandlers();
     const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
 
     await provider.start();
-    fireDCMessage(JSON.stringify({ type: 'input_audio_buffer.committed', item_id: 'item-001' }));
-    fireDCMessage(JSON.stringify({
-      type: 'conversation.item.input_audio_transcription.delta',
-      item_id: 'item-001',
-      delta: 'Hello',
-    }));
+    fireDCMessage(JSON.stringify({ type: 'session.input_transcript.delta', delta: 'Hello' }));
+    fireDCMessage(JSON.stringify({ type: 'session.input_transcript.delta', delta: ' world' }));
 
-    expect(transcripts).toHaveLength(1);
+    expect(transcripts).toHaveLength(2);
     expect(transcripts[0]!.status).toBe('partial');
     expect(transcripts[0]!.text).toBe('Hello');
-    expect(transcripts[0]!.segmentId).toBe('item-001');
+    expect(transcripts[1]!.text).toBe('Hello world');
+    // same segmentId for both deltas within one segment
+    expect(transcripts[0]!.segmentId).toBe(transcripts[1]!.segmentId);
     provider.stop();
   });
 
-  it('transcript.completed event → onTranscript with status:final', async () => {
-    mockFetch();
-    const { handlers, transcripts } = makeHandlers();
-    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
-
-    await provider.start();
-    fireDCMessage(JSON.stringify({ type: 'input_audio_buffer.committed', item_id: 'item-002' }));
-    fireDCMessage(JSON.stringify({
-      type: 'conversation.item.input_audio_transcription.completed',
-      item_id: 'item-002',
-      transcript: 'Hello world.',
-    }));
-
-    expect(transcripts).toHaveLength(1);
-    expect(transcripts[0]!.status).toBe('final');
-    expect(transcripts[0]!.text).toBe('Hello world.');
-    provider.stop();
-  });
-
-  it('response.text.delta accumulates; response.text.done emits final translation', async () => {
+  it('session.output_transcript.delta → onTranslation with accumulated targetText and status:draft', async () => {
     mockFetch();
     const { handlers, translations } = makeHandlers();
     const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
 
     await provider.start();
-    fireDCMessage(JSON.stringify({ type: 'input_audio_buffer.committed', item_id: 'item-003' }));
-    fireDCMessage(JSON.stringify({ type: 'response.text.delta', delta: '你好' }));
-    fireDCMessage(JSON.stringify({ type: 'response.text.delta', delta: '，世界' }));
-    fireDCMessage(JSON.stringify({ type: 'response.text.done', text: '你好，世界。' }));
+    fireDCMessage(JSON.stringify({ type: 'session.output_transcript.delta', delta: '你好' }));
+    fireDCMessage(JSON.stringify({ type: 'session.output_transcript.delta', delta: '，世界' }));
 
-    const drafts = translations.filter((t) => t.status === 'draft');
-    const finals = translations.filter((t) => t.status === 'final');
-    expect(drafts.length).toBeGreaterThan(0);
-    expect(drafts[drafts.length - 1]!.targetText).toBe('你好，世界');
+    expect(translations).toHaveLength(2);
+    expect(translations[0]!.status).toBe('draft');
+    expect(translations[0]!.targetText).toBe('你好');
+    expect(translations[1]!.targetText).toBe('你好，世界');
+    provider.stop();
+  });
+
+  it('segment flush timer emits final transcript and translation after SEGMENT_FLUSH_MS', async () => {
+    vi.useFakeTimers();
+    mockFetch();
+    const { handlers, transcripts, translations } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+
+    await provider.start();
+    fireDCMessage(JSON.stringify({ type: 'session.input_transcript.delta', delta: 'Hello ' }));
+    fireDCMessage(JSON.stringify({ type: 'session.input_transcript.delta', delta: 'world.' }));
+    fireDCMessage(JSON.stringify({ type: 'session.output_transcript.delta', delta: '你好，世界。' }));
+
+    // only partial/draft so far
+    expect(transcripts.filter((t) => t.status === 'final')).toHaveLength(0);
+
+    // advance past flush timer
+    vi.advanceTimersByTime(1001);
+
+    const finals = transcripts.filter((t) => t.status === 'final');
     expect(finals).toHaveLength(1);
-    expect(finals[0]!.targetText).toBe('你好，世界。');
-    expect(finals[0]!.sourceSegmentId).toBe('item-003');
+    expect(finals[0]!.text).toBe('Hello world.');
+
+    const finalTrans = translations.filter((t) => t.status === 'final');
+    expect(finalTrans).toHaveLength(1);
+    expect(finalTrans[0]!.targetText).toBe('你好，世界。');
+
+    provider.stop();
+  });
+
+  it('flush timer resets on each new input delta (debounce)', async () => {
+    vi.useFakeTimers();
+    mockFetch();
+    const { handlers, transcripts } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+
+    await provider.start();
+    fireDCMessage(JSON.stringify({ type: 'session.input_transcript.delta', delta: 'part1 ' }));
+    vi.advanceTimersByTime(800); // not flushed yet
+    fireDCMessage(JSON.stringify({ type: 'session.input_transcript.delta', delta: 'part2' }));
+    vi.advanceTimersByTime(800); // not flushed (timer reset)
+    expect(transcripts.filter((t) => t.status === 'final')).toHaveLength(0);
+    vi.advanceTimersByTime(300); // now past 1000ms since last delta
+    expect(transcripts.filter((t) => t.status === 'final')).toHaveLength(1);
+    expect(transcripts.filter((t) => t.status === 'final')[0]!.text).toBe('part1 part2');
+
+    provider.stop();
+  });
+
+  it('flush produces new segment — subsequent deltas use a new segmentId', async () => {
+    vi.useFakeTimers();
+    mockFetch();
+    const { handlers, transcripts } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+
+    await provider.start();
+    fireDCMessage(JSON.stringify({ type: 'session.input_transcript.delta', delta: 'first' }));
+    const seg1 = transcripts[0]!.segmentId;
+    vi.advanceTimersByTime(1001);
+    fireDCMessage(JSON.stringify({ type: 'session.input_transcript.delta', delta: 'second' }));
+    const seg2 = transcripts.at(-1)!.segmentId;
+
+    expect(seg1).not.toBe(seg2);
+    provider.stop();
+  });
+
+  it('zh-TW→en langPair emits correct source/target language metadata', async () => {
+    mockFetch();
+    const { handlers, translations } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers, 'zh-TW→en');
+
+    await provider.start();
+    fireDCMessage(JSON.stringify({ type: 'session.output_transcript.delta', delta: 'hello' }));
+
+    expect(translations[0]!.sourceLanguage).toBe('zh-TW');
+    expect(translations[0]!.targetLanguage).toBe('en');
     provider.stop();
   });
 
