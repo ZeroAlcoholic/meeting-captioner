@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { ONLINE_SERVICE_URL } from '../config.js';
 import { settingsStore } from '../settings/use-settings-store.js';
 import { captionStore } from '../store/use-caption-store.js';
 import { OpenAIRealtimeProvider } from './openai-realtime-provider.js';
 import type { ProviderStatus } from './types.js';
 
-const SESSION_URL = 'http://localhost:8787/session';
-const SESSION_INFO_URL = 'http://localhost:8787/session/info';
+const SESSION_URL = `${ONLINE_SERVICE_URL}/session`;
+const SESSION_INFO_URL = `${ONLINE_SERVICE_URL}/session/info`;
 
 export function useOpenAIRealtime() {
   const providerRef = useRef<OpenAIRealtimeProvider | null>(null);
@@ -44,7 +45,10 @@ export function useOpenAIRealtime() {
 
     try {
       await provider.start();
-      // status stays 'running' while provider is active
+      // If provider stopped itself due to error (api_error, ICE failed), reflect that
+      if (provider.status === 'stopped') {
+        setStatus('idle');
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setStatus('idle');

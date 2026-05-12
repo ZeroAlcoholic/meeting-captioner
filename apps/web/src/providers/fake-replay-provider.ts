@@ -33,13 +33,14 @@ export class FakeReplayProvider implements CaptionProvider {
     private readonly handlers: CaptionProviderHandlers,
   ) {}
 
-  start(): void {
-    if (this.status === 'running') return;
+  start(): Promise<void> {
+    if (this.status === 'running') return Promise.resolve();
     this.status = 'running';
     for (const entry of this.script) {
       const timer = setTimeout(() => this.dispatch(entry), entry.tMs);
       this.timers.push(timer);
     }
+    return Promise.resolve();
   }
 
   stop(): void {

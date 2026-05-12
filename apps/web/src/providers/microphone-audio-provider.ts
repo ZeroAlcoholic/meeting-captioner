@@ -1,10 +1,11 @@
 import type { HealthEvent } from '@meeting-audio/contracts';
+import type { AudioSource } from './types.js';
 
 function now(): string {
   return new Date().toISOString();
 }
 
-export class MicrophoneAudioProvider {
+export class MicrophoneAudioProvider implements AudioSource {
   private stream: MediaStream | null = null;
   private audioCtx: AudioContext | null = null;
   analyser: AnalyserNode | null = null;
