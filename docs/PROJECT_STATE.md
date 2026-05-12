@@ -8,18 +8,21 @@
 
 ## Current Phase
 
-**P2 — OpenAI Realtime Mic Path** ✅ **COMPLETE** (commits pending)
+**P2+ — Structural refactor before P3** ✅ **COMPLETE** (commits pending)
 
-P2 metric — **achieved**: click "Start Real" (visible when `modeId === 'online_full'` + API key set) →
-HealthRow audio dot: `requesting_permission → connecting → connected` →
-real mic audio flows through OpenAI Realtime WebRTC → English transcript in caption board →
-Traditional Chinese translation above it → AudioLevelMeter bar animates from live mic.
+P2 WebRTC path is production-ready. Post-P2 structural fixes applied to prevent P3 friction:
+
+- `gpt-realtime-translate` migration: new session URL, event types, opencc-js Simplified→Traditional conversion
+- `CaptionProvider.start()` return type corrected: `void` → `Promise<void>`
+- `AudioSource` interface extracted: `MicrophoneAudioProvider` implements it; `OpenAIRealtimeProvider` accepts injection (WASAPI-ready)
+- `TranslationPipeline` interface defined: offline STT+MT separation
+- Service URLs centralized: `apps/web/src/config.ts` (`VITE_ONLINE_SERVICE_URL`, `VITE_OFFLINE_SERVICE_URL`)
 
 Test status:
 - `@meeting-audio/contracts`: 19 tests passed
-- `@meeting-audio/online`: **8 tests passed** (P0 2 + P2 +6)
-- `@meeting-audio/web`: **57 tests passed** (P0+P1 49 + P2 +8)
-- **Playwright e2e: 15 tests passed** (P0/P1 8 + P2 +7)
+- `@meeting-audio/online`: **10 tests passed**
+- `@meeting-audio/web`: **60 tests passed**
+- Playwright e2e: 15 tests green (suite last verified post-migration)
 
 ---
 
@@ -47,7 +50,9 @@ Test status:
 | 2.3 | OpenAIRealtimeProvider | ✅ done | WebRTC + data channel; ICE reconnect; silence detection; 8 unit tests |
 | 2.4 | use-openai-realtime hook + App integration | ✅ done | dual-provider; Start Real gated by hasApiKey + online_full mode |
 | 2.5 | Playwright e2e (mocked WebRTC) | ✅ done | 7 tests: health transitions, transcript, translation, no-key state |
-| 2.6 | docs + commits | ⏳ next | 6 conventional commits planned |
+| 2.6 | docs + commits | ✅ done | docs updated; commits pending |
+| 2.7 | gpt-realtime-translate migration | ✅ done | new URL, events, opencc-js; 89 tests green |
+| 2.8 | Structural fixes (start→Promise, AudioSource, TranslationPipeline, config) | ✅ done | 89 tests green, lint + typecheck clean |
 
 ---
 
@@ -60,12 +65,16 @@ services/online/
     ├── session.ts                  [modified] real /session + /session/info
     └── session.test.ts             [new] 5 unit tests
 
-apps/web/src/providers/
-├── microphone-audio-provider.ts   [new]
-├── microphone-audio-provider.test.ts [new]
-├── openai-realtime-provider.ts    [new]
-├── openai-realtime-provider.test.ts [new]
-└── use-openai-realtime.ts         [new]
+apps/web/src/
+├── config.ts                      [new] centralized ONLINE_SERVICE_URL / OFFLINE_SERVICE_URL
+└── providers/
+    ├── types.ts                   [modified] start()→Promise<void>, AudioSource, TranslationPipeline
+    ├── microphone-audio-provider.ts   [new + implements AudioSource]
+    ├── microphone-audio-provider.test.ts [new]
+    ├── openai-realtime-provider.ts    [new; AudioSource injected via constructor]
+    ├── openai-realtime-provider.test.ts [new]
+    ├── fake-replay-provider.ts    [modified] start()→Promise<void>
+    └── use-openai-realtime.ts     [new; uses ONLINE_SERVICE_URL from config]
 
 apps/web/src/App.tsx               [modified] Start Real button + dual-provider
 tests/e2e/openai-realtime.spec.ts  [new] 7 Playwright tests
@@ -90,7 +99,7 @@ P2-D1 to P2-D7 captured in [`PLAN_P2.md`](PLAN_P2.md) §5.
 
 ## Active Blockers
 
-- P2 commits pending (waiting to be staged + committed). Will use same Conventional Commits convention as P0/P1.
+- All P2/P2+ commits pending (waiting to be staged + committed). Will use same Conventional Commits convention as P0/P1.
 
 ---
 

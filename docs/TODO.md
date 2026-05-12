@@ -7,8 +7,8 @@
 
 ## Now
 
-- [ ] Close P2 with commits (suggested 6-commit sequence in
-      [`PROJECT_STATE.md`](PROJECT_STATE.md) §"Closing P2 — Suggested Commit Sequence")
+- [ ] Commit all P2 + P2+ changes (see `git status`; conventional commits)
+- [ ] P3 — start offline STT path (see below)
 
 ## P0 (done)
 
@@ -31,14 +31,20 @@ Real OpenAI Realtime WebRTC path wired. See
 P3 wires the offline STT path. Real audio source selection for "Physical Meeting" and
 "Hybrid Meeting" scenarios. No cloud dependency.
 
-- [ ] WhisperLiveKit spike — evaluate as offline STT backend, wrap behind OfflineSTTProvider
-- [ ] `services/offline` FastAPI + WhisperLiveKit integration (replace uv stub)
-- [ ] `apps/web/src/providers/whisper-live-provider.ts` — implements CaptionProvider via WebSocket
-- [ ] Windows WASAPI loopback via PyAudioWPatch (jt-live-whisper reference)
-- [ ] WASAPI source available as "Online Meeting Caption Box" scenario
-- [ ] `apps/web/src/providers/microphone-audio-provider.ts` — already exists for mic; WASAPI exposed via online service sidecar
-- [ ] Surface `model_loading` / `offline_engine_unavailable` states via HealthRow
-- [ ] Re-enable "Physical Meeting" scenario → real mic → WhisperLiveKit → TranscriptEvent
+Prerequisites ✅ already done (P2+):
+- `AudioSource` interface — WASAPI loopback can be dropped in without touching providers
+- `TranslationPipeline` interface — Argos MT can be plugged in as separate step
+- `VITE_OFFLINE_SERVICE_URL` config — no hardcoded localhost in hooks
+- `CaptionProvider.start(): Promise<void>` — correct async contract for all new providers
+
+P3 tasks:
+- [ ] `pip install whisper-live` — natively on Windows (no Docker); verify server starts on port 9090
+- [ ] `services/offline` — FastAPI app, `whisper_live.server.TranscriptionServer` lifecycle, `/healthz` endpoint
+- [ ] `apps/web/src/providers/offline-stt-provider.ts` — WebSocket client ws://OFFLINE_SERVICE_URL, normalize `{ segments }` → TranscriptEvent
+- [ ] `apps/web/src/providers/use-offline-stt.ts` — React hook (mirrors use-openai-realtime pattern)
+- [ ] Wire "Physical Meeting" scenario in App → mic AudioSource → offline-stt-provider
+- [ ] Surface `model_loading` / `offline_engine_unavailable` / `silence_detected` via HealthRow
+- [ ] Windows WASAPI loopback via PyAudioWPatch — inject as AudioSource for "Online Meeting Caption Box" scenario
 - [ ] e2e: mocked WebSocket STT contract test
 
 ## Backlog (later phases)
