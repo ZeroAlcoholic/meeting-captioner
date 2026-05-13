@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { CaptionBoard } from './caption-board/CaptionBoard.js';
 import { SettingsPanel } from './components/SettingsPanel.js';
+import { RealtimePricingPanel } from './components/RealtimePricingPanel.js';
 import { rmsToWidthPercent } from './components/AudioLevelMeter.js';
 import { useOpenAIRealtime } from './providers/use-openai-realtime.js';
 import { useOfflineSTT } from './providers/use-offline-stt.js';
@@ -14,7 +15,9 @@ export function App() {
   const modeId = useSettingsStore((s) => s.modeId);
   const audioLevel = useSettingsStore((s) => s.audioLevel);
   const audioState = useSettingsStore((s) => s.health.audio.state);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const startSession = useSettingsStore((s) => s.startSession);
+  const stopSession = useSettingsStore((s) => s.stopSession);
+  const [settingsOpen, setSettingsOpen]   = useState(false);
 
   const isRunning =
     fake.status === 'running' || realtime.status === 'running' || offline.status === 'running';
@@ -29,6 +32,7 @@ export function App() {
   const handleStartReal = () => {
     fake.stop();
     offline.stop();
+    startSession();
     void realtime.start();
   };
 
@@ -42,6 +46,7 @@ export function App() {
     fake.stop();
     realtime.stop();
     offline.stop();
+    stopSession();
   };
 
   const showRealButton = modeId === 'online_full';
@@ -141,6 +146,7 @@ export function App() {
       </header>
 
       <SettingsPanel open={settingsOpen} />
+      {showRealButton && <RealtimePricingPanel />}
 
       {activeError && (
         <div className="app-error" role="alert">

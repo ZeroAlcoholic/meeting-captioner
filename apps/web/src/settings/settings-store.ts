@@ -130,11 +130,18 @@ export interface SettingsState {
   langPair: LangPair;
   health: Record<HealthComponent, HealthSnapshot>;
   audioLevel: AudioLevelSnapshot | null;
+  /** epoch ms when the current realtime session started; null when not running */
+  sessionStartAt: number | null;
+  /** accumulated ms from all completed sessions (not including the current running one) */
+  sessionElapsedMs: number;
   setScenario: (id: ScenarioId) => void;
   setMode: (id: ModeId) => void;
   setLangPair: (id: LangPair) => void;
   applyHealth: (event: HealthEvent) => void;
   applyAudioLevel: (event: AudioLevelEvent) => void;
+  startSession: () => void;
+  stopSession: () => void;
+  resetSession: () => void;
   reset: () => void;
 }
 
@@ -152,6 +159,8 @@ export function createSettingsStore(): SettingsStore {
     langPair: DEFAULT_LANG_PAIR,
     health: defaultHealth(initialTimestamp),
     audioLevel: null,
+    sessionStartAt: null,
+    sessionElapsedMs: 0,
 
     setScenario: (id) => set({ scenarioId: id }),
     setMode: (id) => set({ modeId: id }),
@@ -174,6 +183,18 @@ export function createSettingsStore(): SettingsStore {
         },
       }),
 
+    startSession: () => set({ sessionStartAt: Date.now() }),
+
+    stopSession: () =>
+      set((state) => ({
+        sessionElapsedMs:
+          state.sessionElapsedMs +
+          (state.sessionStartAt ? Date.now() - state.sessionStartAt : 0),
+        sessionStartAt: null,
+      })),
+
+    resetSession: () => set({ sessionStartAt: null, sessionElapsedMs: 0 }),
+
     reset: () =>
       set({
         scenarioId: DEFAULT_SCENARIO,
@@ -181,6 +202,8 @@ export function createSettingsStore(): SettingsStore {
         langPair: DEFAULT_LANG_PAIR,
         health: defaultHealth(new Date().toISOString()),
         audioLevel: null,
+        sessionStartAt: null,
+        sessionElapsedMs: 0,
       }),
   }));
 }
