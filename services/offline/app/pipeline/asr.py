@@ -182,6 +182,12 @@ class ASRSession:
             logger.exception("Translation failed for segment %s", seg["segment_id"])
 
     async def _audio_forward_loop(self, ws: websockets.WebSocketClientProtocol) -> None:
+        # WHL ignores audio received before SERVER_READY — wait first so buffered
+        # audio captured during model-load is flushed to WHL after it's ready.
+        try:
+            await asyncio.wait_for(self._ready.wait(), timeout=WHL_CONNECT_TIMEOUT)
+        except asyncio.TimeoutError:
+            return
         while not self._closed:
             try:
                 data = await asyncio.wait_for(self._audio_q.get(), timeout=1.0)

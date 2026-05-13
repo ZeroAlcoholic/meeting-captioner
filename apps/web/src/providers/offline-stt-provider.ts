@@ -128,7 +128,11 @@ export class OfflineSTTProvider implements CaptionProvider {
       this.audioCtx = new AudioContext({ sampleRate: 16000 });
       await this.audioCtx.audioWorklet.addModule(PCM_WORKLET_URL);
       const source = this.audioCtx.createMediaStreamSource(this.stream);
-      this.workletNode = new AudioWorkletNode(this.audioCtx, 'pcm-worklet');
+      this.workletNode = new AudioWorkletNode(this.audioCtx, 'pcm-worklet', {
+        channelCount: 1,
+        channelCountMode: 'explicit',
+        channelInterpretation: 'speakers',
+      });
 
       this.workletNode.port.onmessage = (ev: MessageEvent<ArrayBuffer>) => {
         if (this._status !== 'running' || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;

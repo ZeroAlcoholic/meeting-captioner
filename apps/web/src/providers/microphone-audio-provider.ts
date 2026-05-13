@@ -13,7 +13,15 @@ export class MicrophoneAudioProvider implements AudioSource {
   async acquire(onHealth: (e: HealthEvent) => void): Promise<MediaStream> {
     onHealth({ kind: 'health', component: 'audio', state: 'requesting_permission', timestamp: now() });
     try {
-      this.stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      this.stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: { ideal: 1 },
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+        video: false,
+      });
       this.audioCtx = new AudioContext();
       const source = this.audioCtx.createMediaStreamSource(this.stream);
       this.analyser = this.audioCtx.createAnalyser();
