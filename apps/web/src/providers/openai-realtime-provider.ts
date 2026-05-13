@@ -171,6 +171,9 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       case 'session.input_transcript.delta': {
         if (!ev.delta) break;
         this.inputAcc += ev.delta;
+        const meta = LANG_PAIR_META[this.langPair] ?? DEFAULT_META;
+        // Whisper transcribes Mandarin as Simplified Chinese — convert to Traditional for zh-TW source
+        const transcriptText = meta.src === 'zh-TW' ? s2tw(this.inputAcc) : this.inputAcc;
         const t: TranscriptEvent = {
           kind: 'transcript',
           provider: 'openai-realtime',
@@ -178,7 +181,7 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
           source: 'microphone',
           segmentId: this.currentSegmentId,
           status: 'partial',
-          text: this.inputAcc,
+          text: transcriptText,
           startMs: this.startMs,
         };
         this.handlers.onTranscript(t);
@@ -229,6 +232,8 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
   private flushSegment(): void {
     if (!this.inputAcc && !this.outputAcc) return;
     const meta = LANG_PAIR_META[this.langPair] ?? DEFAULT_META;
+    // Apply Traditional Chinese conversion to transcript text when source is zh-TW
+    const transcriptText = meta.src === 'zh-TW' ? s2tw(this.inputAcc) : this.inputAcc;
 
     const t: TranscriptEvent = {
       kind: 'transcript',
@@ -237,7 +242,7 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       source: 'microphone',
       segmentId: this.currentSegmentId,
       status: 'final',
-      text: this.inputAcc,
+      text: transcriptText,
       startMs: this.startMs,
       endMs: Date.now(),
     };
@@ -251,7 +256,7 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
         mode: 'online_full',
         sourceSegmentId: this.currentSegmentId,
         status: 'final',
-        sourceText: this.inputAcc,
+        sourceText: transcriptText,
         targetText,
         sourceLanguage: meta.src,
         targetLanguage: meta.tgt,
