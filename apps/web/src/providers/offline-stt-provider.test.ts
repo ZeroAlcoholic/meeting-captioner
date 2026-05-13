@@ -38,20 +38,28 @@ class MockWebSocket {
   }
 }
 
-// ─── AudioContext / ScriptProcessorNode mock ──────────────────────────────────
+// ─── AudioContext / AudioWorkletNode mock ─────────────────────────────────────
 
-const mockScriptNode = {
-  onaudioprocess: null as ((ev: AudioProcessingEvent) => void) | null,
+const mockWorkletPort = {
+  onmessage: null as ((ev: MessageEvent<ArrayBuffer>) => void) | null,
+  close: vi.fn(),
+};
+
+const mockWorkletNode = {
+  port: mockWorkletPort,
   connect: vi.fn(),
   disconnect: vi.fn(),
+};
+
+const mockAudioWorklet = {
+  addModule: vi.fn().mockResolvedValue(undefined),
 };
 
 const mockSource = { connect: vi.fn() };
 
 const mockAudioCtx = {
+  audioWorklet: mockAudioWorklet,
   createMediaStreamSource: vi.fn().mockReturnValue(mockSource),
-  createScriptProcessor: vi.fn().mockReturnValue(mockScriptNode),
-  destination: {},
   close: vi.fn().mockResolvedValue(undefined),
 };
 
@@ -82,12 +90,11 @@ function makeHandlers(): CaptionProviderHandlers {
 /** Flush one microtask tick — lets mic.acquire() resolve so WebSocket is constructed. */
 const flush = () => Promise.resolve();
 
-/** Start provider, flush so WS is constructed, then fire SERVER_READY. */
+/** Start provider, flush so WS is constructed, then fire onopen. */
 async function startProvider(provider: OfflineSTTProvider) {
   const startPromise = provider.start();
   await flush();
   mockWsInstance!.simulateOpen();
-  mockWsInstance!.simulateMessage({ uid: 'x', message: 'SERVER_READY' });
   await startPromise;
 }
 
@@ -97,11 +104,13 @@ beforeEach(() => {
   mockWsInstance = null;
   vi.stubGlobal('WebSocket', MockWebSocket);
   vi.stubGlobal('AudioContext', vi.fn().mockReturnValue(mockAudioCtx));
+  vi.stubGlobal('AudioWorkletNode', vi.fn().mockReturnValue(mockWorkletNode));
   mockSource.connect.mockClear();
-  mockScriptNode.connect.mockClear();
-  mockScriptNode.disconnect.mockClear();
+  mockWorkletNode.connect.mockClear();
+  mockWorkletNode.disconnect.mockClear();
+  mockWorkletPort.close.mockClear();
+  mockAudioWorklet.addModule.mockClear();
   mockAudioCtx.createMediaStreamSource.mockClear();
-  mockAudioCtx.createScriptProcessor.mockClear();
 });
 
 afterEach(() => {
@@ -111,93 +120,135 @@ afterEach(() => {
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 describe('OfflineSTTProvider', () => {
-  it('emits health connecting then connected on successful start', async () => {
+  it('sends start control message with langPair on open', async () => {
     const handlers = makeHandlers();
-    const provider = new OfflineSTTProvider('ws://localhost:9090', handlers, makeMicMock());
+    const provider = new OfflineSTTProvider('ws://localhost:8000/ws', handlers, makeMicMock(), 'en→zh-TW');
 
     await startProvider(provider);
+
+    const jsonSent = mockWsInstance!.sent.find((s) => typeof s === 'string') as string;
+    const ctrl = JSON.parse(jsonSent) as { type: string; langPair: string };
+    expect(ctrl.type).toBe('start');
+    expect(ctrl.langPair).toBe('en→zh-TW');
+  });
+
+  it('emits health connecting before WebSocket opens', async () => {
+    const handlers = makeHandlers();
+    const provider = new OfflineSTTProvider('ws://localhost:8000/ws', handlers, makeMicMock());
+
+    const startPromise = provider.start();
+    await flush();
+    mockWsInstance!.simulateOpen();
+    await startPromise;
 
     const states = (handlers.onHealth as ReturnType<typeof vi.fn>).mock.calls.map(
       (c) => (c[0] as { state: string }).state,
     );
     expect(states).toContain('connecting');
-    expect(states).toContain('connected');
   });
 
-  it('sends uid+config JSON after WebSocket opens', async () => {
+  it('routes transcript events to onTranscript handler', async () => {
     const handlers = makeHandlers();
-    const provider = new OfflineSTTProvider('ws://localhost:9090', handlers, makeMicMock());
-
-    await startProvider(provider);
-
-    const jsonSent = mockWsInstance!.sent.find((s) => typeof s === 'string') as string;
-    const config = JSON.parse(jsonSent) as { language: string; task: string; model: string };
-    expect(config.language).toBe('en');
-    expect(config.task).toBe('transcribe');
-    expect(config.model).toBe('small');
-  });
-
-  it('emits partial TranscriptEvent for non-completed segment', async () => {
-    const handlers = makeHandlers();
-    const provider = new OfflineSTTProvider('ws://localhost:9090', handlers, makeMicMock());
+    const provider = new OfflineSTTProvider('ws://localhost:8000/ws', handlers, makeMicMock());
 
     await startProvider(provider);
 
     mockWsInstance!.simulateMessage({
-      uid: 'x',
-      segments: [{ start: 0, end: 1.5, text: 'Hello world', completed: false }],
+      kind: 'transcript',
+      provider: 'offline-stt',
+      mode: 'full_offline',
+      source: 'microphone',
+      segmentId: 'seg-1000',
+      status: 'partial',
+      text: 'Hello world',
+      startMs: 1000,
     });
 
     const call = (handlers.onTranscript as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as {
       status: string;
       text: string;
-      provider: string;
+      kind: string;
     };
+    expect(call.kind).toBe('transcript');
     expect(call.status).toBe('partial');
     expect(call.text).toBe('Hello world');
-    expect(call.provider).toBe('offline-stt');
   });
 
-  it('emits final TranscriptEvent for completed segment', async () => {
+  it('routes final transcript events correctly', async () => {
     const handlers = makeHandlers();
-    const provider = new OfflineSTTProvider('ws://localhost:9090', handlers, makeMicMock());
+    const provider = new OfflineSTTProvider('ws://localhost:8000/ws', handlers, makeMicMock());
 
     await startProvider(provider);
 
     mockWsInstance!.simulateMessage({
-      uid: 'x',
-      segments: [{ start: 0, end: 2.0, text: 'Final text.', completed: true }],
+      kind: 'transcript',
+      provider: 'offline-stt',
+      mode: 'full_offline',
+      source: 'microphone',
+      segmentId: 'seg-500',
+      status: 'final',
+      text: 'Final text.',
+      startMs: 500,
+      endMs: 2000,
     });
 
     const finalCall = (handlers.onTranscript as ReturnType<typeof vi.fn>).mock.calls.find(
       (c) => (c[0] as { status: string }).status === 'final',
     )?.[0] as { status: string; text: string };
     expect(finalCall?.text).toBe('Final text.');
-    expect(finalCall?.status).toBe('final');
   });
 
-  it('does not re-emit a completed segment already finalized', async () => {
+  it('routes translation events to onTranslation handler', async () => {
     const handlers = makeHandlers();
-    const provider = new OfflineSTTProvider('ws://localhost:9090', handlers, makeMicMock());
+    const provider = new OfflineSTTProvider('ws://localhost:8000/ws', handlers, makeMicMock());
 
     await startProvider(provider);
 
-    const seg = { start: 0, end: 2.0, text: 'Once only.', completed: true };
-    mockWsInstance!.simulateMessage({ uid: 'x', segments: [seg] });
-    mockWsInstance!.simulateMessage({ uid: 'x', segments: [seg] });
+    mockWsInstance!.simulateMessage({
+      kind: 'translation',
+      provider: 'offline-mt',
+      mode: 'full_offline',
+      sourceSegmentId: 'seg-500',
+      status: 'final',
+      sourceText: 'Final text.',
+      targetText: '最終文字。',
+      sourceLanguage: 'en',
+      targetLanguage: 'zh-TW',
+      updatedAt: new Date().toISOString(),
+    });
 
-    const finalCalls = (handlers.onTranscript as ReturnType<typeof vi.fn>).mock.calls.filter(
-      (c) => (c[0] as { status: string }).status === 'final',
+    expect(handlers.onTranslation).toHaveBeenCalledOnce();
+    const call = (handlers.onTranslation as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as {
+      targetText: string;
+    } | undefined;
+    expect(call?.targetText).toBe('最終文字。');
+  });
+
+  it('routes health events to onHealth handler', async () => {
+    const handlers = makeHandlers();
+    const provider = new OfflineSTTProvider('ws://localhost:8000/ws', handlers, makeMicMock());
+
+    await startProvider(provider);
+
+    mockWsInstance!.simulateMessage({
+      kind: 'health',
+      component: 'transport',
+      state: 'connected',
+      timestamp: new Date().toISOString(),
+    });
+
+    const states = (handlers.onHealth as ReturnType<typeof vi.fn>).mock.calls.map(
+      (c) => (c[0] as { state: string }).state,
     );
-    expect(finalCalls).toHaveLength(1);
+    expect(states).toContain('connected');
   });
 
   it('emits api_error health event when WebSocket errors', async () => {
     const handlers = makeHandlers();
-    const provider = new OfflineSTTProvider('ws://localhost:9090', handlers, makeMicMock());
+    const provider = new OfflineSTTProvider('ws://localhost:8000/ws', handlers, makeMicMock());
 
     const startPromise = provider.start();
-    await flush(); // let mic.acquire() resolve → WS is now constructed
+    await flush();
     mockWsInstance!.onerror?.();
 
     await startPromise.catch(() => undefined);
@@ -210,7 +261,7 @@ describe('OfflineSTTProvider', () => {
 
   it('stop() emits stopped health events and closes WebSocket', async () => {
     const handlers = makeHandlers();
-    const provider = new OfflineSTTProvider('ws://localhost:9090', handlers, makeMicMock());
+    const provider = new OfflineSTTProvider('ws://localhost:8000/ws', handlers, makeMicMock());
 
     await startProvider(provider);
 

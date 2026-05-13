@@ -1,0 +1,21 @@
+# Insurance / meeting domain glossary
+# Format: en<tab>zh-TW[<tab>domain]
+# Lines starting with # are ignored.
+
+deductible	自負額	保險
+premium	保費	保險
+beneficiary	受益人	保險
+policyholder	要保人	保險
+insured	被保險人	保險
+claim	理賠	保險
+coverage	保障範圍	保險
+policy	保單	保險
+rider	附約	保險
+endorsement	批單	保險
+underwriting	核保	保險
+reinsurance	再保險	保險
+indemnity	賠償金	保險
+exclusion	不保事項	保險
+surrender value	解約金	保險
+cash value	保單價值準備金	保險
+annuity	年金	保險
