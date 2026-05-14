@@ -20,6 +20,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__
+from app.capture import wasapi_loopback as _wasapi
 from app.pipeline import translation as _mt
 from app.pipeline.asr import ASRSession, WHL_MODEL
 from app.pipeline.postprocess import _GLOSSARY
@@ -153,6 +154,7 @@ async def ws_pipeline(ws: WebSocket) -> None:
         return
 
     lang_pair: str = control.get("langPair", "en→zh-TW")
+    source: str = control.get("source", "mic")  # "mic" | "system"
     session = ASRSession(lang_pair=lang_pair)
 
     # Start background task: connect to WHL + produce events
@@ -175,13 +177,20 @@ async def ws_pipeline(ws: WebSocket) -> None:
 
     send_task = asyncio.create_task(forward_events())
 
+    # WASAPI loopback task — only when source='system'
+    wasapi_stop = asyncio.Event()
+    wasapi_task: asyncio.Task | None = None
+    if source == "system":
+        wasapi_task = asyncio.create_task(_wasapi.stream_to_session(session, wasapi_stop))
+
     try:
         while True:
             msg = await ws.receive()
             if msg["type"] == "websocket.disconnect":
                 break
             if msg["type"] == "websocket.receive":
-                if msg.get("bytes"):
+                # Only forward browser PCM when source='mic'
+                if msg.get("bytes") and source == "mic":
                     await session.push_audio(msg["bytes"])
                 elif msg.get("text"):
                     try:
@@ -193,6 +202,13 @@ async def ws_pipeline(ws: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     finally:
+        wasapi_stop.set()
+        if wasapi_task is not None:
+            wasapi_task.cancel()
+            try:
+                await wasapi_task
+            except (asyncio.CancelledError, Exception):
+                pass
         await session.close()
         asr_task.cancel()
         send_task.cancel()

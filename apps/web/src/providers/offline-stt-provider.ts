@@ -36,6 +36,7 @@ export class OfflineSTTProvider implements CaptionProvider {
     private readonly handlers: CaptionProviderHandlers,
     mic?: AudioSource,
     private readonly langPair: string = 'en→zh-TW',
+    private readonly audioSource: 'mic' | 'system' = 'mic',
   ) {
     this.mic = mic ?? new MicrophoneAudioProvider();
   }
@@ -49,11 +50,15 @@ export class OfflineSTTProvider implements CaptionProvider {
     this._status = 'running';
 
     try {
-      this.stream = await this.mic.acquire(this.handlers.onHealth);
+      if (this.audioSource === 'mic') {
+        this.stream = await this.mic.acquire(this.handlers.onHealth);
+      }
       this.emitHealth('transport', 'connecting');
       await this.connectWebSocket();
-      await this.startAudioCapture();
-      this.startLevelPolling();
+      if (this.audioSource === 'mic') {
+        await this.startAudioCapture();
+        this.startLevelPolling();
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unknown error starting offline STT';
       this.emitHealth('transport', 'api_error', message);
@@ -82,8 +87,7 @@ export class OfflineSTTProvider implements CaptionProvider {
       }, 15000);
 
       ws.onopen = () => {
-        // Send start control message — services/offline pipeline speaks our protocol
-        ws.send(JSON.stringify({ type: 'start', langPair: this.langPair }));
+        ws.send(JSON.stringify({ type: 'start', langPair: this.langPair, source: this.audioSource }));
         clearTimeout(timeout);
         resolve();
       };
@@ -195,7 +199,7 @@ export class OfflineSTTProvider implements CaptionProvider {
     this.audioCtx = null;
     this.ws?.close();
     this.ws = null;
-    this.mic.release();
+    if (this.audioSource === 'mic') this.mic.release();
     this.stream = null;
   }
 

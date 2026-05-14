@@ -34,14 +34,14 @@ export function useOfflineSTT() {
     setError(null);
     captionStore.getState().clear();
 
-    const { langPair } = settingsStore.getState();
+    const { langPair, audioSource } = settingsStore.getState();
 
     const provider = new OfflineSTTProvider(WS_URL, {
       onTranscript: (e) => captionStore.getState().applyTranscript(e),
       onTranslation: (e) => captionStore.getState().applyTranslation(e),
       onHealth: (e) => settingsStore.getState().applyHealth(e),
       onAudioLevel: (e) => settingsStore.getState().applyAudioLevel(e),
-    }, undefined, langPair);
+    }, undefined, langPair, audioSource);
     providerRef.current = provider;
     setStatus('running');
 

@@ -13,6 +13,7 @@ dependencies = [
     "ctranslate2>=4.7.1",
     "sentencepiece>=0.2.1",
     "opencc-python-reimplemented>=0.1.7",
+    "pyaudiowpatch>=0.2.12.8",
 ]
 
 [dependency-groups]

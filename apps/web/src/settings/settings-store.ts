@@ -10,6 +10,7 @@ import { createStore, type StoreApi } from 'zustand/vanilla';
 export type ScenarioId = 'physical' | 'online_meeting_box' | 'hybrid' | 'advanced';
 export type ModeId = 'online_full' | 'hybrid_privacy' | 'full_offline';
 export type LangPair = 'en→zh-TW' | 'zh-TW→en';
+export type OfflineAudioSource = 'mic' | 'system';
 
 export const LANG_PAIR_OPTIONS: Array<{ id: LangPair; label: string; hint: string }> = [
   { id: 'en→zh-TW', label: 'EN → 繁中', hint: 'English speech → Traditional Chinese captions' },
@@ -128,6 +129,7 @@ export interface SettingsState {
   scenarioId: ScenarioId;
   modeId: ModeId;
   langPair: LangPair;
+  audioSource: OfflineAudioSource;
   health: Record<HealthComponent, HealthSnapshot>;
   audioLevel: AudioLevelSnapshot | null;
   /** epoch ms when the current realtime session started; null when not running */
@@ -137,6 +139,7 @@ export interface SettingsState {
   setScenario: (id: ScenarioId) => void;
   setMode: (id: ModeId) => void;
   setLangPair: (id: LangPair) => void;
+  setAudioSource: (s: OfflineAudioSource) => void;
   applyHealth: (event: HealthEvent) => void;
   applyAudioLevel: (event: AudioLevelEvent) => void;
   startSession: () => void;
@@ -157,6 +160,7 @@ export function createSettingsStore(): SettingsStore {
     scenarioId: DEFAULT_SCENARIO,
     modeId: DEFAULT_MODE,
     langPair: DEFAULT_LANG_PAIR,
+    audioSource: 'mic',
     health: defaultHealth(initialTimestamp),
     audioLevel: null,
     sessionStartAt: null,
@@ -165,6 +169,7 @@ export function createSettingsStore(): SettingsStore {
     setScenario: (id) => set({ scenarioId: id }),
     setMode: (id) => set({ modeId: id }),
     setLangPair: (id) => set({ langPair: id }),
+    setAudioSource: (audioSource) => set({ audioSource }),
 
     applyHealth: (event) =>
       set((state) => {
@@ -200,6 +205,7 @@ export function createSettingsStore(): SettingsStore {
         scenarioId: DEFAULT_SCENARIO,
         modeId: DEFAULT_MODE,
         langPair: DEFAULT_LANG_PAIR,
+        audioSource: 'mic',
         health: defaultHealth(new Date().toISOString()),
         audioLevel: null,
         sessionStartAt: null,

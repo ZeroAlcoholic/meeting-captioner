@@ -135,6 +135,11 @@ class ASRSession:
             except asyncio.QueueFull:
                 pass
 
+    async def push_event(self, event: dict) -> None:
+        """Enqueue an externally produced event (e.g., WASAPI health) for the browser."""
+        if not self._closed:
+            await self._put(event)
+
     async def next_event(self) -> dict | None:
         """Return next event for browser, or None (sentinel = session ended)."""
         return await self._event_q.get()
