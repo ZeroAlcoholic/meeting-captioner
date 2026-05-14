@@ -1,4 +1,5 @@
 import type {
+  AudioLevelEvent,
   HealthEvent,
   TranscriptEvent,
   TranslationEvent,
@@ -28,6 +29,7 @@ export class OfflineSTTProvider implements CaptionProvider {
   private audioCtx: AudioContext | null = null;
   private workletNode: AudioWorkletNode | null = null;
   private stream: MediaStream | null = null;
+  private levelInterval: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     private readonly wsUrl: string,
@@ -51,6 +53,7 @@ export class OfflineSTTProvider implements CaptionProvider {
       this.emitHealth('transport', 'connecting');
       await this.connectWebSocket();
       await this.startAudioCapture();
+      this.startLevelPolling();
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unknown error starting offline STT';
       this.emitHealth('transport', 'api_error', message);
@@ -152,7 +155,39 @@ export class OfflineSTTProvider implements CaptionProvider {
     }
   }
 
+  private startLevelPolling(): void {
+    const analyser = (this.mic as MicrophoneAudioProvider).analyser;
+    if (!analyser) return;
+    const buf = new Float32Array(analyser.fftSize);
+    let peakDb = -60;
+    let peakHoldUntil = 0;
+    this.levelInterval = setInterval(() => {
+      if (this._status !== 'running') return;
+      analyser.getFloatTimeDomainData(buf);
+      const sumSq = buf.reduce((s, x) => s + x * x, 0);
+      const rms = Math.sqrt(sumSq / buf.length);
+      const rmsDb = Math.max(-60, 20 * Math.log10(Math.max(rms, 1e-10)));
+      const now = Date.now();
+      if (rmsDb > peakDb || now > peakHoldUntil) {
+        peakDb = rmsDb;
+        peakHoldUntil = now + 2000;
+      }
+      const ev: AudioLevelEvent = {
+        kind: 'audio_level',
+        source: 'microphone',
+        rmsDb,
+        peakDb,
+        timestamp: iso(),
+      };
+      this.handlers.onAudioLevel(ev);
+    }, 100);
+  }
+
   private cleanup(): void {
+    if (this.levelInterval !== null) {
+      clearInterval(this.levelInterval);
+      this.levelInterval = null;
+    }
     this.workletNode?.disconnect();
     this.workletNode?.port.close();
     void this.audioCtx?.close();

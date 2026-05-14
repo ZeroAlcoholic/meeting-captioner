@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import uuid
 
 import websockets
@@ -16,16 +17,23 @@ from .stabilizer import SegmentStabilizer
 logger = logging.getLogger(__name__)
 
 WHL_WS_URL = "ws://localhost:9090/"
-# small.en: RTF ~0.3x (fast). medium.en: RTF ~1.4x for 3s clips (too slow). distil-large-v3 needs download.
-WHL_MODEL = "small.en"
+WHL_MODEL = os.environ.get("WHL_MODEL", "distil-large-v3")
 WHL_CONNECT_TIMEOUT = 30.0
 
-# Meeting-context prompt primes Whisper's decoder — reduces hallucination and improves proper noun recognition.
-# VAD threshold 0.3 (vs default 0.5) catches softer/distant speech; shorter silence avoids cutting words.
-_INITIAL_PROMPT = (
-    "This is a business meeting. The speaker discusses project plans, "
-    "budgets, timelines, and action items. Technical terms and names may appear."
-)
+MIN_WORDS_TO_TRANSLATE = 3
+
+# Language-aware prompts prime Whisper's decoder for domain vocabulary.
+# VAD threshold 0.3 catches softer/distant speech; shorter silence avoids cutting words.
+_INITIAL_PROMPTS: dict[str, str] = {
+    "en": (
+        "This is a business meeting. The speaker discusses project plans, budgets, timelines, "
+        "and action items. Terms include policyholder, underwriting, premium, claim, beneficiary."
+    ),
+    "zh": (
+        "這是一場商務會議。講者討論專案計畫、預算、時程與行動項目。"
+        "術語包含要保人、核保、保費、理賠、受益人、附約、健康告知。"
+    ),
+}
 _VAD_PARAMETERS = {
     "threshold": 0.3,
     "min_speech_duration_ms": 200,
@@ -69,7 +77,7 @@ class ASRSession:
                             "task": "transcribe",
                             "model": WHL_MODEL,
                             "use_vad": True,
-                            "initial_prompt": _INITIAL_PROMPT,
+                            "initial_prompt": _INITIAL_PROMPTS.get(self._language, _INITIAL_PROMPTS["en"]),
                             "vad_parameters": _VAD_PARAMETERS,
                         }
                     )
@@ -169,10 +177,13 @@ class ASRSession:
 
     async def _do_translate(self, seg: dict) -> None:
         """Fire-and-forget translation task — runs outside recv_loop."""
+        text = seg["text"].strip()
+        if len(text.split()) < MIN_WORDS_TO_TRANSLATE:
+            return
         try:
             translation_ev = await mt.translate(
                 segment_id=seg["segment_id"],
-                text=seg["text"],
+                text=text,
                 source_language=self._language,
                 target_language="zh-TW" if self._language == "en" else "en",
             )

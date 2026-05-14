@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .events import translation_event
-from .postprocess import process as postprocess
+from .postprocess import apply_source_glossary, process as postprocess, restore_placeholders
 
 logger = logging.getLogger(__name__)
 
@@ -96,9 +96,12 @@ async def translate(
     if not ok:
         return None
     try:
-        raw = await loop.run_in_executor(_executor, _translate_sync, text)
+        masked_text, mappings = apply_source_glossary(text)
+        raw = await loop.run_in_executor(_executor, _translate_sync, masked_text)
         if not raw:
             return None
+        if mappings:
+            raw = restore_placeholders(raw, mappings)
         polished = postprocess(raw)
         return translation_event(
             source_segment_id=segment_id,
