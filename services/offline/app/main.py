@@ -1,8 +1,14 @@
-"""FastAPI entrypoint for the offline service."""
+"""FastAPI entrypoint for the offline service.
+
+Architecture (Phase B): WhisperLiveKit runs as an **independent process** on port 9090.
+This service probes the port every 5 s and reflects status in /healthz.
+Start both processes via services/offline/start.bat (Windows) or start.sh (Linux/macOS).
+"""
+
+from __future__ import annotations
 
 import asyncio
 import os
-import threading
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
@@ -14,49 +20,73 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__
-from app.pipeline.asr import ASRSession
+from app.pipeline import translation as _mt
+from app.pipeline.asr import ASRSession, WHL_MODEL
+from app.pipeline.postprocess import _GLOSSARY
 
-try:
-    from whisper_live.server import TranscriptionServer as _TranscriptionServer
+_WHL_HOST = "127.0.0.1"
+_WHL_PORT = 9090
+_WHL_PROBE_INTERVAL = 5.0   # seconds between liveness probes
+_WHL_PROBE_TIMEOUT = 1.5    # seconds per probe attempt
 
-    _WHISPER_LIVE_AVAILABLE = True
-except ImportError:
-    _WHISPER_LIVE_AVAILABLE = False
-    _TranscriptionServer = None  # type: ignore[assignment,misc]
-
-_whisper_status: str = "unavailable" if not _WHISPER_LIVE_AVAILABLE else "starting"
-_whisper_error: str | None = None if _WHISPER_LIVE_AVAILABLE else "whisper-live not installed"
+# Module-level status — mutated only by _whl_probe_loop (background task).
+# Tests may patch these directly.
+_whisper_status: str = "probing"
+_whisper_error: str | None = None
 
 
-def _run_whisper_server() -> None:
-    global _whisper_status, _whisper_error
+async def _probe_whl_once() -> bool:
+    """TCP-level liveness check — returns True if WHL port is accepting connections."""
     try:
-        _whisper_status = "loading"
-        server = _TranscriptionServer()
-        _whisper_status = "ready"
-        # Blocking — exits only if the server crashes.
-        # language=None: each client specifies its own language in the WS config message.
-        # model/language/task are specified per-client in the WebSocket config message
-        server.run("0.0.0.0", port=9090, backend="faster_whisper")
-        _whisper_status = "stopped"
-    except Exception as exc:
-        _whisper_status = "failed"
-        _whisper_error = str(exc)
+        _, writer = await asyncio.wait_for(
+            asyncio.open_connection(_WHL_HOST, _WHL_PORT),
+            timeout=_WHL_PROBE_TIMEOUT,
+        )
+        writer.close()
+        await writer.wait_closed()
+        return True
+    except Exception:
+        return False
+
+
+async def _whl_probe_loop() -> None:
+    """Background task: probe WHL port and update module-level status every 5 s."""
+    global _whisper_status, _whisper_error
+    while True:
+        try:
+            reachable = await _probe_whl_once()
+            if reachable:
+                _whisper_status = "ready"
+                _whisper_error = None
+            else:
+                _whisper_status = "unavailable"
+                _whisper_error = (
+                    f"WhisperLiveKit not reachable on port {_WHL_PORT} — "
+                    "start it separately (see start.bat / start.sh)"
+                )
+        except Exception as exc:
+            _whisper_status = "unavailable"
+            _whisper_error = str(exc)
+        await asyncio.sleep(_WHL_PROBE_INTERVAL)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    if _WHISPER_LIVE_AVAILABLE:
-        thread = threading.Thread(target=_run_whisper_server, daemon=True, name="whisper-live")
-        thread.start()
-    yield
-    # daemon thread exits with the process — no explicit cleanup needed
+    task = asyncio.create_task(_whl_probe_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(
     title="meeting-audio offline service",
     version=__version__,
-    description="Local STT/MT bridge — P3: WhisperLive + translation pipeline.",
+    description="Local STT/MT bridge — WhisperLiveKit (external) + CTranslate2 translation.",
     lifespan=lifespan,
 )
 
@@ -70,13 +100,36 @@ app.add_middleware(
 
 @app.get("/healthz")
 async def healthz() -> dict[str, object]:
+    mt_ok = _mt.is_available()
+    asr_ok = _whisper_status == "ready"
     return {
-        "ok": _whisper_status == "ready",
+        # Top-level summary — both ASR and translation must be ready
+        "ok": asr_ok and mt_ok,
         "service": "offline",
         "version": __version__,
+        "timestamp": datetime.now(UTC).isoformat(),
+        # Legacy flat fields kept for browser compatibility
         "whisper_status": _whisper_status,
         "whisper_error": _whisper_error,
-        "timestamp": datetime.now(UTC).isoformat(),
+        # Structured component breakdown — used by UI health panel
+        "components": {
+            "asr": {
+                "engine": "whisperlivekit",
+                "model": WHL_MODEL,
+                "status": _whisper_status,
+                "port": _WHL_PORT,
+                "error": _whisper_error,
+            },
+            "translation": {
+                "engine": "opus-mt-en-zh-ct2",
+                "status": "ready" if mt_ok else "model_not_downloaded",
+                "glossary_terms": len(_GLOSSARY),
+            },
+            "audio": {
+                "mic": "available",
+                "system_loopback": "not_implemented",
+            },
+        },
     }
 
 
