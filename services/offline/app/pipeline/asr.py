@@ -20,7 +20,8 @@ WHL_WS_URL = "ws://localhost:9090/"
 WHL_MODEL = os.environ.get("WHL_MODEL", "distil-large-v3")
 WHL_CONNECT_TIMEOUT = 30.0
 
-MIN_WORDS_TO_TRANSLATE = 3
+MIN_WORDS_TO_TRANSLATE = 3   # minimum space-separated tokens (en source)
+MIN_ZH_CHARS = 4             # minimum CJK characters (zh source — no word spaces)
 
 # Language-aware prompts prime Whisper's decoder for domain vocabulary.
 # VAD threshold 0.3 catches softer/distant speech; shorter silence avoids cutting words.
@@ -183,7 +184,12 @@ class ASRSession:
     async def _do_translate(self, seg: dict) -> None:
         """Fire-and-forget translation task — runs outside recv_loop."""
         text = seg["text"].strip()
-        if len(text.split()) < MIN_WORDS_TO_TRANSLATE:
+        if self._language == "zh":
+            # Chinese has no whitespace word separators — count CJK characters instead.
+            cjk_chars = sum(1 for c in text if "一" <= c <= "鿿")
+            if cjk_chars < MIN_ZH_CHARS:
+                return
+        elif len(text.split()) < MIN_WORDS_TO_TRANSLATE:
             return
         try:
             translation_ev = await mt.translate(

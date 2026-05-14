@@ -67,10 +67,13 @@ async def test_healthz_components_structure() -> None:
     assert "status" in comps["asr"]
     assert "port" in comps["asr"]
 
-    # Translation component
-    assert comps["translation"]["engine"] == "opus-mt-en-zh-ct2"
-    assert comps["translation"]["status"] in ("ready", "model_not_downloaded")
-    assert isinstance(comps["translation"]["glossary_terms"], int)
+    # Translation component — bidirectional
+    mt = comps["translation"]
+    assert mt["en_zh"]["engine"] == "opus-mt-en-zh-ct2"
+    assert mt["en_zh"]["status"] in ("ready", "model_not_downloaded")
+    assert mt["zh_en"]["engine"] == "opus-mt-zh-en-ct2"
+    assert mt["zh_en"]["status"] in ("ready", "model_not_downloaded")
+    assert isinstance(mt["glossary_terms"], int)
 
     # Audio component
     assert comps["audio"]["mic"] == "available"
@@ -90,11 +93,10 @@ async def test_healthz_asr_model_name_matches_env() -> None:
 
 
 async def test_healthz_glossary_terms_count() -> None:
-    """Glossary term count in healthz must be positive when glossary.tsv is present."""
+    """Glossary term count in healthz must be ≥ 50 after P4 expansion."""
     with patch("app.main._whisper_status", "ready"):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.get("/healthz")
     body = response.json()
-    # glossary.tsv has 16 insurance terms — count must be > 0
-    assert body["components"]["translation"]["glossary_terms"] > 0
+    assert body["components"]["translation"]["glossary_terms"] >= 50

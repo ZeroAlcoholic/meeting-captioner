@@ -122,8 +122,14 @@ async def healthz() -> dict[str, object]:
                 "error": _whisper_error,
             },
             "translation": {
-                "engine": "opus-mt-en-zh-ct2",
-                "status": "ready" if mt_ok else "model_not_downloaded",
+                "en_zh": {
+                    "engine": "opus-mt-en-zh-ct2",
+                    "status": "ready" if mt_ok else "model_not_downloaded",
+                },
+                "zh_en": {
+                    "engine": "opus-mt-zh-en-ct2",
+                    "status": "ready" if _mt.is_available("zh") else "model_not_downloaded",
+                },
                 "glossary_terms": len(_GLOSSARY),
             },
             "audio": {

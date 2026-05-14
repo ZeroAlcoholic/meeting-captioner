@@ -1,10 +1,10 @@
-"""Translation worker: Helsinki-NLP/opus-mt-en-zh via CTranslate2 + OpenCC post-processing.
+"""Translation: bidirectional en↔zh-TW via CTranslate2 + OpenCC post-processing.
 
-Install:
-    uv add ctranslate2 sentencepiece opencc-python-reimplemented
-    python -m app.pipeline.translation --download   # downloads model to models/opus-mt-en-zh-ct2/
+en→zh-TW  Helsinki-NLP/opus-mt-en-zh  →  models/opus-mt-en-zh-ct2  (already present)
+zh-TW→en  Helsinki-NLP/opus-mt-zh-en  →  models/opus-mt-zh-en-ct2  (download separately)
 
-If ctranslate2 is not installed the worker silently disables itself and emits nothing.
+Download zh→en model (one-time):
+    uv run python scripts/download_zh_en.py
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .events import translation_event
-from .postprocess import apply_source_glossary, process as postprocess, restore_placeholders
+from .postprocess import apply_source_glossary, process as postprocess_zh, restore_placeholders
 
 logger = logging.getLogger(__name__)
 
@@ -29,56 +29,82 @@ except ImportError:
     ctranslate2 = None  # type: ignore[assignment]
     spm = None  # type: ignore[assignment]
 
-MODEL_DIR = Path(__file__).parent.parent.parent / "models" / "opus-mt-en-zh-ct2"
-SPM_MODEL = MODEL_DIR / "source.spm"
+_MODELS_DIR = Path(__file__).parent.parent.parent / "models"
+_EN_ZH_DIR = _MODELS_DIR / "opus-mt-en-zh-ct2"
+_ZH_EN_DIR = _MODELS_DIR / "opus-mt-zh-en-ct2"
 
-# >>cmn_Hant<< target token requests Traditional Chinese output directly
+# Helsinki opus-mt-en-zh uses a shared vocabulary; the >>lang<< token selects target script.
 ZH_HANT_TOKEN = ">>cmn_Hant<<"
 
-_translator: object | None = None
-_sp: object | None = None
+# Per-direction model singletons.  Keyed by "en" or "zh".
+_translators: dict[str, object] = {}
+_src_sps: dict[str, object] = {}   # SentencePiece for source encoding
+_tgt_sps: dict[str, object] = {}   # SentencePiece for target decoding (may equal _src_sps[d])
+
 _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mt-worker")
 
 
-def is_available() -> bool:
-    return CT2_AVAILABLE and MODEL_DIR.exists() and SPM_MODEL.exists()
+def _model_dir(direction: str) -> Path:
+    return _EN_ZH_DIR if direction == "en" else _ZH_EN_DIR
 
 
-def _load_once() -> bool:
-    """Load model into module-level singletons. Returns True if ready."""
-    global _translator, _sp
-    if _translator is not None:
+def is_available(source_language: str = "en") -> bool:
+    """True if the model for this source language is installed and CT2 is importable."""
+    d = "en" if source_language == "en" else "zh"
+    mdir = _model_dir(d)
+    return CT2_AVAILABLE and mdir.exists() and (mdir / "source.spm").exists()
+
+
+def _load_once(direction: str) -> bool:
+    """Lazy-load model for *direction*. Thread-safe for reads after first load."""
+    if direction in _translators:
         return True
-    if not is_available():
+    mdir = _model_dir(direction)
+    if not is_available(direction):
         return False
     try:
-        _translator = ctranslate2.Translator(
-            str(MODEL_DIR),
+        _translators[direction] = ctranslate2.Translator(
+            str(mdir),
             device="cpu",
             inter_threads=1,
             intra_threads=2,
             compute_type="int8",
         )
-        _sp = spm.SentencePieceProcessor()
-        _sp.Load(str(SPM_MODEL))
-        logger.info("opus-mt-en-zh CTranslate2 model loaded")
+        src_sp = spm.SentencePieceProcessor()
+        src_sp.Load(str(mdir / "source.spm"))
+        _src_sps[direction] = src_sp
+
+        # Some opus-mt models (e.g. zh-en) ship separate source/target SPMs after CT2
+        # conversion.  Fall back to source SPM when only a shared vocabulary is present.
+        tgt_spm_path = mdir / "target.spm"
+        if tgt_spm_path.exists():
+            tgt_sp = spm.SentencePieceProcessor()
+            tgt_sp.Load(str(tgt_spm_path))
+            _tgt_sps[direction] = tgt_sp
+        else:
+            _tgt_sps[direction] = src_sp
+
+        logger.info("MT model loaded: %s", mdir.name)
         return True
     except Exception:
-        logger.exception("Failed to load opus-mt-en-zh model")
+        logger.exception("Failed to load MT model (direction=%s)", direction)
         return False
 
 
-def _translate_sync(source_text: str, target_lang_token: str = ZH_HANT_TOKEN) -> str:
-    """Blocking translate call — run in executor to avoid blocking event loop."""
-    if _translator is None or _sp is None:
+def _translate_sync(source_text: str, direction: str) -> str:
+    """Blocking translate — must run inside the single MT executor thread."""
+    translator = _translators.get(direction)
+    src_sp = _src_sps.get(direction)
+    tgt_sp = _tgt_sps.get(direction)
+    if translator is None or src_sp is None or tgt_sp is None:
         return ""
-    tokens = _sp.EncodeAsPieces(source_text)
-    tokens = [target_lang_token] + list(tokens)
-    results = _translator.translate_batch([tokens])
+    tokens = list(src_sp.EncodeAsPieces(source_text))
+    if direction == "en":
+        # Prepend target-language token to steer decoder toward Traditional Chinese.
+        tokens = [ZH_HANT_TOKEN] + tokens
+    results = translator.translate_batch([tokens])
     out_tokens = results[0].hypotheses[0]
-    text = _sp.DecodePieces(out_tokens)
-    # Replace SentencePiece boundary markers (▁) — lstrip only removes from the start,
-    # but ▁ can appear mid-text (e.g. "你好▁我叫約翰").
+    text = tgt_sp.DecodePieces(out_tokens)
     return text.replace("▁", " ").strip()
 
 
@@ -89,20 +115,30 @@ async def translate(
     source_language: str = "en",
     target_language: str = "zh-TW",
 ) -> dict | None:
-    """Async translate one finalized segment. Returns TranslationEvent or None."""
+    """Translate one finalized segment asynchronously. Returns TranslationEvent or None."""
+    direction = "en" if source_language == "en" else "zh"
     loop = asyncio.get_running_loop()
-    # Load model in executor on first call — avoids blocking the event loop during load
-    ok = await loop.run_in_executor(_executor, _load_once)
+    ok = await loop.run_in_executor(_executor, _load_once, direction)
     if not ok:
         return None
     try:
-        masked_text, mappings = apply_source_glossary(text)
-        raw = await loop.run_in_executor(_executor, _translate_sync, masked_text)
-        if not raw:
-            return None
-        if mappings:
-            raw = restore_placeholders(raw, mappings)
-        polished = postprocess(raw)
+        if direction == "en":
+            # Mask glossary terms before MT so the model preserves them as placeholders,
+            # then restore correct zh-TW terms in the raw output before OpenCC.
+            masked_text, mappings = apply_source_glossary(text)
+            raw = await loop.run_in_executor(_executor, _translate_sync, masked_text, direction)
+            if not raw:
+                return None
+            if mappings:
+                raw = restore_placeholders(raw, mappings)
+            polished = postprocess_zh(raw)
+        else:
+            # zh→en: translate directly. English output needs no OpenCC conversion.
+            raw = await loop.run_in_executor(_executor, _translate_sync, text, direction)
+            if not raw:
+                return None
+            polished = raw
+
         return translation_event(
             source_segment_id=segment_id,
             status="final",

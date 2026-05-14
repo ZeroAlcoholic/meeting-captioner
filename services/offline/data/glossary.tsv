@@ -1,7 +1,9 @@
-# Insurance / meeting domain glossary
-# Format: en<tab>zh-TW[<tab>domain]
+# Insurance / business-meeting domain glossary
+# Format: en_term<tab>zh-TW<tab>domain
 # Lines starting with # are ignored.
+# en_term is matched case-insensitively in source text.
 
+# ── Core insurance terms ──────────────────────────────────────────────────────
 deductible	自負額	保險
 premium	保費	保險
 beneficiary	受益人	保險
@@ -19,3 +21,49 @@ exclusion	不保事項	保險
 surrender value	解約金	保險
 cash value	保單價值準備金	保險
 annuity	年金	保險
+
+# ── Extended insurance terms ──────────────────────────────────────────────────
+actuarial	精算	保險
+copayment	自付額	保險
+grace period	寬限期	保險
+lapse	失效	保險
+reinstatement	復效	保險
+subrogation	代位求償	保險
+loss ratio	賠付率	保險
+mortality rate	死亡率	保險
+liability	責任險	保險
+whole life	終身壽險	保險
+term life	定期壽險	保險
+critical illness	重大疾病	保險
+investment-linked	投資型保險	保險
+participating policy	分紅保單	保險
+health insurance	健康險	保險
+accident insurance	意外險	保險
+life insurance	壽險	保險
+preexisting condition	既往症	保險
+contestability period	抗辯期	保險
+waiver of premium	保費豁免	保險
+out-of-pocket	自費	保險
+claims adjuster	理賠專員	保險
+combined ratio	綜合成本率	保險
+
+# ── Business meeting terms ────────────────────────────────────────────────────
+agenda	議程	會議
+minutes	會議記錄	會議
+action item	行動事項	會議
+stakeholder	利害關係人	會議
+milestone	里程碑	會議
+deliverable	交付項目	會議
+deadline	截止日期	會議
+follow-up	後續追蹤	會議
+approval	核准	會議
+compliance	法規遵循	會議
+risk management	風險管理	會議
+audit	稽核	會議
+due diligence	盡職調查	會議
+revenue	營業收入	會議
+profit	利潤	會議
+market share	市場占有率	會議
+budget	預算	會議
+ROI	投資報酬率	會議
+KPI	關鍵績效指標	會議
