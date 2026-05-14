@@ -7,8 +7,9 @@
 
 ## Now
 
-- [ ] Commit all P2 + P2+ changes (see `git status`; conventional commits)
-- [ ] P3 — start offline STT path (see below)
+Nothing blocked. P3 complete. Next: P4.
+
+---
 
 ## P0 (done)
 
@@ -26,32 +27,30 @@
 Real OpenAI Realtime WebRTC path wired. See
 [`PROJECT_STATE.md`](PROJECT_STATE.md) and [`PLAN_P2.md`](PLAN_P2.md).
 
-## Next phase — P3: WhisperLiveKit + WASAPI Loopback
+## P3 (done)
 
-P3 wires the offline STT path. Real audio source selection for "Physical Meeting" and
-"Hybrid Meeting" scenarios. No cloud dependency.
+15 tasks complete (Phase A/B/C). 21 Python + 68 JS tests green.
+Full offline pipeline: WHL + CTranslate2 MT + WASAPI loopback + frontend source selector.
+See [`PROJECT_STATE.md`](PROJECT_STATE.md).
 
-Prerequisites ✅ already done (P2+):
-- `AudioSource` interface — WASAPI loopback can be dropped in without touching providers
-- `TranslationPipeline` interface — Argos MT can be plugged in as separate step
-- `VITE_OFFLINE_SERVICE_URL` config — no hardcoded localhost in hooks
-- `CaptionProvider.start(): Promise<void>` — correct async contract for all new providers
+Commits:
+- `9929d52` — fix(offline): distil-large-v3 model, min-words filter, language-aware prompt, glossary pipeline
+- `779c213` — refactor(offline): WHL as independent process + structured /healthz + startup scripts
+- `44cc3f6` — feat(offline): WASAPI system audio loopback — source selector + capture pipeline
 
-P3 tasks:
-- [ ] `pip install whisper-live` — natively on Windows (no Docker); verify server starts on port 9090
-- [ ] `services/offline` — FastAPI app, `whisper_live.server.TranscriptionServer` lifecycle, `/healthz` endpoint
-- [ ] `apps/web/src/providers/offline-stt-provider.ts` — WebSocket client ws://OFFLINE_SERVICE_URL, normalize `{ segments }` → TranscriptEvent
-- [ ] `apps/web/src/providers/use-offline-stt.ts` — React hook (mirrors use-openai-realtime pattern)
-- [ ] Wire "Physical Meeting" scenario in App → mic AudioSource → offline-stt-provider
-- [ ] Surface `model_loading` / `offline_engine_unavailable` / `silence_detected` via HealthRow
-- [ ] Windows WASAPI loopback via PyAudioWPatch — inject as AudioSource for "Online Meeting Caption Box" scenario
-- [ ] e2e: mocked WebSocket STT contract test
+## Next — P4: Translation Quality + ASR Adapters
+
+Goal: production-grade translation output and pluggable ASR backends.
+
+- [ ] Dual-path MT: keep opus-mt as fast path; add higher-quality fallback (evaluate options)
+- [ ] Evaluate Voxtral / Speaches as alternative ASR backends behind provider abstraction
+- [ ] zh-TW post-processing: expand glossary TSV (current: 16 terms → target: 60+)
+- [ ] Translation confidence scoring — surface low-confidence segments in UI
+- [ ] Hybrid Privacy mode: local STT → online translation (wire the mode that's currently unimplemented)
+- [ ] e2e: mocked WebSocket STT contract test for offline provider
 
 ## Backlog (later phases)
 
-- [ ] P4 — Argos Translate integration
-- [ ] P4 — Traditional Chinese / Taiwan post-processing
-- [ ] P4 — Glossary hook
 - [ ] P5 — Summary pipeline draft / refined / stable
 - [ ] P5 — Optional in-app autosave (opt-in)
 - [ ] P5 — localStorage / IndexedDB settings persistence (P1-D6)
