@@ -27,6 +27,12 @@ describe('MicrophoneAudioProvider', () => {
   beforeEach(() => {
     provider = new MicrophoneAudioProvider();
     events = [];
+    // visibility-handler attaches to document; stub a minimal one for node env.
+    vi.stubGlobal('document', {
+      hidden: false,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    });
   });
 
   afterEach(() => {

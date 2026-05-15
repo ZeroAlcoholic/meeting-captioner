@@ -1,4 +1,11 @@
 import { useState } from 'react';
+
+function formatEta(ms: number): string {
+  const totalSec = Math.max(0, Math.round(ms / 1000));
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
 import { CaptionBoard } from './caption-board/CaptionBoard.js';
 import { SettingsPanel } from './components/SettingsPanel.js';
 import { RealtimePricingPanel } from './components/RealtimePricingPanel.js';
@@ -52,9 +59,13 @@ export function App() {
   const showRealButton = modeId === 'online_full';
   const showHybridButton = modeId === 'hybrid_privacy';
   const realButtonDisabled = realtime.apiKeyStatus !== 'present' || isRunning;
+  const renewalTitle =
+    realtime.status === 'running' && realtime.renewalEtaMs !== null
+      ? ` — Auto-renew in ${formatEta(realtime.renewalEtaMs)}`
+      : '';
   const realButtonTitle: string | undefined = {
     checking:       'Checking online service…',
-    present:        undefined,
+    present:        renewalTitle ? `Online ready${renewalTitle}` : undefined,
     'no-key':       'OPENAI_API_KEY not configured on server',
     'service-down': 'Online service unreachable on :8787 — start it via start-dev.bat',
   }[realtime.apiKeyStatus];
@@ -179,7 +190,17 @@ export function App() {
 
       {activeError && (
         <div className="app-error" role="alert">
-          {activeError}
+          <span>{activeError}</span>
+          {realtime.error && realtime.apiKeyStatus === 'present' && (
+            <button
+              type="button"
+              className="app-error-retry"
+              onClick={() => realtime.retry()}
+              data-testid="retry-real"
+            >
+              Retry
+            </button>
+          )}
         </div>
       )}
 

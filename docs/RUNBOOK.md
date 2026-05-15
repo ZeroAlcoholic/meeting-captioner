@@ -148,6 +148,62 @@ Steps:
 2. Run the commit sequence.
 3. Verify: `git log --oneline` shows your commits.
 
+## Online Stack Operations
+
+### `/healthz` schema
+
+```json
+{
+  "ok": true,
+  "service": "online",
+  "version": "0.0.0",
+  "timestamp": "2026-…",
+  "components": {
+    "apiKey": "configured | missing",
+    "openai_reachability": "unknown | ok | degraded",
+    "openai_last_change_at": "ISO timestamp",
+    "uptime_sec": 123
+  }
+}
+```
+
+`ok` is `true` only when `apiKey === 'configured'` AND
+`openai_reachability !== 'degraded'`. The reachability flag is updated
+opportunistically on every `/session` call — `/healthz` itself does not
+ping OpenAI.
+
+### `/session` failure modes
+
+| Status | Meaning | Operator action |
+|--------|---------|-----------------|
+| 200 | Ephemeral token returned with `session_renewal_recommended_ms` | — |
+| 400 | Invalid request body (unknown key or bad `langPair`) | Fix client |
+| 429 | Per-IP rate limit (`SESSION_RATE_LIMIT_PER_MIN`) exceeded | Throttle client; raise env if legitimate |
+| 502 | Upstream network error (DNS, connection refused) | Check egress firewall |
+| 503 | `OPENAI_API_KEY` missing | Set env var, restart |
+| 504 | Upstream took longer than `OPENAI_TIMEOUT_MS` | Check OpenAI status page; raise env if needed |
+| Upstream 4xx/5xx | Forwarded with **sanitized** message — full body logged server-side only | `pino` log shows raw upstream body |
+
+### Session renewal
+
+- Client renews ~25 min in (`SESSION_RENEW_MS`) before OpenAI's hard 30-min cap.
+- Renewal preserves `captionStore` — the meeting transcript is continuous.
+- If renewal itself fails, provider emits `health.transport.degraded` and
+  retries once after 5 min instead of dying silently.
+
+### ICE restart policy
+
+- 3 attempts, exponential backoff: 3 s → 6 s → 12 s.
+- Restart counter resets when ICE returns to `connected` / `completed`.
+- After 3 failed attempts, provider emits `health.transport.failed` and stops.
+
+### Graceful shutdown
+
+- `SIGINT` / `SIGTERM` triggers `app.close()` with a 5-second hard timeout.
+- `start-dev.bat` Ctrl+C propagates to the online process via `concurrently`.
+
+---
+
 ## Open Questions
 
 - Recommended Node version manager (volta? nvm-windows?) — to be decided
