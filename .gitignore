@@ -67,3 +67,7 @@ playwright/.cache/
 # --- Claude / Plans ---
 .claude/local/
 .claude/settings.local.json
+
+# --- Reference packs from external planners (extracted; mirrored into docs/01-05) ---
+docs/offline_translation_pack/
+docs/offline_translation_pack.zip
