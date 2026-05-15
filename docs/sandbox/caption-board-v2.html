@@ -1,0 +1,866 @@
+<!doctype html>
+<html lang="zh-TW">
+<head>
+<meta charset="utf-8">
+<title>Caption Board v3 — Split paragraph streams</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,400;9..144,500&family=DM+Mono:wght@400;500&family=Noto+Sans+TC:wght@300;400;500&display=swap">
+<style>
+:root {
+  color-scheme: dark;
+  --bg-page: #050810;
+  --bg-card: #080c15;
+  --border-subtle: #161e30;
+  --border-mid: #1e293a;
+  --border-bright: #2a3a55;
+  --text-0: #edf0f5;
+  --text-1: #a8b3c8;
+  --text-2: #68788f;
+  --text-3: #384152;
+  --amber: #c79236;
+  --amber-dim: #7a5920;
+  --font-caption: 'Fraunces', 'Noto Sans TC', 'Microsoft JhengHei', sans-serif;
+  --font-ui: 'DM Mono', 'SF Mono', 'Fira Code', 'Noto Sans TC', monospace;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: var(--bg-page); color: var(--text-0); font-family: var(--font-ui); height: 100%; -webkit-font-smoothing: antialiased; }
+
+.lab-shell {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  height: 100vh;
+  padding: 12px 16px;
+  gap: 10px;
+}
+
+.lab-controls {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.lab-controls h1 {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+.lab-controls h1 small {
+  display: block;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: none;
+  color: var(--text-3);
+  margin-top: 2px;
+}
+
+.lab-group {
+  display: flex;
+  gap: 4px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 3px;
+}
+
+.lab-btn {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: var(--text-2);
+  font-family: var(--font-ui);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  padding: 5px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.lab-btn[aria-pressed="true"] {
+  background: var(--bg-card);
+  color: var(--text-0);
+  border: 1px solid var(--border-mid);
+  padding: 4px 9px;
+}
+
+.lab-spacer { flex: 1; }
+
+.lab-meta {
+  font-size: 11px;
+  color: var(--text-3);
+  letter-spacing: 0.04em;
+}
+
+.boards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  min-height: 0;
+}
+
+.board-frame {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: 8px;
+  min-height: 0;
+}
+
+.board-label {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+.board-label .desc {
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: none;
+  color: var(--text-3);
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+   CURRENT BOARD — replicates the in-app CaptionBoard exactly
+   ──────────────────────────────────────────────────────────────────────────── */
+
+.cur-board {
+  position: relative;
+  display: grid;
+  grid-template-rows: 1fr auto;
+  min-height: 0;
+  gap: 2rem;
+  padding: 2.5rem 2.75rem;
+  background: #080c15;
+  border-radius: 0.5rem;
+  border: 1px solid #111828;
+  overflow: hidden;
+}
+
+.cur-actions {
+  position: absolute;
+  top: 0.75rem;
+  right: 0.875rem;
+  display: flex;
+  gap: 0.375rem;
+  z-index: 1;
+}
+.cur-actionBtn {
+  appearance: none;
+  background: transparent;
+  border: 1px solid #161e30;
+  color: #384152;
+  font-family: var(--font-ui);
+  font-size: 0.6875rem;
+  letter-spacing: 0.06em;
+  padding: 0.25rem 0.55rem;
+  border-radius: 0.25rem;
+  cursor: pointer;
+}
+
+.cur-history {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  overflow-y: auto;
+  min-height: 0;
+  justify-content: flex-end;
+}
+.cur-history::-webkit-scrollbar { width: 6px; }
+.cur-history::-webkit-scrollbar-thumb { background: #1e293a; border-radius: 3px; }
+.cur-history::-webkit-scrollbar-track { background: transparent; }
+
+.cur-historyRow {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 1.25rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid #0f1522;
+}
+.cur-historyTarget {
+  font-family: var(--font-caption);
+  font-size: 1.4rem;
+  font-weight: 400;
+  font-optical-sizing: auto;
+  line-height: 1.4;
+  color: #c0c8d8;
+}
+.cur-historySource {
+  font-family: var(--font-ui);
+  font-size: 0.875rem;
+  color: #6a7889;
+  line-height: 1.5;
+  align-self: center;
+}
+
+.cur-current {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid #1a2438;
+}
+.cur-target {
+  font-family: var(--font-caption);
+  font-size: clamp(2rem, 4.6vw, 3.25rem);
+  font-weight: 300;
+  font-optical-sizing: auto;
+  line-height: 1.25;
+  color: #edf0f5;
+  letter-spacing: -0.005em;
+}
+.cur-target[data-status='pending'] { color: #2a3448; font-weight: 300; }
+.cur-source {
+  font-family: var(--font-ui);
+  font-size: clamp(0.8125rem, 1.05vw, 1rem);
+  color: #4a5870;
+  line-height: 1.5;
+  letter-spacing: 0.01em;
+}
+.cur-cursor {
+  display: inline-block;
+  margin-left: 0.2rem;
+  color: #c79236;
+  animation: cur-blink 1s steps(2, start) infinite;
+}
+@keyframes cur-blink { to { visibility: hidden; } }
+
+/* ────────────────────────────────────────────────────────────────────────────
+   PROPOSED BOARD — v3 split paragraph streams + persistent cost chip
+   ──────────────────────────────────────────────────────────────────────────── */
+
+.new-board {
+  position: relative;
+  display: grid;
+  grid-template-rows: 1fr auto;
+  min-height: 0;
+  gap: 1.5rem;
+  padding: 2.5rem 2.75rem 2.5rem;
+  background: #080c15;
+  border-radius: 0.5rem;
+  border: 1px solid #111828;
+  overflow: hidden;
+}
+
+/* Top-left: degraded reliability chips */
+.new-chip-row {
+  position: absolute;
+  top: 0.75rem;
+  left: 0.875rem;
+  display: flex;
+  gap: 6px;
+  z-index: 1;
+}
+.new-chip {
+  font-family: var(--font-ui);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #c79236;
+  border: 1px solid #5a4220;
+  background: rgba(199, 146, 54, 0.07);
+  padding: 3px 9px;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.new-chip::before {
+  content: '';
+  width: 6px; height: 6px;
+  background: currentColor;
+  border-radius: 50%;
+  animation: chip-pulse 1.6s ease-in-out infinite;
+}
+@keyframes chip-pulse {
+  0%, 100% { opacity: 0.4; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.15); }
+}
+
+/* Top-right: persistent cost chip + auto-hide actions */
+.new-topright {
+  position: absolute;
+  top: 0.65rem;
+  right: 0.875rem;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  z-index: 2;
+}
+
+/* Cost chip — ALWAYS visible (online mode burns money, must monitor) */
+.new-cost-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 11px;
+  font-family: var(--font-ui);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  border: 1px solid #2a3a55;
+  background: rgba(8, 12, 21, 0.85);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  border-radius: 999px;
+  color: var(--text-1);
+}
+.cost-dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: #d65a52;
+  box-shadow: 0 0 8px rgba(214, 90, 82, 0.6);
+  animation: live-dot 1.6s ease-in-out infinite;
+}
+@keyframes live-dot {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+.cost-time { font-variant-numeric: tabular-nums; color: var(--text-0); }
+.cost-sep { color: var(--text-3); }
+.cost-amount { color: var(--amber); font-weight: 500; }
+.cost-pair {
+  margin-left: 4px;
+  padding-left: 8px;
+  border-left: 1px solid #1e293a;
+  color: var(--text-3);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+}
+
+/* Auto-hidden actions (Export / Clear) — visible on board hover or .show-chrome */
+.new-actions {
+  display: flex;
+  gap: 6px;
+  opacity: 0;
+  transform: translateX(4px);
+  transition: opacity 160ms, transform 160ms;
+  pointer-events: none;
+}
+.new-board:hover .new-actions,
+.new-board.show-chrome .new-actions { opacity: 1; transform: none; pointer-events: auto; }
+
+.new-actionBtn {
+  appearance: none;
+  background: rgba(8, 12, 21, 0.7);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  border: 1px solid #1e293a;
+  color: #a8b3c8;
+  font-family: var(--font-ui);
+  font-size: 0.6875rem;
+  letter-spacing: 0.06em;
+  padding: 5px 11px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+/* ─── History v3: split paragraph streams ──────────────────────────────────── */
+.new-history-split {
+  display: grid;
+  grid-template-columns: 1fr 0.78fr;
+  column-gap: 1.75rem;
+  overflow-y: auto;
+  min-height: 0;
+  align-items: end;          /* bottom-anchored without flex-end scroll bug */
+  padding-top: 2.25rem;       /* clear space below cost chip / chips */
+}
+.new-history-split::-webkit-scrollbar { width: 6px; }
+.new-history-split::-webkit-scrollbar-thumb { background: #1e293a; border-radius: 3px; }
+.new-history-split::-webkit-scrollbar-track { background: transparent; }
+
+.hsplit-col {
+  display: flex;
+  flex-direction: column;
+  gap: 0.875rem;
+  min-width: 0;
+}
+
+.hsplit-row {
+  display: grid;
+  grid-template-columns: 38px 1fr;
+  column-gap: 12px;
+  padding-bottom: 0.55rem;
+  border-bottom: 1px solid #0f1522;
+}
+.hsplit-time {
+  font-family: var(--font-ui);
+  font-size: 10px;
+  color: #2a3448;
+  letter-spacing: 0.04em;
+  padding-top: 0.35rem;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.hsplit-text {
+  min-width: 0;
+  margin: 0;
+}
+.hsplit-text-zh {
+  font-family: var(--font-caption);
+  font-size: 1.25rem;
+  font-weight: 400;
+  font-optical-sizing: auto;
+  line-height: 1.55;
+  color: #c0c8d8;
+}
+.hsplit-text-zh[data-conf="low"] { color: #6a7889; }
+.hsplit-text-en {
+  font-family: var(--font-ui);
+  font-size: 0.875rem;
+  font-weight: 400;
+  line-height: 1.65;
+  color: #6a7889;
+  letter-spacing: 0.01em;
+}
+.hsplit-text-en[data-conf="low"] { color: #4a5870; }
+
+/* zh-TW→en mirror: EN becomes the larger primary, ZH becomes the smaller secondary.
+   Grid columns stay 1fr 0.78fr — JS already places the primary side on the left. */
+.new-board[data-lang="zh-TW→en"] .hsplit-text-zh {
+  font-size: 1rem;
+  color: #6a7889;
+  font-weight: 400;
+}
+.new-board[data-lang="zh-TW→en"] .hsplit-text-en {
+  font-family: var(--font-caption);
+  font-size: 1.4rem;
+  font-weight: 400;
+  font-optical-sizing: auto;
+  line-height: 1.45;
+  color: #c0c8d8;
+}
+
+/* ─── Live caption (unchanged from v2) ─────────────────────────────────────── */
+.new-current {
+  display: flex;
+  flex-direction: column;
+  gap: 0.875rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid #1a2438;
+  position: relative;
+}
+.new-target {
+  font-family: var(--font-caption);
+  font-size: clamp(2rem, 4.6vw, 3.25rem);
+  font-weight: 500;
+  font-optical-sizing: auto;
+  line-height: 1.22;
+  color: #edf0f5;
+  letter-spacing: -0.01em;
+}
+.new-target[data-status='pending'] { color: #2a3448; font-weight: 400; }
+.new-target[data-status='draft']   { color: #8a98b5; font-weight: 400; }
+.new-source {
+  font-family: var(--font-ui);
+  font-size: clamp(0.8125rem, 1.05vw, 1rem);
+  color: #4a5870;
+  line-height: 1.5;
+  letter-spacing: 0.01em;
+}
+
+/* zh-TW→en mirror for live caption */
+.new-board[data-lang="zh-TW→en"] .new-target {
+  font-family: var(--font-caption);
+  font-weight: 500;
+  letter-spacing: -0.005em;
+}
+
+.new-translating-hint {
+  font-family: var(--font-ui);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #5a6a7f;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 2px;
+}
+.new-translating-hint::before {
+  content: '';
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: hint-pulse 1.2s ease-in-out infinite;
+}
+@keyframes hint-pulse {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 1; }
+}
+
+.new-cursor {
+  display: inline-block;
+  margin-left: 0.18em;
+  width: 0.5em;
+  height: 1em;
+  background: #c79236;
+  vertical-align: -0.1em;
+  border-radius: 1px;
+  animation: cursor-pulse 1.1s ease-in-out infinite;
+}
+@keyframes cursor-pulse {
+  0%, 100% { opacity: 0.25; }
+  50%      { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .new-cursor,
+  .new-translating-hint::before,
+  .new-chip::before,
+  .cost-dot {
+    animation: none;
+    opacity: 0.7;
+  }
+  .cur-cursor { animation: none; visibility: visible; opacity: 0.6; }
+}
+
+.new-pill {
+  position: absolute;
+  bottom: calc(2.75rem + 1.25rem);
+  right: 1.5rem;
+  padding: 7px 14px;
+  font-family: var(--font-ui);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: #050810;
+  background: #c79236;
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+  display: none;
+  align-items: center;
+  gap: 6px;
+  box-shadow: 0 6px 20px rgba(199, 146, 54, 0.25);
+  z-index: 2;
+}
+.new-board.paused .new-pill { display: inline-flex; }
+</style>
+</head>
+<body>
+<div class="lab-shell">
+  <header class="lab-controls">
+    <h1>Caption Board v3 Lab <small>Office meeting room · split paragraph streams · persistent cost chip</small></h1>
+
+    <div class="lab-group" role="radiogroup" aria-label="Scenario">
+      <button class="lab-btn" data-scenario="en-zh" aria-pressed="true">en → zh-TW</button>
+      <button class="lab-btn" data-scenario="zh-en" aria-pressed="false">zh-TW → en</button>
+      <button class="lab-btn" data-scenario="partial" aria-pressed="false">live partial</button>
+    </div>
+
+    <div class="lab-group" role="radiogroup" aria-label="State">
+      <button class="lab-btn" data-state="normal" aria-pressed="true">normal</button>
+      <button class="lab-btn" data-state="degraded" aria-pressed="false">degraded</button>
+      <button class="lab-btn" data-state="paused" aria-pressed="false">scroll-paused</button>
+    </div>
+
+    <div class="lab-spacer"></div>
+    <span class="lab-meta" id="vp-size">—</span>
+  </header>
+
+  <main class="boards">
+    <section class="board-frame">
+      <div class="board-label"><span>CURRENT</span><span class="desc">in-app today</span></div>
+      <div class="cur-board" id="cur-board">
+        <div class="cur-actions">
+          <button class="cur-actionBtn">⬇ Export</button>
+          <button class="cur-actionBtn">✕ Clear</button>
+        </div>
+        <div class="cur-history" id="cur-history"></div>
+        <div class="cur-current" id="cur-current"></div>
+      </div>
+    </section>
+
+    <section class="board-frame">
+      <div class="board-label"><span>PROPOSED v3</span><span class="desc">split streams · persistent cost</span></div>
+      <div class="new-board show-chrome" id="new-board">
+        <div class="new-chip-row" id="new-chips"></div>
+        <div class="new-topright">
+          <div class="new-cost-chip" id="new-cost">
+            <span class="cost-dot" aria-hidden="true"></span>
+            <span class="cost-time" id="new-cost-time">00:12:50</span>
+            <span class="cost-sep">·</span>
+            <span class="cost-amount" id="new-cost-amount">$0.42 ≈ NT$13</span>
+            <span class="cost-pair" id="new-cost-pair">en→zh-TW</span>
+          </div>
+          <div class="new-actions">
+            <button class="new-actionBtn">⬇ Export</button>
+            <button class="new-actionBtn">✕ Clear</button>
+          </div>
+        </div>
+        <div class="new-history-split" id="new-history"></div>
+        <button class="new-pill">↓ 3 new captions</button>
+        <div class="new-current" id="new-current"></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+  // ──────────────────────────────────────────────────────────────────────────
+  // Mock transcript data — segments tied by id; ZH and EN punctuation
+  // intentionally diverge in places to demonstrate independent grouping.
+  // ──────────────────────────────────────────────────────────────────────────
+  const data = {
+    'en-zh': {
+      langPair: 'en→zh-TW',
+      // costTime = HH:MM:SS elapsed-from-session-start; segment t = M:SS on the same axis.
+      // Some ZH segments deliberately lack 「。」 to merge with the next on ZH side.
+      costTime: '00:12:50',
+      costUsd:  '$0.42',
+      costTwd:  'NT$13',
+      segments: [
+        { t: '8:38',  src: "OK so let's pick up where we left off on the roadmap.",                    tgt: '好，我們從上次中斷的路線圖繼續',                       conf: 'high' },
+        { t: '8:56',  src: 'I think the offline pipeline is ready for internal dogfood next week.',    tgt: '我覺得 offline 流水線下週可以開始內部試用了。',         conf: 'high' },
+        { t: '9:19',  src: 'Yeah, but we still need to confirm the model download path on Windows',   tgt: '對。',                                                  conf: 'low'  },
+        { t: '9:38',  src: '— should that be bundled or pulled lazily on first launch?',               tgt: '要打包進去，還是首次啟動再下載？',                     conf: 'high' },
+        { t: '10:02', src: 'Lazy on first launch.',                                                    tgt: '首次啟動再下載',                                       conf: 'high' },
+        { t: '10:14', src: 'Bundling Whisper bloats the installer past 2 GB.',                         tgt: '把 Whisper 包進去裝檔會超過 2 GB。',                    conf: 'high' },
+        { t: '10:42', src: "Plus the Argos translation model — that's another 300 megs.",              tgt: '再加上 Argos 翻譯模型 — 又是 300MB。',                  conf: 'high' },
+        { t: '11:05', src: 'Agreed, lazy download with a clear progress UI in the settings panel.',    tgt: '同意，延後下載並在設定面板顯示清楚的進度。',             conf: 'high' },
+      ],
+      current: {
+        src: "Let's also make sure the caption path itself never blocks while a model is downloading in the background.",
+        tgt: '我們也要確保字幕主流程在背景下載模型時絕不會卡住。',
+      },
+      partial: null,
+    },
+
+    'zh-en': {
+      langPair: 'zh-TW→en',
+      costTime: '00:08:30',
+      costUsd:  '$0.28',
+      costTwd:  'NT$9',
+      segments: [
+        { t: '5:40', src: '我們今天先把 P4 的範圍確認清楚',                  tgt: "Let's start by nailing down the P4 scope today",                            conf: 'high' },
+        { t: '5:52', src: '。',                                              tgt: '.',                                                                         conf: 'high' },
+        { t: '5:58', src: 'WASAPI loopback 是必做的',                        tgt: 'WASAPI loopback is a must',                                                 conf: 'high' },
+        { t: '6:06', src: '，Teams 跟 Zoom 兩邊都需要。',                    tgt: ' — both Teams and Zoom need it.',                                           conf: 'high' },
+        { t: '6:16', src: 'Argos 翻譯模型也要驗一下實際品質。',              tgt: 'We should also validate the actual quality of the Argos translation model.', conf: 'high' },
+        { t: '6:35', src: '對',                                              tgt: 'Right',                                                                     conf: 'high' },
+        { t: '6:42', src: '，至少要跑一場真實會議錄音來看看。',              tgt: ' — we should run it on at least one real meeting recording.',               conf: 'high' },
+        { t: '6:58', src: '如果品質不夠，OPUS-MT 是備案。',                  tgt: "If quality isn't good enough, OPUS-MT is the fallback.",                    conf: 'low'  },
+      ],
+      current: {
+        src: '別忘了先做 fake replay 跟 long-running 穩定性測試。',
+        tgt: "Don't forget to run fake-replay and long-running stability tests first.",
+      },
+      partial: null,
+    },
+
+    'partial': {
+      langPair: 'en→zh-TW',
+      costTime: '00:01:30',
+      costUsd:  '$0.05',
+      costTwd:  'NT$2',
+      segments: [
+        { t: '0:06', src: "OK so the export feature — is it landing in this sprint?", tgt: '好，匯出功能 — 這個 sprint 會進嗎？',     conf: 'high' },
+        { t: '0:22', src: 'Should be, the format is basically locked.',               tgt: '應該會，格式大致確定了。',                conf: 'high' },
+        { t: '0:42', src: 'Plain text plus optional SRT for the video team.',         tgt: '純文字加上選用的 SRT 給影音團隊。',       conf: 'high' },
+        { t: '1:06', src: 'And one option to redact speaker names if requested.',     tgt: '另外有個選項可以視需求隱去發言者姓名。', conf: 'high' },
+      ],
+      lastFinal: {
+        src: 'And one option to redact speaker names if requested.',
+        tgt: '另外有個選項可以視需求隱去發言者姓名。',
+      },
+      partial: {
+        src: "So the next thing I'd like to discuss is whether we should",
+      },
+    },
+  };
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Paragraph grouping — per side, by that side's own punctuation.
+  // ──────────────────────────────────────────────────────────────────────────
+  // Sentence-end regex per language. Matches at end of trimmed text.
+  const ZH_END = /[。！？…]\s*$/;
+  const EN_END = /[.!?…]\s*$/;
+  // Force a paragraph break if char count exceeds this (runaway speaker guard)
+  const MAX_CHARS = 240;
+
+  /**
+   * Group segments into paragraphs for a single side.
+   * @param {Array} segments - the full segment list
+   * @param {(s: object) => string} accessor - extract this side's text from a segment
+   * @param {RegExp} endRe - sentence-end regex for this side
+   * @returns {Array<{time: string, text: string, confLow: boolean}>}
+   */
+  function groupParagraphs(segments, accessor, endRe) {
+    const out = [];
+    for (const seg of segments) {
+      const piece = accessor(seg).trim();
+      if (!piece) continue;
+      const last = out[out.length - 1];
+      const merge = last && !endRe.test(last.text) && (last.text.length + piece.length) < MAX_CHARS;
+      if (merge) {
+        // CJK adjacency → thin space (U+2009) for a soft visual breath without
+        // injecting punctuation that wasn't in the source.
+        // Latin or mixed → regular space.
+        const sep = /[一-鿿]$/.test(last.text) && /^[一-鿿]/.test(piece) ? ' ' : ' ';
+        // Punctuation that already implies its own boundary sticks directly.
+        const noSep = /^[，。、！？.!?\-—…]/.test(piece);
+        last.text += (noSep ? '' : sep) + piece;
+        if (seg.conf === 'low') last.confLow = true;
+      } else {
+        out.push({ time: seg.t, text: piece, confLow: seg.conf === 'low' });
+      }
+    }
+    return out;
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // CURRENT board renderer
+  // ──────────────────────────────────────────────────────────────────────────
+  function renderCurrent(scenario) {
+    const d = data[scenario];
+    const hist = document.getElementById('cur-history');
+    const live = document.getElementById('cur-current');
+    document.getElementById('cur-board').dataset.lang = d.langPair;
+
+    // CURRENT pairs each segment row (target + source side-by-side)
+    hist.innerHTML = d.segments.map(r => `
+      <div class="cur-historyRow">
+        <span class="cur-historyTarget">${r.tgt}</span>
+        <span class="cur-historySource">${r.src}</span>
+      </div>
+    `).join('');
+    requestAnimationFrame(() => { hist.scrollTop = hist.scrollHeight; });
+
+    if (d.partial) {
+      // Bug demo: target frozen on previous final, source updates with partial → desync
+      live.innerHTML = `
+        <div class="cur-target" data-status="final">${d.lastFinal.tgt}</div>
+        <div class="cur-source">${d.partial.src}<span class="cur-cursor">▍</span></div>
+      `;
+    } else {
+      live.innerHTML = `
+        <div class="cur-target" data-status="final">${d.current.tgt}</div>
+        <div class="cur-source">${d.current.src}</div>
+      `;
+    }
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // PROPOSED v3 renderer — split paragraph streams + persistent cost chip
+  // ──────────────────────────────────────────────────────────────────────────
+  function renderProposed(scenario, state) {
+    const d = data[scenario];
+    const board = document.getElementById('new-board');
+    const hist = document.getElementById('new-history');
+    const live = document.getElementById('new-current');
+    const chips = document.getElementById('new-chips');
+    const costPair = document.getElementById('new-cost-pair');
+    const costTimeEl = document.getElementById('new-cost-time');
+    const costAmountEl = document.getElementById('new-cost-amount');
+
+    board.dataset.lang = d.langPair;
+    costPair.textContent = d.langPair;
+    costTimeEl.textContent = d.costTime;
+    costAmountEl.textContent = `${d.costUsd} ≈ ${d.costTwd}`;
+
+    chips.innerHTML = state === 'degraded'
+      ? `<span class="new-chip">translation reconnecting</span>`
+      : '';
+
+    board.classList.toggle('paused', state === 'paused');
+
+    // ── Group each side independently by its own punctuation ──
+    // Map seg.src/seg.tgt → which physical language they hold (depends on langPair)
+    const isZhTarget = d.langPair === 'en→zh-TW';
+    const zhAccessor = isZhTarget ? (s => s.tgt) : (s => s.src);
+    const enAccessor = isZhTarget ? (s => s.src) : (s => s.tgt);
+    const zhParagraphs = groupParagraphs(d.segments, zhAccessor, ZH_END);
+    const enParagraphs = groupParagraphs(d.segments, enAccessor, EN_END);
+
+    // Primary = translation target = the bigger left column
+    const primaryParagraphs   = isZhTarget ? zhParagraphs : enParagraphs;
+    const secondaryParagraphs = isZhTarget ? enParagraphs : zhParagraphs;
+    const primaryCls   = isZhTarget ? 'hsplit-text-zh' : 'hsplit-text-en';
+    const secondaryCls = isZhTarget ? 'hsplit-text-en' : 'hsplit-text-zh';
+    const leftCol  = primaryParagraphs;
+    const rightCol = secondaryParagraphs;
+    const leftCls  = primaryCls;
+    const rightCls = secondaryCls;
+
+    hist.innerHTML = `
+      <div class="hsplit-col">
+        ${leftCol.map(p => `
+          <div class="hsplit-row">
+            <span class="hsplit-time">${p.time}</span>
+            <p class="hsplit-text ${leftCls}" data-conf="${p.confLow ? 'low' : 'high'}">${p.text}</p>
+          </div>
+        `).join('')}
+      </div>
+      <div class="hsplit-col">
+        ${rightCol.map(p => `
+          <div class="hsplit-row">
+            <span class="hsplit-time">${p.time}</span>
+            <p class="hsplit-text ${rightCls}" data-conf="${p.confLow ? 'low' : 'high'}">${p.text}</p>
+          </div>
+        `).join('')}
+      </div>
+    `;
+
+    if (state !== 'paused') {
+      requestAnimationFrame(() => { hist.scrollTop = hist.scrollHeight; });
+    } else {
+      requestAnimationFrame(() => { hist.scrollTop = Math.max(0, hist.scrollHeight - hist.clientHeight - 80); });
+    }
+
+    if (d.partial) {
+      const preview = d.partial.src.length > 48 ? d.partial.src.slice(0, 46) + '…' : d.partial.src;
+      live.innerHTML = `
+        <div class="new-target" data-status="final">${d.lastFinal.tgt}</div>
+        <div class="new-source">${d.lastFinal.src}</div>
+        <span class="new-translating-hint">translating · ${preview}</span>
+      `;
+    } else {
+      live.innerHTML = `
+        <div class="new-target" data-status="final">${d.current.tgt}</div>
+        <div class="new-source">${d.current.src}</div>
+      `;
+    }
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Wire controls
+  // ──────────────────────────────────────────────────────────────────────────
+  let scenario = 'en-zh';
+  let state = 'normal';
+
+  function rerender() {
+    renderCurrent(scenario);
+    renderProposed(scenario, state);
+  }
+
+  document.querySelectorAll('[data-scenario]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('[data-scenario]').forEach(b => b.setAttribute('aria-pressed', 'false'));
+      btn.setAttribute('aria-pressed', 'true');
+      scenario = btn.dataset.scenario;
+      rerender();
+    });
+  });
+  document.querySelectorAll('[data-state]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('[data-state]').forEach(b => b.setAttribute('aria-pressed', 'false'));
+      btn.setAttribute('aria-pressed', 'true');
+      state = btn.dataset.state;
+      rerender();
+    });
+  });
+
+  function updateVp() {
+    document.getElementById('vp-size').textContent = `${window.innerWidth} × ${window.innerHeight}`;
+  }
+  window.addEventListener('resize', updateVp);
+  updateVp();
+  rerender();
+</script>
+</body>
+</html>

@@ -2,69 +2,63 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useSettingsStore } from '../settings/use-settings-store.js';
 import { useCaptionStore } from '../store/use-caption-store.js';
 import { captionStore } from '../store/use-caption-store.js';
-import type { CaptionSegment, CaptionTranslation } from '../store/caption-store.js';
+import {
+  formatElapsedFromStart,
+  groupParagraphsForSide,
+  type Paragraph,
+} from './paragraph-grouping.js';
 import styles from './CaptionBoard.module.css';
 
-// Sentence terminators that mark a paragraph boundary. Whisper emits these at
-// natural breath / punctuation pauses. Anything not ending in one of these
-// continues the current paragraph (subject to time-gap and length caps).
-const SENTENCE_END = /[.!?。？！…]\s*$/;
-// Force a new paragraph if the gap between segments exceeds this (long pause).
-const PARAGRAPH_GAP_MS = 1500;
-// Hard cap so a runaway speaker without punctuation doesn't form a screen-spanning blob.
-const PARAGRAPH_MAX_CHARS = 240;
-
-interface Paragraph {
-  id: string;
-  source: string;
-  target: string;
-  startMs: number;
-  endMs: number;
-}
-
-function groupIntoParagraphs(
-  segments: CaptionSegment[],
-  translations: Record<string, CaptionTranslation>,
-): Paragraph[] {
-  const out: Paragraph[] = [];
-  for (const seg of segments) {
-    const tr = translations[seg.segmentId]?.targetText ?? '';
-    const segEnd = seg.endMs ?? seg.startMs;
-    const last = out.at(-1);
-    // Real gap = current segment start − previous paragraph END.
-    const gap = last ? seg.startMs - last.endMs : 0;
-    const merge =
-      last !== undefined &&
-      !SENTENCE_END.test(last.source) &&
-      gap < PARAGRAPH_GAP_MS &&
-      last.source.length + seg.text.length < PARAGRAPH_MAX_CHARS;
-    if (merge && last) {
-      // Preserve a space for Latin joins, none between CJK glyphs.
-      const sep = /[一-鿿]$/.test(last.source) && /^[一-鿿]/.test(seg.text) ? '' : ' ';
-      last.source = last.source + sep + seg.text;
-      const trSep = /[一-鿿]$/.test(last.target) && /^[一-鿿]/.test(tr) ? '' : ' ';
-      last.target = (last.target ? last.target + trSep : '') + tr;
-      last.endMs = segEnd;
-    } else {
-      out.push({ id: seg.segmentId, source: seg.text, target: tr, startMs: seg.startMs, endMs: segEnd });
-    }
-  }
-  return out;
-}
-
+// ─── Export ──────────────────────────────────────────────────────────────────
 function downloadTranscript(): void {
-  const { segments, translations } = captionStore.getState();
+  const { segments, translations, sessionStartMs } = captionStore.getState();
   if (segments.length === 0) return;
+  // Anchor for elapsed-time labels: the FIRST (smallest startMs) segment.
+  // We can't use sessionStartMs (which is Date.now() at first event) because
+  // providers emit startMs in their own time origin (fake replay = relative).
+  const anchorMs = segments[0]?.startMs ?? 0;
 
-  const paragraphs = groupIntoParagraphs(segments, translations);
+  // Group EN and ZH independently — same as on-screen.
+  const en = groupParagraphsForSide({
+    segments,
+    translations,
+    side: 'en',
+    accessor: (s, t) => {
+      // Pick the EN side: if a translation exists with English target, use it;
+      // otherwise the segment text is presumed English (standard mic→en path).
+      if (t && t.targetLanguage.startsWith('en')) return t.targetText;
+      if (t && t.sourceLanguage.startsWith('en')) return t.sourceText;
+      return s.text;
+    },
+  });
+  const zh = groupParagraphsForSide({
+    segments,
+    translations,
+    side: 'zh',
+    accessor: (s, t) => {
+      if (t && t.targetLanguage.startsWith('zh')) return t.targetText;
+      if (t && t.sourceLanguage.startsWith('zh')) return t.sourceText;
+      return s.text;
+    },
+  });
+
   const lines: string[] = [];
-  for (const p of paragraphs) {
-    const ts = new Date(p.startMs > 1e12 ? p.startMs : Date.now() - (segments.at(-1)!.startMs - p.startMs))
-      .toISOString().replace('T', ' ').slice(0, 19);
-    lines.push(`[${ts}]`);
-    if (p.target) lines.push(`  → ${p.target}`);
-    lines.push(`    ${p.source}`);
-    lines.push('');
+  lines.push(`# Meeting transcript`);
+  if (sessionStartMs !== null) {
+    lines.push(`# Session started: ${new Date(sessionStartMs).toISOString()}`);
+  }
+  lines.push('');
+
+  // Interleave by start time so the export reads chronologically.
+  const merged: Array<{ side: 'en' | 'zh'; p: Paragraph }> = [
+    ...en.map((p) => ({ side: 'en' as const, p })),
+    ...zh.map((p) => ({ side: 'zh' as const, p })),
+  ].sort((a, b) => a.p.startMs - b.p.startMs);
+
+  for (const { side, p } of merged) {
+    const ts = formatElapsedFromStart(p.startMs, anchorMs);
+    const tag = side === 'zh' ? '[zh]' : '[en]';
+    lines.push(`${ts} ${tag} ${p.text}`);
   }
 
   const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' });
@@ -78,46 +72,191 @@ function downloadTranscript(): void {
   URL.revokeObjectURL(url);
 }
 
-function clearTranscript(): void {
-  if (confirm('清空所有字幕？此操作無法復原（請先 Export 保留）')) {
-    captionStore.getState().clear();
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/**
+ * Pick the live segment by latest startMs. We can't blindly use `segments.at(-1)`
+ * because `upsertSorted` inserts revised segments by startMs, so a late revision
+ * with an earlier startMs could push the wrong one to the end of the array.
+ *
+ * Returns the segment whose startMs is greatest. If multiple segments share the
+ * max startMs (rare, partial+final at same instant), prefer the more recent
+ * status (partial > revised > final reflects "most recently emitted").
+ */
+function pickLiveSegment<T extends { segmentId: string; startMs: number; status: string }>(
+  segments: readonly T[],
+): T | undefined {
+  if (segments.length === 0) return undefined;
+  let best = segments[0]!;
+  for (let i = 1; i < segments.length; i++) {
+    const s = segments[i]!;
+    if (s.startMs > best.startMs) best = s;
   }
+  return best;
 }
 
+// ─── Component ───────────────────────────────────────────────────────────────
 export function CaptionBoard() {
   const segments = useCaptionStore((s) => s.segments);
   const translations = useCaptionStore((s) => s.translations);
   const langPair = useSettingsStore((s) => s.langPair);
 
+  // Elapsed-time anchor for history labels — derived from the first (oldest)
+  // segment in the buffer. Robust against providers that emit relative-time
+  // startMs (fake replay) vs wall-clock startMs (OpenAI Realtime).
+  const anchorMs = segments[0]?.startMs ?? 0;
+
   const historyRef = useRef<HTMLDivElement>(null);
   // autoPin pauses when user manually scrolls up; resumes when they scroll back to bottom.
   const [autoPin, setAutoPin] = useState(true);
+  // Count of new finalized segments arriving while scroll is paused (powers the pill).
+  const [pendingNew, setPendingNew] = useState(0);
+  // Snapshot of how many segments existed when the user paused scrolling.
+  const segmentsAtPauseRef = useRef<number>(0);
+  const [confirmingClear, setConfirmingClear] = useState(false);
+  // Mirror in a ref so a rapid second click within the same render cycle reads
+  // the LATEST value (React batches state updates; reading from the closure
+  // would incorrectly see false on the second synchronous click).
+  const confirmingClearRef = useRef(false);
+  const confirmTimeoutRef = useRef<number | null>(null);
 
-  const current = segments.at(-1);
-  const historySegments = segments.slice(0, -1);
-  const paragraphs = useMemo(
-    () => groupIntoParagraphs(historySegments, translations),
-    [historySegments, translations],
+  // Live segment = the most recent partial/revised/final by startMs.
+  const liveSegment = pickLiveSegment(segments);
+  const historySegments = useMemo(
+    () => (liveSegment ? segments.filter((s) => s.segmentId !== liveSegment.segmentId) : segments),
+    [segments, liveSegment],
   );
 
+  const isZhTarget = langPair === 'en→zh-TW';
+
+  // Independent paragraph streams. Accessors map seg.text/translation.target to
+  // each side's actual language, regardless of which side is "source" vs "target".
+  const zhParagraphs = useMemo(
+    () =>
+      groupParagraphsForSide({
+        segments: historySegments,
+        translations,
+        side: 'zh',
+        accessor: (s, t) =>
+          isZhTarget ? t?.targetText ?? '' : s.text /* zh-TW→en: source IS the Chinese */,
+      }),
+    [historySegments, translations, isZhTarget],
+  );
+  const enParagraphs = useMemo(
+    () =>
+      groupParagraphsForSide({
+        segments: historySegments,
+        translations,
+        side: 'en',
+        accessor: (s, t) =>
+          isZhTarget ? s.text /* en→zh-TW: source IS the English */ : t?.targetText ?? '',
+      }),
+    [historySegments, translations, isZhTarget],
+  );
+
+  // Primary side = translation target (the bigger column on the left).
+  const primaryParagraphs = isZhTarget ? zhParagraphs : enParagraphs;
+  const secondaryParagraphs = isZhTarget ? enParagraphs : zhParagraphs;
+  const primarySide: 'zh' | 'en' = isZhTarget ? 'zh' : 'en';
+  const secondarySide: 'zh' | 'en' = isZhTarget ? 'en' : 'zh';
+
+  // ─── Scroll bookkeeping ───
   useEffect(() => {
     const el = historyRef.current;
     if (!el) return;
     const onScroll = () => {
       const fromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-      setAutoPin(fromBottom < 32);
+      const nowPinned = fromBottom < 32;
+      setAutoPin((wasPinned) => {
+        if (wasPinned && !nowPinned) {
+          // user just scrolled up — snapshot baseline for "new since pause"
+          segmentsAtPauseRef.current = segments.length;
+          setPendingNew(0);
+        } else if (!wasPinned && nowPinned) {
+          // resumed at bottom — clear pending count
+          setPendingNew(0);
+        }
+        return nowPinned;
+      });
     };
     el.addEventListener('scroll', onScroll);
     return () => el.removeEventListener('scroll', onScroll);
-  }, []);
+  }, [segments.length]);
+
+  // Track new segments while paused.
+  useEffect(() => {
+    if (autoPin) return;
+    const delta = segments.length - segmentsAtPauseRef.current;
+    if (delta > 0) setPendingNew(delta);
+  }, [segments.length, autoPin]);
 
   useLayoutEffect(() => {
     if (!autoPin) return;
     const el = historyRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [paragraphs, autoPin]);
+  }, [primaryParagraphs, secondaryParagraphs, autoPin]);
 
-  if (!current) {
+  // ─── Clear with inline confirm (no native confirm() dialog) ───
+  function onClearClick(): void {
+    if (!confirmingClearRef.current) {
+      confirmingClearRef.current = true;
+      setConfirmingClear(true);
+      if (confirmTimeoutRef.current !== null) window.clearTimeout(confirmTimeoutRef.current);
+      confirmTimeoutRef.current = window.setTimeout(() => {
+        confirmingClearRef.current = false;
+        setConfirmingClear(false);
+        confirmTimeoutRef.current = null;
+      }, 3000);
+      return;
+    }
+    if (confirmTimeoutRef.current !== null) {
+      window.clearTimeout(confirmTimeoutRef.current);
+      confirmTimeoutRef.current = null;
+    }
+    captionStore.getState().clear();
+    confirmingClearRef.current = false;
+    setConfirmingClear(false);
+  }
+
+  // Cleanup on unmount.
+  useEffect(() => {
+    return () => {
+      if (confirmTimeoutRef.current !== null) window.clearTimeout(confirmTimeoutRef.current);
+    };
+  }, []);
+
+  function jumpToLatest(): void {
+    const el = historyRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    setAutoPin(true);
+    setPendingNew(0);
+  }
+
+  // ─── Live caption: freeze on previous final while a new partial is in progress ───
+  const lastFinalSegment = useMemo(
+    () => historySegments.at(-1),
+    [historySegments],
+  );
+
+  const liveIsPartial = !!liveSegment && liveSegment.status !== 'final';
+  // When a partial is mid-flight, the new translation hasn't arrived yet.
+  // Freeze BOTH target and source on the previous final so they stay in sync,
+  // and surface the partial as a small "translating · …" hint underneath.
+  // When the live segment itself is final (e.g., short utterance that finalized
+  // before any partial), show its own translation.
+  const displayedLiveTarget =
+    liveIsPartial && lastFinalSegment
+      ? translations[lastFinalSegment.segmentId]?.targetText
+      : liveSegment
+        ? translations[liveSegment.segmentId]?.targetText
+        : undefined;
+  const displayedLiveSource =
+    liveIsPartial && lastFinalSegment
+      ? lastFinalSegment.text
+      : liveSegment?.text;
+
+  if (!liveSegment) {
     return (
       <div className={styles.empty} data-lang-pair={langPair} data-testid="caption-empty">
         <p>Waiting for captions…</p>
@@ -125,11 +264,10 @@ export function CaptionBoard() {
     );
   }
 
-  // Live caption: keep showing the most recent translation while a partial
-  // segment is in progress (no translation event yet for the partial id).
-  const currentTranslation =
-    translations[current.segmentId] ??
-    translations[historySegments.at(-1)?.segmentId ?? ''];
+  const partialPreview =
+    liveIsPartial && liveSegment.text.length > 56
+      ? liveSegment.text.slice(0, 54) + '…'
+      : liveSegment?.text ?? '';
 
   return (
     <div className={styles.board} data-lang-pair={langPair}>
@@ -145,40 +283,83 @@ export function CaptionBoard() {
         </button>
         <button
           type="button"
-          className={styles.actionBtn}
-          onClick={clearTranscript}
-          title="Clear all captions (cannot be undone)"
+          className={`${styles.actionBtn} ${confirmingClear ? styles.actionBtnDanger : ''}`}
+          onClick={onClearClick}
+          title={confirmingClear ? 'Click again within 3s to confirm' : 'Clear all captions'}
           data-testid="clear-transcript"
+          data-confirming={confirmingClear || undefined}
         >
-          ✕ Clear
+          {confirmingClear ? '✕ Confirm clear' : '✕ Clear'}
         </button>
       </div>
 
       <div ref={historyRef} className={styles.history} data-testid="caption-history">
-        {paragraphs.map((p) => (
-          <div key={p.id} className={styles.historyRow}>
-            <span className={styles.historyTarget}>{p.target || '—'}</span>
-            <span className={styles.historySource}>{p.source}</span>
-          </div>
-        ))}
+        <div className={styles.historyCol} data-side={primarySide} data-role="primary">
+          {primaryParagraphs.map((p) => (
+            <div key={`p-${p.id}`} className={styles.historyRow}>
+              <span className={styles.historyTime}>
+                {formatElapsedFromStart(p.startMs, anchorMs)}
+              </span>
+              <p
+                className={`${styles.historyText} ${styles.historyTextPrimary}`}
+                data-conf={p.confLow ? 'low' : 'high'}
+              >
+                {p.text}
+              </p>
+            </div>
+          ))}
+        </div>
+        <div className={styles.historyCol} data-side={secondarySide} data-role="secondary">
+          {secondaryParagraphs.map((p) => (
+            <div key={`s-${p.id}`} className={styles.historyRow}>
+              <span className={styles.historyTime}>
+                {formatElapsedFromStart(p.startMs, anchorMs)}
+              </span>
+              <p
+                className={`${styles.historyText} ${styles.historyTextSecondary}`}
+                data-conf={p.confLow ? 'low' : 'high'}
+              >
+                {p.text}
+              </p>
+            </div>
+          ))}
+        </div>
       </div>
+
+      {!autoPin && pendingNew > 0 && (
+        <button
+          type="button"
+          className={styles.pill}
+          onClick={jumpToLatest}
+          data-testid="jump-to-latest"
+        >
+          ↓ {pendingNew} new
+        </button>
+      )}
 
       <div
         className={styles.current}
         data-testid="caption-current"
-        data-status={current.status}
+        data-status={liveSegment.status}
       >
         <div
           className={styles.target}
           data-testid="caption-target"
-          data-status={currentTranslation?.status ?? 'pending'}
+          data-status={liveIsPartial ? 'frozen' : 'final'}
         >
-          {currentTranslation?.targetText ?? '…'}
+          {displayedLiveTarget ?? '…'}
         </div>
         <div className={styles.source} data-testid="caption-source">
-          {current.text}
-          {current.status !== 'final' && <span className={styles.cursor}>▍</span>}
+          {displayedLiveSource ?? ''}
+          {liveIsPartial && !lastFinalSegment && (
+            <span className={styles.cursor} aria-hidden="true" />
+          )}
         </div>
+        {liveIsPartial && lastFinalSegment && (
+          <span className={styles.translatingHint} data-testid="translating-hint">
+            translating · {partialPreview}
+          </span>
+        )}
       </div>
     </div>
   );

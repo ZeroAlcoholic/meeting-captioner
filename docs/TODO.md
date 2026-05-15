@@ -7,7 +7,24 @@
 
 ## Now
 
-Nothing blocked. P3 complete. Next: P4.
+P3 complete. **CaptionBoard v3 (UX overhaul)** delivered out-of-band on top of P3.5:
+- Split paragraph streams (ZH and EN each grouped by their own punctuation)
+- Per-paragraph elapsed-time gutter (M:SS, derived from first segment's startMs)
+- Live caption weight 300 → 500 (readable at 1.5–3m office distance)
+- Partial freeze with `translating · …` hint (replaces old target/source desync)
+- Live segment picked by max startMs (not array tail) — robust against revised events
+- Auto-hidden Export/Clear; cost panel stays in header (visible while online burns money)
+- Inline confirm for Clear (replaces native `confirm()`); ref-based to handle rapid double-clicks
+- Scroll fix: `margin-top: auto` on first child (top of history reachable when overflowing)
+- "↓ N new" pill while scroll-paused
+- `prefers-reduced-motion` for cursor and translating-hint pulse
+- Caption store: new `sessionStartMs` field (Date.now() at first event) for honest export header
+- New helper module `caption-board/paragraph-grouping.ts` with full unit coverage (12 tests)
+- 89 web vitest tests green (was 74); typecheck clean
+
+Sandbox prototype at `docs/sandbox/caption-board-v2.html` (lab) + screenshots `v3-*.png`.
+
+Next: P4.
 
 ---
 

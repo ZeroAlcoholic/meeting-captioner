@@ -25,6 +25,7 @@ and streams normalized events to browser. WASAPI system audio loopback implement
 | **P2** | OpenAI Realtime mic path (WebRTC + session bridge) | ✅ complete |
 | **P3** | WhisperLiveKit + CTranslate2 MT + WASAPI loopback | ✅ complete |
 | **P3.5** | Audit fixes: SPM tokenizer copy, Whisper pre-cache, ApiKey tri-state | ✅ complete |
+| **P3.6** | CaptionBoard v3 UX: split paragraph streams + freeze partial + auto-hide chrome | ✅ complete |
 | P4 | Translation quality: dual-path MT, Voxtral/Speaches ASR adapters | pending |
 | P5 | Summary draft/refined/stable pipeline | pending |
 | P6 | Reliability + long-session stability | pending |
@@ -64,14 +65,33 @@ and streams normalized events to browser. WASAPI system audio loopback implement
 
 ---
 
-## Test Status (as of P3)
+## Test Status (as of P3.6)
 
 | Suite | Count | Status |
 |-------|-------|--------|
 | `services/offline` pytest | 21 | ✅ passed |
-| `apps/web` vitest | 68 | ✅ passed |
+| `apps/web` vitest | 89 | ✅ passed (P3.6 added 12 paragraph-grouping + 3 sessionStartMs tests) |
 | `services/online` vitest | 10 | ✅ passed |
 | Playwright e2e | 15 | ✅ passed (last verified P2) |
+
+---
+
+## P3.6 — CaptionBoard v3 (UX overhaul)
+
+| File | Change |
+|------|--------|
+| `apps/web/src/store/caption-store.ts` | + `sessionStartMs: number\|null` (Date.now() at first event); persisted (optional) and reset on `clear()` |
+| `apps/web/src/store/caption-store.test.ts` | + 3 lifecycle tests for `sessionStartMs` |
+| `apps/web/src/caption-board/paragraph-grouping.ts` | NEW — `groupParagraphsForSide({segments, translations, side, accessor})` + `formatElapsedFromStart` |
+| `apps/web/src/caption-board/paragraph-grouping.test.ts` | NEW — 12 tests covering ZH/EN punctuation, divergent grouping, U+2009 thin-space, confidence dim, gap-break, format clamp |
+| `apps/web/src/caption-board/CaptionBoard.tsx` | Rewrite: split streams, live id by max startMs, partial freeze + translating hint, inline confirm clear (ref-based), pause-pill, anchor-by-first-segment timestamps |
+| `apps/web/src/caption-board/CaptionBoard.module.css` | Rewrite: split layout, weight 500 live caption, hover-only chrome with backdrop blur, `margin-top:auto` scroll fix, prefers-reduced-motion |
+| `docs/sandbox/caption-board-v2.html` | Interactive lab — current vs proposed split-stream side-by-side comparison |
+| `docs/sandbox/v3-*.png` | Visual evidence: en-zh, zh-en, partial freeze, scroll-paused, degraded chip, app-integrated |
+
+**Why P3.6 not P4**: pure UX/correctness layer on top of existing event contracts; no provider, store
+schema, or transport changes that would justify a phase bump. Done as out-of-band hardening before
+P4 starts. See `docs/TODO.md` for the full bullet list.
 
 ---
 

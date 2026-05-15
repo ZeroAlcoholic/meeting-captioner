@@ -110,3 +110,31 @@ describe('captionStore.clear', () => {
     expect(store.getState().translations).toEqual({});
   });
 });
+
+describe('captionStore.sessionStartMs', () => {
+  it('is null until the first transcript event', () => {
+    const store = createCaptionStore({ persistKey: null });
+    expect(store.getState().sessionStartMs).toBeNull();
+  });
+
+  it('is set on the first transcript event and pinned across subsequent events', async () => {
+    const store = createCaptionStore({ persistKey: null });
+    const api = store.getState();
+    api.applyTranscript(transcript({ segmentId: 's1', status: 'partial', text: 'a', startMs: 0 }));
+    const first = store.getState().sessionStartMs;
+    expect(first).not.toBeNull();
+    // Second event must not overwrite the anchor — all history times resolve from one origin.
+    await new Promise((r) => setTimeout(r, 5));
+    api.applyTranscript(transcript({ segmentId: 's2', status: 'final', text: 'b', startMs: 100 }));
+    expect(store.getState().sessionStartMs).toBe(first);
+  });
+
+  it('is reset to null on clear', () => {
+    const store = createCaptionStore({ persistKey: null });
+    const api = store.getState();
+    api.applyTranscript(transcript({ segmentId: 's1', status: 'final', text: 'a', startMs: 0 }));
+    expect(store.getState().sessionStartMs).not.toBeNull();
+    api.clear();
+    expect(store.getState().sessionStartMs).toBeNull();
+  });
+});

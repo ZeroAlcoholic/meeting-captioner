@@ -28,6 +28,13 @@ export interface CaptionState {
   maxSegments: number;
   segments: CaptionSegment[];
   translations: Record<string, CaptionTranslation>;
+  /**
+   * Wall-clock time (Date.now ms) of the FIRST transcript event in this session.
+   * Used to render history time-gutter labels (M:SS elapsed-from-start) and to
+   * generate honest export timestamps without the previous "subtract latest
+   * startMs from now" drift. Null until the first event arrives; cleared on clear().
+   */
+  sessionStartMs: number | null;
   applyTranscript: (event: TranscriptEvent) => void;
   applyTranslation: (event: TranslationEvent) => void;
   clear: () => void;
@@ -47,16 +54,26 @@ interface PersistedState {
   v: number;
   segments: CaptionSegment[];
   translations: Record<string, CaptionTranslation>;
+  /** Optional in v1; absent for pre-sessionStartMs persisted blobs. */
+  sessionStartMs?: number | null;
   savedAt: string;
 }
 
-function loadPersisted(key: string): { segments: CaptionSegment[]; translations: Record<string, CaptionTranslation> } | null {
+function loadPersisted(key: string): {
+  segments: CaptionSegment[];
+  translations: Record<string, CaptionTranslation>;
+  sessionStartMs: number | null;
+} | null {
   try {
     const raw = localStorage.getItem(key);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as PersistedState;
     if (parsed.v !== PERSIST_VERSION) return null;
-    return { segments: parsed.segments ?? [], translations: parsed.translations ?? {} };
+    return {
+      segments: parsed.segments ?? [],
+      translations: parsed.translations ?? {},
+      sessionStartMs: parsed.sessionStartMs ?? null,
+    };
   } catch {
     return null;
   }
@@ -73,6 +90,7 @@ function makeDebouncedSaver(key: string): (state: CaptionState) => void {
           v: PERSIST_VERSION,
           segments: state.segments,
           translations: state.translations,
+          sessionStartMs: state.sessionStartMs,
           savedAt: new Date().toISOString(),
         };
         localStorage.setItem(key, JSON.stringify(payload));
@@ -149,6 +167,7 @@ export function createCaptionStore(options: CreateCaptionStoreOptions = {}): Cap
     maxSegments,
     segments: hydrated?.segments ?? [],
     translations: hydrated?.translations ?? {},
+    sessionStartMs: hydrated?.sessionStartMs ?? null,
 
     applyTranscript: (event) =>
       set((state) => {
@@ -158,6 +177,9 @@ export function createCaptionStore(options: CreateCaptionStoreOptions = {}): Cap
           event.revisionOf,
           state.maxSegments,
         );
+        // First transcript event seeds the session start time. Subsequent events
+        // never overwrite it, so all history time labels share one anchor.
+        const sessionStartMs = state.sessionStartMs ?? Date.now();
         // Prune translations whose source segments dropped out of the buffer.
         // Without this, translations grows unbounded (memory leak in long sessions).
         if (segments.length < Object.keys(state.translations).length) {
@@ -167,9 +189,9 @@ export function createCaptionStore(options: CreateCaptionStoreOptions = {}): Cap
             const t = state.translations[id];
             if (t) next[id] = t;
           }
-          return { segments, translations: next };
+          return { segments, translations: next, sessionStartMs };
         }
-        return { segments };
+        return { segments, sessionStartMs };
       }),
 
     applyTranslation: (event) =>
@@ -181,7 +203,7 @@ export function createCaptionStore(options: CreateCaptionStoreOptions = {}): Cap
       })),
 
     clear: () => {
-      set({ segments: [], translations: {} });
+      set({ segments: [], translations: {}, sessionStartMs: null });
       // Clear is intentional and immediate — wipe the persisted copy too.
       if (persistKey && typeof localStorage !== 'undefined') {
         try { localStorage.removeItem(persistKey); } catch { /* noop */ }
