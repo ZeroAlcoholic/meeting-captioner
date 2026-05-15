@@ -11,7 +11,8 @@ if not defined PYTHON_VENV  set "PYTHON_VENV=%ROOT%\.venv\Scripts\python.exe"
 if not exist "%PYTHON_VENV%" set "PYTHON_VENV=%PYTHON_CONDA%"
 if not defined WHL_MODEL set WHL_MODEL=distil-large-v3
 
-echo %PYTHON_CONDA%%PYTHON_VENV%%ROOT% | findstr /C:" " >nul
+:: NOTE: no space before `|` — cmd would echo it and findstr would false-positive.
+echo %PYTHON_CONDA%%PYTHON_VENV%%ROOT%|findstr /C:" " >nul
 if not errorlevel 1 (
     echo [error] python or offline path contains a space; concurrently cannot quote it.
     exit /b 1

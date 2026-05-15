@@ -21,7 +21,9 @@ if not defined WHL_MODEL set WHL_MODEL=distil-large-v3
 if not exist "%LOGS%" mkdir "%LOGS%"
 
 :: Reject space-containing paths early — shell-quoting through concurrently is unreliable.
-echo %PYTHON_CONDA%%PYTHON_VENV%%OFFLINE% | findstr /C:" " >nul
+:: NOTE: do NOT put a space before `|` — cmd's `echo X | foo` includes that
+:: space in the echoed text and findstr would always match it (false positive).
+echo %PYTHON_CONDA%%PYTHON_VENV%%OFFLINE%|findstr /C:" " >nul
 if not errorlevel 1 (
     echo [error] PYTHON_CONDA / PYTHON_VENV / OFFLINE path contains a space.
     echo         Please install Python or check out the repo into a path without spaces,
