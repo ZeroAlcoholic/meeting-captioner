@@ -12,6 +12,7 @@ import websockets
 
 from . import translation as mt
 from .events import health_event
+from .postprocess import to_traditional
 from .stabilizer import SegmentStabilizer
 
 logger = logging.getLogger(__name__)
@@ -20,8 +21,11 @@ WHL_WS_URL = "ws://localhost:9090/"
 WHL_MODEL = os.environ.get("WHL_MODEL", "distil-large-v3")
 WHL_CONNECT_TIMEOUT = 30.0
 
-MIN_WORDS_TO_TRANSLATE = 3   # minimum space-separated tokens (en source)
-MIN_ZH_CHARS = 4             # minimum CJK characters (zh source — no word spaces)
+# Meeting context: short affirmations ("Yes", "OK", "好", "對") carry meaning.
+# Filter only single-noise tokens; trust Whisper's VAD + min_speech_duration_ms
+# to discard true noise.
+MIN_WORDS_TO_TRANSLATE = 1   # en source: any non-empty token translates
+MIN_ZH_CHARS = 2             # zh source: skip single-char fillers ("嗯", "呃")
 
 # Language-aware prompts prime Whisper's decoder for domain vocabulary.
 # VAD threshold 0.3 catches softer/distant speech; shorter silence avoids cutting words.
@@ -35,10 +39,17 @@ _INITIAL_PROMPTS: dict[str, str] = {
         "術語包含要保人、核保、保費、理賠、受益人、附約、健康告知。"
     ),
 }
+# Tuned for meeting speech: catch soft/distant voices without over-fragmenting.
+# - threshold 0.3: more sensitive than default 0.5 (catches softer speakers)
+# - min_speech_duration_ms 250: filters out clicks/keyboard noise
+# - min_silence_duration_ms 500: gives natural pauses room before finalizing
+#   (default 2000 is too laggy; 300 was too aggressive — cut sentences mid-clause)
+# - speech_pad_ms 200: trims tight padding around segments to reduce overlap
 _VAD_PARAMETERS = {
     "threshold": 0.3,
-    "min_speech_duration_ms": 200,
-    "min_silence_duration_ms": 300,
+    "min_speech_duration_ms": 250,
+    "min_silence_duration_ms": 500,
+    "speech_pad_ms": 200,
 }
 
 LANG_PAIR_TO_STT: dict[str, str] = {
@@ -53,13 +64,21 @@ class ASRSession:
     def __init__(self, lang_pair: str = "en→zh-TW") -> None:
         self._language = LANG_PAIR_TO_STT.get(lang_pair, "en")
         self._uid = f"browser-{uuid.uuid4().hex[:8]}"
-        self._stabilizer = SegmentStabilizer()
+        # Stabilizer prefixes segment ids with this session uid so Stop+Start cycles
+        # produce non-colliding ids in the browser captionStore.
+        self._stabilizer = SegmentStabilizer(uid=self._uid)
         self._ready = asyncio.Event()
         self._closed = False
         # Audio forwarded from browser → WHL; large buffer covers model-loading delay (~30s)
         self._audio_q: asyncio.Queue[bytes] = asyncio.Queue(maxsize=500)
         # Events produced for browser (large buffer — browser reads them promptly)
         self._event_q: asyncio.Queue[dict | None] = asyncio.Queue(maxsize=1000)
+        # Bounded set of in-flight translation tasks. CT2 executor is single-thread;
+        # without a cap, a slow MT pass lets segments pile up and starve the event loop.
+        self._pending_translates: set[asyncio.Task] = set()
+        self._max_pending_translates = 10
+        # Tracks audio frames silently dropped on QueueFull — surfaced via degraded health.
+        self._audio_drops = 0
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -129,12 +148,25 @@ class ASRSession:
             await self._put(None)  # sentinel — tells consumer loop to exit
 
     async def push_audio(self, data: bytes) -> None:
-        """Enqueue PCM audio from browser. Buffers even before WHL is ready; drops if full."""
-        if not self._closed:
-            try:
-                self._audio_q.put_nowait(data)
-            except asyncio.QueueFull:
-                pass
+        """Enqueue PCM audio from browser. Buffers even before WHL is ready; drops if full.
+
+        Drops are visible: every 100 dropped frames emits a degraded-audio health event
+        so the user sees the backpressure instead of a silent garbled transcript.
+        """
+        if self._closed:
+            return
+        try:
+            self._audio_q.put_nowait(data)
+        except asyncio.QueueFull:
+            self._audio_drops += 1
+            if self._audio_drops % 100 == 0:
+                await self._put(
+                    health_event(
+                        component="audio",
+                        state="degraded",
+                        message=f"WHL slower than mic: {self._audio_drops} frames dropped",
+                    )
+                )
 
     async def push_event(self, event: dict) -> None:
         """Enqueue an externally produced event (e.g., WASAPI health) for the browser."""
@@ -175,11 +207,26 @@ class ASRSession:
                 except Exception:
                     logger.exception("Stabilizer error on segments: %s", segs[:2])
                     continue
+                # Whisper may emit Simplified Chinese even with a Traditional initial_prompt;
+                # normalize at the source boundary so transcript + translation source_text agree.
+                if self._language == "zh":
+                    for ev in transcript_events:
+                        ev["text"] = to_traditional(ev["text"])
+                    for seg in to_translate:
+                        seg["text"] = to_traditional(seg["text"])
                 for ev in transcript_events:
                     await self._put(ev)
-                # Fire-and-forget translation so recv_loop never blocks on CTranslate2
+                # Fire-and-forget translation so recv_loop never blocks on CTranslate2.
+                # Bounded — if too many are in flight, await one before scheduling more.
                 for seg in to_translate:
-                    asyncio.create_task(self._do_translate(seg))
+                    if len(self._pending_translates) >= self._max_pending_translates:
+                        done, _ = await asyncio.wait(
+                            self._pending_translates, return_when=asyncio.FIRST_COMPLETED
+                        )
+                        self._pending_translates -= done
+                    task = asyncio.create_task(self._do_translate(seg))
+                    self._pending_translates.add(task)
+                    task.add_done_callback(self._pending_translates.discard)
 
     async def _do_translate(self, seg: dict) -> None:
         """Fire-and-forget translation task — runs outside recv_loop."""

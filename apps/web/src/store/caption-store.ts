@@ -35,9 +35,53 @@ export interface CaptionState {
 
 export interface CreateCaptionStoreOptions {
   maxSegments?: number;
+  /** localStorage key for autosave. Pass null to disable persistence (e.g. tests). */
+  persistKey?: string | null;
 }
 
 const DEFAULT_MAX_SEGMENTS = 500;
+const PERSIST_DEBOUNCE_MS = 800;
+const PERSIST_VERSION = 1;
+
+interface PersistedState {
+  v: number;
+  segments: CaptionSegment[];
+  translations: Record<string, CaptionTranslation>;
+  savedAt: string;
+}
+
+function loadPersisted(key: string): { segments: CaptionSegment[]; translations: Record<string, CaptionTranslation> } | null {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as PersistedState;
+    if (parsed.v !== PERSIST_VERSION) return null;
+    return { segments: parsed.segments ?? [], translations: parsed.translations ?? {} };
+  } catch {
+    return null;
+  }
+}
+
+function makeDebouncedSaver(key: string): (state: CaptionState) => void {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  return (state) => {
+    if (timer !== null) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      try {
+        const payload: PersistedState = {
+          v: PERSIST_VERSION,
+          segments: state.segments,
+          translations: state.translations,
+          savedAt: new Date().toISOString(),
+        };
+        localStorage.setItem(key, JSON.stringify(payload));
+      } catch {
+        // QuotaExceeded or unavailable storage — fail silently, in-memory keeps working.
+      }
+    }, PERSIST_DEBOUNCE_MS);
+  };
+}
 
 function eventToSegment(event: TranscriptEvent): CaptionSegment {
   const segment: CaptionSegment = {
@@ -93,21 +137,40 @@ export type CaptionStore = StoreApi<CaptionState>;
 
 export function createCaptionStore(options: CreateCaptionStoreOptions = {}): CaptionStore {
   const maxSegments = options.maxSegments ?? DEFAULT_MAX_SEGMENTS;
+  const persistKey = options.persistKey === null ? null : options.persistKey ?? 'meeting-audio:captions:v1';
 
-  return createStore<CaptionState>((set) => ({
+  // Hydrate from localStorage on construction so a page reload preserves the meeting.
+  const hydrated =
+    persistKey && typeof window !== 'undefined' && typeof localStorage !== 'undefined'
+      ? loadPersisted(persistKey)
+      : null;
+
+  const store = createStore<CaptionState>((set) => ({
     maxSegments,
-    segments: [],
-    translations: {},
+    segments: hydrated?.segments ?? [],
+    translations: hydrated?.translations ?? {},
 
     applyTranscript: (event) =>
-      set((state) => ({
-        segments: upsertSorted(
+      set((state) => {
+        const segments = upsertSorted(
           state.segments,
           eventToSegment(event),
           event.revisionOf,
           state.maxSegments,
-        ),
-      })),
+        );
+        // Prune translations whose source segments dropped out of the buffer.
+        // Without this, translations grows unbounded (memory leak in long sessions).
+        if (segments.length < Object.keys(state.translations).length) {
+          const liveIds = new Set(segments.map((s) => s.segmentId));
+          const next: Record<string, CaptionTranslation> = {};
+          for (const id of liveIds) {
+            const t = state.translations[id];
+            if (t) next[id] = t;
+          }
+          return { segments, translations: next };
+        }
+        return { segments };
+      }),
 
     applyTranslation: (event) =>
       set((state) => ({
@@ -117,6 +180,20 @@ export function createCaptionStore(options: CreateCaptionStoreOptions = {}): Cap
         },
       })),
 
-    clear: () => set({ segments: [], translations: {} }),
+    clear: () => {
+      set({ segments: [], translations: {} });
+      // Clear is intentional and immediate — wipe the persisted copy too.
+      if (persistKey && typeof localStorage !== 'undefined') {
+        try { localStorage.removeItem(persistKey); } catch { /* noop */ }
+      }
+    },
   }));
+
+  // Subscribe AFTER hydration so we don't immediately overwrite with empty state.
+  if (persistKey && typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
+    const save = makeDebouncedSaver(persistKey);
+    store.subscribe((state) => save(state));
+  }
+
+  return store;
 }

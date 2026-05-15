@@ -1,15 +1,46 @@
 /* ─── Caption board ──────────────────────────────────────────────────────────── */
 .board {
+  position: relative;
   display: grid;
   grid-template-rows: 1fr auto;
   flex: 1;
-  min-height: 62vh;
+  /* min-height: 0 lets the grid honour the parent's bounded height instead of
+     growing with content (which used to push the live caption below the fold). */
+  min-height: 0;
   gap: 2rem;
   padding: 2.5rem 2.75rem;
   background: #080c15;
   border-radius: 0.5rem;
   border: 1px solid #111828;
   overflow: hidden;
+}
+
+.boardActions {
+  position: absolute;
+  top: 0.75rem;
+  right: 0.875rem;
+  display: flex;
+  gap: 0.375rem;
+  z-index: 1;
+}
+
+.actionBtn {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--border-subtle, #161e30);
+  color: var(--text-3, #384152);
+  font-family: var(--font-ui, 'DM Mono', monospace);
+  font-size: 0.6875rem;
+  letter-spacing: 0.06em;
+  padding: 0.25rem 0.55rem;
+  border-radius: 0.25rem;
+  cursor: pointer;
+  transition: color 100ms, border-color 100ms;
+}
+
+.actionBtn:hover {
+  color: var(--text-1, #a8b3c8);
+  border-color: var(--border-mid, #1e293a);
 }
 
 .empty {
@@ -32,8 +63,20 @@
   display: flex;
   flex-direction: column;
   gap: 0.375rem;
-  align-self: end;
+  /* Scrolls within its grid cell; auto-pinned to bottom via JS so the latest
+     finalized caption is always visible without manual scrolling.
+     IMPORTANT: no scroll-behavior:smooth — it animates every scrollTop write,
+     which fights the user's wheel input and feels like "can't scroll". */
+  overflow-y: auto;
+  min-height: 0;
+  /* Push first-rendered rows down so short transcripts don't float at the top. */
+  justify-content: flex-end;
 }
+
+/* Subtle scrollbar — visible enough to hint scrollability, not distracting. */
+.history::-webkit-scrollbar { width: 6px; }
+.history::-webkit-scrollbar-thumb { background: #1e293a; border-radius: 3px; }
+.history::-webkit-scrollbar-track { background: transparent; }
 
 .historyRow {
   display: grid;
@@ -44,18 +87,18 @@
 }
 
 .historyTarget {
-  font-family: var(--font-caption, 'Fraunces', 'Noto Serif TC', serif);
-  font-size: 1rem;
-  font-weight: 300;
+  font-family: var(--font-caption, 'Fraunces', 'Noto Sans TC', sans-serif);
+  font-size: 1.5rem;
+  font-weight: 400;
   font-optical-sizing: auto;
-  line-height: 1.45;
-  color: #4a5468;
+  line-height: 1.4;
+  color: #c0c8d8;
 }
 
 .historySource {
   font-family: var(--font-ui, 'DM Mono', monospace);
-  font-size: 0.75rem;
-  color: #2e3a4e;
+  font-size: 0.9375rem;
+  color: #6a7889;
   line-height: 1.5;
   align-self: center;
 }
@@ -70,14 +113,14 @@
 }
 
 .target {
-  font-family: var(--font-caption, 'Fraunces', 'Noto Serif TC', serif);
+  font-family: var(--font-caption, 'Fraunces', 'Noto Sans TC', sans-serif);
   font-size: clamp(2.75rem, 6.5vw, 5rem);
   font-weight: 300;
   font-optical-sizing: auto;
-  font-style: italic;
-  line-height: 1.18;
+  font-style: normal;
+  line-height: 1.25;
   color: #edf0f5;
-  letter-spacing: -0.015em;
+  letter-spacing: -0.005em;
 }
 
 .target[data-status='pending'] {
@@ -109,39 +152,47 @@
   to { visibility: hidden; }
 }
 
-/* ─── zh-TW→en layout ───────────────────────────────────────────────────────── */
+/* ─── zh-TW→en layout ─────────────────────────────────────────────────────────
+   Mirror of en→zh-TW: target (English translation) is the BIG main visual,
+   source (Chinese transcript) is the small subtitle. */
 .board[data-lang-pair='zh-TW→en'] .target {
-  font-family: var(--font-ui, 'DM Mono', monospace);
-  font-size: clamp(1.5rem, 2.8vw, 2.25rem);
+  font-family: var(--font-caption, 'Fraunces', sans-serif);
+  font-size: clamp(2.75rem, 6.5vw, 5rem);
   font-weight: 400;
+  font-optical-sizing: auto;
   font-style: normal;
-  letter-spacing: 0;
-  line-height: 1.4;
-  color: #d8dde8;
+  line-height: 1.25;
+  letter-spacing: -0.005em;
+  color: #f5f7fa;
 }
 
 .board[data-lang-pair='zh-TW→en'] .source {
-  font-family: var(--font-caption, 'Noto Serif TC', serif);
-  font-size: clamp(1.1rem, 1.9vw, 1.6rem);
+  font-family: var(--font-caption, 'Noto Sans TC', sans-serif);
+  font-size: clamp(1rem, 1.6vw, 1.375rem);
   font-style: normal;
-  color: #5a6a84;
-  letter-spacing: 0;
+  color: #8a98b5;
+  letter-spacing: 0.01em;
 }
 
 .board[data-lang-pair='zh-TW→en'] .historyRow {
-  grid-template-columns: 1fr;
-  gap: 0.15rem;
+  grid-template-columns: 2fr 1fr;
+  gap: 1.25rem;
 }
 
 .board[data-lang-pair='zh-TW→en'] .historyTarget {
-  font-family: var(--font-ui, 'DM Mono', monospace);
-  font-size: 0.8125rem;
+  font-family: var(--font-caption, 'Fraunces', sans-serif);
+  font-size: 1.625rem;
+  font-weight: 400;
+  font-optical-sizing: auto;
   font-style: normal;
-  color: #3a4860;
+  color: #d0d8e8;
+  line-height: 1.35;
 }
 
 .board[data-lang-pair='zh-TW→en'] .historySource {
-  font-family: var(--font-caption, 'Noto Serif TC', serif);
-  font-size: 0.75rem;
-  color: #283040;
+  font-family: var(--font-caption, 'Noto Sans TC', sans-serif);
+  font-size: 1rem;
+  color: #7a8899;
+  line-height: 1.5;
+  align-self: center;
 }

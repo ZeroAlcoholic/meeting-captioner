@@ -26,7 +26,8 @@ export function useFakeReplay() {
     setError(null);
     try {
       const script = await loadScript();
-      captionStore.getState().clear();
+      // Do NOT clear captionStore — Demo replay should append to whatever is already
+      // there, just like Stop+Start preserves history. Use the explicit Clear button.
       const provider = new FakeReplayProvider(script, {
         onTranscript: (e) => captionStore.getState().applyTranscript(e),
         onTranslation: (e) => captionStore.getState().applyTranslation(e),

@@ -30,6 +30,10 @@ export class OfflineSTTProvider implements CaptionProvider {
   private workletNode: AudioWorkletNode | null = null;
   private stream: MediaStream | null = null;
   private levelInterval: ReturnType<typeof setInterval> | null = null;
+  // Reconnect state — exponential backoff after WS drops while still 'running'.
+  private reconnectAttempts = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private static readonly MAX_RECONNECT_ATTEMPTS = 5;
 
   constructor(
     private readonly wsUrl: string,
@@ -89,6 +93,7 @@ export class OfflineSTTProvider implements CaptionProvider {
       ws.onopen = () => {
         ws.send(JSON.stringify({ type: 'start', langPair: this.langPair, source: this.audioSource }));
         clearTimeout(timeout);
+        this.reconnectAttempts = 0;
         resolve();
       };
 
@@ -107,12 +112,39 @@ export class OfflineSTTProvider implements CaptionProvider {
       };
 
       ws.onclose = () => {
-        if (this._status === 'running') {
-          this.emitHealth('transport', 'failed');
-          this.stop();
-        }
+        // Only attempt recovery if we're still meant to be running (user didn't click Stop).
+        if (this._status !== 'running') return;
+        this.scheduleReconnect();
       };
     });
+  }
+
+  private scheduleReconnect(): void {
+    if (this.reconnectAttempts >= OfflineSTTProvider.MAX_RECONNECT_ATTEMPTS) {
+      this.emitHealth(
+        'transport',
+        'failed',
+        `Auto-reconnect gave up after ${OfflineSTTProvider.MAX_RECONNECT_ATTEMPTS} attempts`,
+      );
+      this.stop();
+      return;
+    }
+    const delayMs = Math.min(16000, 1000 * 2 ** this.reconnectAttempts);
+    this.reconnectAttempts += 1;
+    this.emitHealth(
+      'transport',
+      'reconnecting',
+      `WS dropped — retry ${this.reconnectAttempts}/${OfflineSTTProvider.MAX_RECONNECT_ATTEMPTS} in ${delayMs / 1000}s`,
+    );
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this._status !== 'running') return;
+      this.connectWebSocket().catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.emitHealth('transport', 'reconnecting', `Retry failed: ${msg}`);
+        this.scheduleReconnect();
+      });
+    }, delayMs);
   }
 
   private handleEvent(event: OfflineEvent): void {
@@ -192,6 +224,11 @@ export class OfflineSTTProvider implements CaptionProvider {
       clearInterval(this.levelInterval);
       this.levelInterval = null;
     }
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.reconnectAttempts = 0;
     this.workletNode?.disconnect();
     this.workletNode?.port.close();
     void this.audioCtx?.close();

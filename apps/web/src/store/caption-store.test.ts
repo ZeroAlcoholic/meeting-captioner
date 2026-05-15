@@ -30,14 +30,14 @@ function translation(sourceSegmentId: string, status: TranslationEvent['status']
 
 describe('captionStore.applyTranscript', () => {
   it('appends a new segment', () => {
-    const store = createCaptionStore();
+    const store = createCaptionStore({ persistKey: null });
     store.getState().applyTranscript(transcript({ segmentId: 's1', status: 'partial', text: 'a', startMs: 0 }));
     expect(store.getState().segments).toHaveLength(1);
     expect(store.getState().segments[0]?.text).toBe('a');
   });
 
   it('updates the same segmentId in place across partial → revised → final', () => {
-    const store = createCaptionStore();
+    const store = createCaptionStore({ persistKey: null });
     const api = store.getState();
     api.applyTranscript(transcript({ segmentId: 's1', status: 'partial', text: 'hel', startMs: 0 }));
     api.applyTranscript(transcript({ segmentId: 's1', status: 'revised', text: 'hello', startMs: 0 }));
@@ -50,7 +50,7 @@ describe('captionStore.applyTranscript', () => {
   });
 
   it('keeps insertion order by startMs even with out-of-order arrival', () => {
-    const store = createCaptionStore();
+    const store = createCaptionStore({ persistKey: null });
     const api = store.getState();
     api.applyTranscript(transcript({ segmentId: 'a', status: 'final', text: 'first', startMs: 0 }));
     api.applyTranscript(transcript({ segmentId: 'c', status: 'final', text: 'third', startMs: 2000 }));
@@ -59,7 +59,7 @@ describe('captionStore.applyTranscript', () => {
   });
 
   it('supersedes the previous segment when revisionOf is set', () => {
-    const store = createCaptionStore();
+    const store = createCaptionStore({ persistKey: null });
     const api = store.getState();
     api.applyTranscript(transcript({ segmentId: 's1', status: 'partial', text: 'wrong', startMs: 0 }));
     api.applyTranscript(transcript({ segmentId: 's2', status: 'final', text: 'right', startMs: 0, revisionOf: 's1' }));
@@ -83,14 +83,14 @@ describe('captionStore.applyTranscript', () => {
 
 describe('captionStore.applyTranslation', () => {
   it('stores translation keyed by sourceSegmentId', () => {
-    const store = createCaptionStore();
+    const store = createCaptionStore({ persistKey: null });
     const api = store.getState();
     api.applyTranslation(translation('s1', 'draft', '草稿'));
     expect(store.getState().translations['s1']?.targetText).toBe('草稿');
   });
 
   it('overwrites previous translation as it refines', () => {
-    const store = createCaptionStore();
+    const store = createCaptionStore({ persistKey: null });
     const api = store.getState();
     api.applyTranslation(translation('s1', 'draft', '草稿'));
     api.applyTranslation(translation('s1', 'final', '完稿'));
@@ -101,7 +101,7 @@ describe('captionStore.applyTranslation', () => {
 
 describe('captionStore.clear', () => {
   it('removes all segments and translations', () => {
-    const store = createCaptionStore();
+    const store = createCaptionStore({ persistKey: null });
     const api = store.getState();
     api.applyTranscript(transcript({ segmentId: 's1', status: 'final', text: 'a', startMs: 0 }));
     api.applyTranslation(translation('s1', 'final', '甲'));

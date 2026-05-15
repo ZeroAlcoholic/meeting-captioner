@@ -10,8 +10,12 @@ from .events import transcript_event
 class SegmentStabilizer:
     """Tracks WHL segment state across messages; produces normalized TranscriptEvents."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, uid: str = "session") -> None:
         self._finalized: set[int] = set()
+        # WHL restarts segment timestamps at 0 each connection — without a session
+        # prefix, a new session's seg-0 collides with the previous session's seg-0
+        # in the browser captionStore (overwriting prior content).
+        self._uid = uid
 
     def feed(self, segments: list[dict]) -> tuple[list[dict], list[dict]]:
         """Process raw WHL segment list.
@@ -34,7 +38,7 @@ class SegmentStabilizer:
             if not text:
                 continue
             self._finalized.add(start_key)
-            seg_id = f"seg-{start_key}"
+            seg_id = f"{self._uid}-seg-{start_key}"
             end_ms = math.floor(float(seg["end"]) * 1000)
             transcript_events.append(
                 transcript_event(
@@ -57,7 +61,7 @@ class SegmentStabilizer:
                 partial_start = math.floor(float(partial["start"]) * 1000)
                 transcript_events.append(
                     transcript_event(
-                        segment_id=f"seg-{partial_start}",
+                        segment_id=f"{self._uid}-seg-{partial_start}",
                         status="partial",
                         text=text,
                         start_ms=partial_start,

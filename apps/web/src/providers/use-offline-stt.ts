@@ -39,8 +39,8 @@ export function useOfflineSTT() {
 
   const start = useCallback(async () => {
     setError(null);
-    captionStore.getState().clear();
-
+    // Do NOT clear captionStore here — pause/resume must preserve scrollback.
+    // Use the explicit Clear button in CaptionBoard to wipe.
     const { langPair, audioSource } = settingsStore.getState();
 
     const provider = new OfflineSTTProvider(WS_URL, {

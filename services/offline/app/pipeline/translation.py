@@ -108,6 +108,21 @@ def _translate_sync(source_text: str, direction: str) -> str:
     return text.replace("▁", " ").strip()
 
 
+_TRANSLATE_TIMEOUT_S = 5.0
+
+
+async def _run_in_executor_with_timeout(loop, fn, *args):
+    """Run a blocking translation step under a hard timeout.
+
+    The MT executor is single-threaded; if a call hangs (CT2 deadlock or pathological
+    input) the entire pipeline blocks forever. wait_for guarantees the executor slot
+    is released within _TRANSLATE_TIMEOUT_S — caller treats timeout as None (skip).
+    """
+    return await asyncio.wait_for(
+        loop.run_in_executor(_executor, fn, *args), timeout=_TRANSLATE_TIMEOUT_S
+    )
+
+
 async def translate(
     *,
     segment_id: str,
@@ -118,7 +133,11 @@ async def translate(
     """Translate one finalized segment asynchronously. Returns TranslationEvent or None."""
     direction = "en" if source_language == "en" else "zh"
     loop = asyncio.get_running_loop()
-    ok = await loop.run_in_executor(_executor, _load_once, direction)
+    try:
+        ok = await _run_in_executor_with_timeout(loop, _load_once, direction)
+    except asyncio.TimeoutError:
+        logger.error("MT model load timed out (direction=%s)", direction)
+        return None
     if not ok:
         return None
     try:
@@ -126,7 +145,7 @@ async def translate(
             # Mask glossary terms before MT so the model preserves them as placeholders,
             # then restore correct zh-TW terms in the raw output before OpenCC.
             masked_text, mappings = apply_source_glossary(text)
-            raw = await loop.run_in_executor(_executor, _translate_sync, masked_text, direction)
+            raw = await _run_in_executor_with_timeout(loop, _translate_sync, masked_text, direction)
             if not raw:
                 return None
             if mappings:
@@ -134,7 +153,7 @@ async def translate(
             polished = postprocess_zh(raw)
         else:
             # zh→en: translate directly. English output needs no OpenCC conversion.
-            raw = await loop.run_in_executor(_executor, _translate_sync, text, direction)
+            raw = await _run_in_executor_with_timeout(loop, _translate_sync, text, direction)
             if not raw:
                 return None
             polished = raw
@@ -147,6 +166,9 @@ async def translate(
             source_language=source_language,
             target_language=target_language,
         )
+    except asyncio.TimeoutError:
+        logger.error("Translation timed out (>%.1fs) for segment %s", _TRANSLATE_TIMEOUT_S, segment_id)
+        return None
     except Exception:
         logger.exception("Translation error for segment %s", segment_id)
         return None

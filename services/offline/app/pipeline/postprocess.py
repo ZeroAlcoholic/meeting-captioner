@@ -46,6 +46,15 @@ def process(text: str) -> str:
     return text
 
 
+def to_traditional(text: str) -> str:
+    """Apply OpenCC s2twp without dedup — for normalizing Whisper's zh transcripts.
+    Whisper may emit Simplified Chinese even when initial_prompt is Traditional;
+    convert at the boundary so the UI consistently shows Traditional."""
+    if OPENCC_AVAILABLE and _converter is not None:
+        return _converter.convert(text)
+    return text
+
+
 # Placeholder format: GS0 … GS9 (6 chars max, all-caps alphanumeric).
 # Shorter than the previous TERM{i}ZH — SentencePiece still may split these,
 # but restoration via regex is more reliable on short tokens.

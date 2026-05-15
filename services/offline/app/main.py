@@ -37,14 +37,29 @@ _whisper_error: str | None = None
 
 
 async def _probe_whl_once() -> bool:
-    """TCP-level liveness check — returns True if WHL port is accepting connections."""
+    """Liveness check for WHL on :9090.
+
+    WHL is a WebSocket-only server; opening then immediately closing a raw TCP
+    connection makes it log 'InvalidMessage: did not receive a valid HTTP request'
+    on every probe (~360 errors / 30 min). Sending a minimal HTTP/1.0 GET before
+    close lets WHL's HTTP parser see a complete request and reply quietly.
+    We still treat any successful connect as 'reachable'.
+    """
     try:
-        _, writer = await asyncio.wait_for(
+        reader, writer = await asyncio.wait_for(
             asyncio.open_connection(_WHL_HOST, _WHL_PORT),
             timeout=_WHL_PROBE_TIMEOUT,
         )
-        writer.close()
-        await writer.wait_closed()
+        try:
+            writer.write(b"GET / HTTP/1.0\r\n\r\n")
+            await writer.drain()
+            try:
+                await asyncio.wait_for(reader.read(64), timeout=0.2)
+            except asyncio.TimeoutError:
+                pass
+        finally:
+            writer.close()
+            await writer.wait_closed()
         return True
     except Exception:
         return False
