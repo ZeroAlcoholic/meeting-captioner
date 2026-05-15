@@ -106,6 +106,7 @@ export function CaptionBoard() {
   // startMs (fake replay) vs wall-clock startMs (OpenAI Realtime).
   const anchorMs = segments[0]?.startMs ?? 0;
 
+  const boardRef = useRef<HTMLDivElement>(null);
   const historyRef = useRef<HTMLDivElement>(null);
   // autoPin pauses when user manually scrolls up; resumes when they scroll back to bottom.
   const [autoPin, setAutoPin] = useState(true);
@@ -119,6 +120,26 @@ export function CaptionBoard() {
   // would incorrectly see false on the second synchronous click).
   const confirmingClearRef = useRef(false);
   const confirmTimeoutRef = useRef<number | null>(null);
+
+  // ─── Hotkey-driven UI state ───
+  // Space: freeze the live-caption area on whatever was on screen at the
+  // moment of pressing — useful for "wait, what did they just say?" moments.
+  // History keeps receiving new segments; only the live area is paused.
+  const [frozen, setFrozen] = useState(false);
+  // `.`: force-show the auto-hidden Export/Clear chrome without needing a hover
+  // (helps for projector/touch use where mouse hover isn't available).
+  const [forceShowChrome, setForceShowChrome] = useState(false);
+  // `f`: fullscreen the board element. Tracked from fullscreenchange so the
+  // state stays in sync when the user exits via Esc.
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  // Snapshot of what was on the live caption area at the moment we froze.
+  // Read while `frozen === true`; ignored otherwise.
+  const frozenSnapshotRef = useRef<{
+    target: string;
+    source: string;
+    showHint: boolean;
+    hintText: string;
+  } | null>(null);
 
   // Live segment = the most recent partial/revised/final by startMs.
   const liveSegment = pickLiveSegment(segments);
@@ -233,6 +254,55 @@ export function CaptionBoard() {
     setPendingNew(0);
   }
 
+  // ─── Hotkey listener (document-scoped, ignores form inputs) ───
+  // Bindings:
+  //   f       — toggle fullscreen on the board element
+  //   Space   — toggle freeze of the live caption area (history keeps flowing)
+  //   .       — toggle persistent visibility of Export/Clear chrome
+  // Form inputs (input/textarea/select/contentEditable) are exempted so typing
+  // in the settings panel doesn't trigger meeting-control hotkeys.
+  useEffect(() => {
+    function isTypingTarget(t: EventTarget | null): boolean {
+      if (!(t instanceof HTMLElement)) return false;
+      const tag = t.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+      if (t.isContentEditable) return true;
+      return false;
+    }
+    function onKey(e: KeyboardEvent): void {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (isTypingTarget(e.target)) return;
+      if (e.key === 'f' || e.key === 'F') {
+        e.preventDefault();
+        const el = boardRef.current;
+        if (!el) return;
+        if (document.fullscreenElement === el) {
+          void document.exitFullscreen?.();
+        } else {
+          void el.requestFullscreen?.();
+        }
+      } else if (e.key === ' ') {
+        e.preventDefault();
+        setFrozen((prev) => !prev);
+      } else if (e.key === '.') {
+        e.preventDefault();
+        setForceShowChrome((prev) => !prev);
+      }
+    }
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, []);
+
+  // Track real fullscreen state — including exit-via-Esc which doesn't
+  // route through our keydown handler.
+  useEffect(() => {
+    function onFsChange(): void {
+      setIsFullscreen(document.fullscreenElement === boardRef.current);
+    }
+    document.addEventListener('fullscreenchange', onFsChange);
+    return () => document.removeEventListener('fullscreenchange', onFsChange);
+  }, []);
+
   // ─── Live caption: freeze on previous final while a new partial is in progress ───
   const lastFinalSegment = useMemo(
     () => historySegments.at(-1),
@@ -269,8 +339,42 @@ export function CaptionBoard() {
       ? liveSegment.text.slice(0, 54) + '…'
       : liveSegment?.text ?? '';
 
+  // Freeze snapshot bookkeeping: when `frozen` flips on, capture exactly what
+  // is currently on the live area. When it flips off, drop the snapshot so
+  // the live area resumes tracking the latest segment. Snapshots use refs to
+  // avoid an extra render cycle and to remain stable while frozen is true.
+  if (frozen && frozenSnapshotRef.current === null) {
+    frozenSnapshotRef.current = {
+      target: displayedLiveTarget ?? '…',
+      source: displayedLiveSource ?? '',
+      showHint: liveIsPartial && !!lastFinalSegment,
+      hintText: partialPreview,
+    };
+  } else if (!frozen && frozenSnapshotRef.current !== null) {
+    frozenSnapshotRef.current = null;
+  }
+  const renderedTarget = frozen
+    ? frozenSnapshotRef.current?.target ?? '…'
+    : displayedLiveTarget ?? '…';
+  const renderedSource = frozen
+    ? frozenSnapshotRef.current?.source ?? ''
+    : displayedLiveSource ?? '';
+  const renderedShowHint = frozen
+    ? frozenSnapshotRef.current?.showHint ?? false
+    : liveIsPartial && !!lastFinalSegment;
+  const renderedHintText = frozen
+    ? frozenSnapshotRef.current?.hintText ?? ''
+    : partialPreview;
+
   return (
-    <div className={styles.board} data-lang-pair={langPair}>
+    <div
+      ref={boardRef}
+      className={styles.board}
+      data-lang-pair={langPair}
+      data-frozen={frozen || undefined}
+      data-force-chrome={forceShowChrome || undefined}
+      data-fullscreen={isFullscreen || undefined}
+    >
       <div className={styles.boardActions}>
         <button
           type="button"
@@ -345,19 +449,24 @@ export function CaptionBoard() {
         <div
           className={styles.target}
           data-testid="caption-target"
-          data-status={liveIsPartial ? 'frozen' : 'final'}
+          data-status={frozen ? 'paused' : liveIsPartial ? 'frozen' : 'final'}
         >
-          {displayedLiveTarget ?? '…'}
+          {renderedTarget}
         </div>
         <div className={styles.source} data-testid="caption-source">
-          {displayedLiveSource ?? ''}
-          {liveIsPartial && !lastFinalSegment && (
+          {renderedSource}
+          {!frozen && liveIsPartial && !lastFinalSegment && (
             <span className={styles.cursor} aria-hidden="true" />
           )}
         </div>
-        {liveIsPartial && lastFinalSegment && (
+        {renderedShowHint && (
           <span className={styles.translatingHint} data-testid="translating-hint">
-            translating · {partialPreview}
+            translating · {renderedHintText}
+          </span>
+        )}
+        {frozen && (
+          <span className={styles.pausedBadge} data-testid="paused-badge">
+            ⏸ paused · press space to resume
           </span>
         )}
       </div>

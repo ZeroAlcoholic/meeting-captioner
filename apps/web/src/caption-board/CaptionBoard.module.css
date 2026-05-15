@@ -29,10 +29,28 @@
   pointer-events: none;
 }
 .board:hover .boardActions,
-.board:focus-within .boardActions {
+.board:focus-within .boardActions,
+.board[data-force-chrome] .boardActions {
   opacity: 1;
   transform: none;
   pointer-events: auto;
+}
+
+/* When the user manually freezes (Space hotkey), tint the live area subtly so
+   the operator can't miss that "live = paused, history is still flowing." */
+.board[data-frozen] .target {
+  color: #c0c8d8;
+}
+
+/* Fullscreen mode: drop the rounded card chrome so the board fills the
+   physical screen edge-to-edge. The browser's built-in :fullscreen pseudo-class
+   is the source of truth, but we mirror via data-fullscreen for symmetry with
+   the React state. */
+.board[data-fullscreen],
+.board:fullscreen {
+  border-radius: 0;
+  border: none;
+  padding: 3rem 4rem;
 }
 
 .actionBtn {
@@ -199,6 +217,22 @@
   color: #4a5870;
   line-height: 1.5;
   letter-spacing: 0.01em;
+}
+
+/* Paused badge — surfaces the manual Space-freeze state. Sits underneath
+   the source row alongside / instead of the translating hint. */
+.pausedBadge {
+  font-family: var(--font-ui, 'DM Mono', monospace);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--amber, #c79236);
+  border: 1px solid var(--amber-dim, #7a5920);
+  background: rgba(199, 146, 54, 0.08);
+  padding: 3px 9px;
+  border-radius: 999px;
+  align-self: flex-start;
+  margin-top: 4px;
 }
 
 /* Translating hint — replaces target/source desync that the previous
