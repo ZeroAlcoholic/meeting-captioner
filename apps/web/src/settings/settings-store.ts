@@ -67,7 +67,7 @@ export const SCENARIO_OPTIONS: ScenarioOption[] = [
     description: 'Pick sources and policy yourself.',
     descriptionZh: '自行選擇音源與混音策略。',
     enabled: false,
-    hint: 'Available in P3.',
+    hint: 'Coming soon.',
   },
 ];
 
@@ -166,7 +166,11 @@ export function createSettingsStore(): SettingsStore {
     sessionStartAt: null,
     sessionElapsedMs: 0,
 
-    setScenario: (id) => set({ scenarioId: id }),
+    setScenario: (id) =>
+      set({
+        scenarioId: id,
+        audioSource: id === 'online_meeting_box' ? 'system' : 'mic',
+      }),
     setMode: (id) => set({ modeId: id }),
     setLangPair: (id) => set({ langPair: id }),
     setAudioSource: (audioSource) => set({ audioSource }),

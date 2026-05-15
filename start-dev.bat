@@ -1,31 +1,45 @@
 @echo off
-title Meeting Audio — Dev Launcher
-echo.
-echo  ==========================================
-echo   Meeting Audio - Starting Dev Services
-echo  ==========================================
-echo.
+title Dev Launcher
+setlocal
 
-:: services/offline  (Port 8000 — FastAPI + WhisperLive on 9090)
-start "Offline STT/MT :8000" cmd /k "cd /d C:\Develop\meeting_audio\services\offline && echo [Offline Service] Starting... && .venv\Scripts\uvicorn.exe app.main:app --host 0.0.0.0 --port 8000"
+set "PYTHON=C:\Programs\miniforge3\envs\deve\python.exe"
+set "ROOT=C:\Develop\meeting_audio"
+set "OFFLINE=%ROOT%\services\offline"
+set "ONLINE=%ROOT%\services\online"
+set "LOGS=%ROOT%\logs"
+set "VENV_PY=%OFFLINE%\.venv\Scripts\python.exe"
+if not defined WHL_MODEL set WHL_MODEL=distil-large-v3
 
-:: services/online  (Port 8787 — Fastify + OpenAI session broker)
-start "Online Service :8787" cmd /k "cd /d C:\Develop\meeting_audio\services\online && echo [Online Service] Starting... && pnpm dev"
+if not exist "%LOGS%" mkdir "%LOGS%"
 
-:: apps/web  (Port 5173 — Vite dev server)
-start "Web UI :5173" cmd /k "cd /d C:\Develop\meeting_audio && echo [Web UI] Starting... && pnpm --filter @meeting-audio/web dev"
+:: Kill stale ports
+for %%P in (5173 8000 8787 9090) do (
+    for /f "tokens=5" %%i in (\'netstat -ano 2^>/dev/null ^| findstr ":%%P "\') do (
+        taskkill /PID %%i /F >/dev/null 2>/dev/null
+    )
+)
+
+:: WhisperLiveKit -- uses .venv Python + explicit launcher script
+start "WHL :9090" /min cmd /k ""%VENV_PY%" "%OFFLINE%\run_whl.py" 1>>"%LOGS%\whl.log" 2>&1"
+
+:: FastAPI offline -- uses deve conda Python
+start "Offline :8000" /min cmd /k "cd /d "%OFFLINE%" && "%PYTHON%" -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --app-dir "%OFFLINE%" 1>>"%LOGS%\offline.log" 2>&1"
+
+:: Online Node.js service
+start "Online :8787" /min cmd /k "cd /d "%ONLINE%" && pnpm dev 1>>"%LOGS%\online.log" 2>&1"
+
+:: Web UI
+start "Web :5173" /min cmd /k "cd /d "%ROOT%" && pnpm --filter @meeting-audio/web dev 1>>"%LOGS%\web.log" 2>&1"
 
 echo.
-echo  3 windows opened. Wait ~60s for Whisper model to load.
+echo  Services started in separate windows (minimized).
+echo  Close this window freely -- services keep running.
 echo.
-echo  Web UI   : http://localhost:5173
-echo  Offline  : http://localhost:8000/healthz
-echo  Online   : http://localhost:8787/healthz
+echo  Web      http://localhost:5173
+echo  Offline  http://localhost:8000/healthz
+echo  Online   http://localhost:8787/healthz
 echo.
-echo  Full Offline path:
-echo    Settings ^> Scenario: Physical Meeting
-echo    Settings ^> Mode: Full Offline
-echo    Wait for [Start Offline] button to enable
-echo    Click [Start Offline] ^> allow microphone ^> speak English
+echo  Logs: %LOGS%echo    whl.log  offline.log  online.log  web.log
 echo.
+echo  To stop: close the 4 minimized CMD windows, or re-run this file.
 pause

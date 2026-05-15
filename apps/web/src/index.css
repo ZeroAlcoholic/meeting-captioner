@@ -107,6 +107,18 @@ body {
   background: rgba(224, 112, 96, 0.05);
 }
 
+/* Audio source chip */
+.audio-source-chip {
+  font-size: 0.875rem;
+  line-height: 1;
+  padding: 0.25rem 0.4rem;
+  border-radius: 0.25rem;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border-subtle);
+  cursor: default;
+  user-select: none;
+}
+
 /* Buttons */
 .app-controls button {
   appearance: none;

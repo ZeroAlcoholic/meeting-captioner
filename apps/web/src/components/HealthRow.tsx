@@ -1,15 +1,13 @@
 import type { HealthComponent, HealthState } from '@meeting-audio/contracts';
 import { useSettingsStore } from '../settings/use-settings-store.js';
+import type { ModeId } from '../settings/settings-store.js';
 import styles from './HealthRow.module.css';
 
-const COMPONENTS = [
-  'audio',
-  'stt',
-  'translation',
-  'summary',
-  'transport',
-  'ui',
-] as const satisfies readonly HealthComponent[];
+const COMPONENTS_BY_MODE: Record<ModeId, readonly HealthComponent[]> = {
+  online_full:     ['audio', 'transport', 'translation'],
+  hybrid_privacy:  ['audio', 'stt', 'transport', 'translation'],
+  full_offline:    ['audio', 'stt', 'translation'],
+};
 
 const LABEL: Record<HealthComponent, string> = {
   audio: 'Audio',
@@ -48,12 +46,14 @@ export function bucketOf(state: HealthState): HealthBucket {
 
 export function HealthRow() {
   const health = useSettingsStore((s) => s.health);
+  const modeId = useSettingsStore((s) => s.modeId);
+  const components = COMPONENTS_BY_MODE[modeId];
 
   return (
     <div className={styles.row} data-testid="health-row">
       <span className={styles.title}>Health</span>
       <div className={styles.items}>
-        {COMPONENTS.map((component) => {
+        {components.map((component) => {
           const snap = health[component];
           const bucket = bucketOf(snap.state);
           const tooltip = `${LABEL[component]} — ${snap.state}${snap.message ? `: ${snap.message}` : ''}`;

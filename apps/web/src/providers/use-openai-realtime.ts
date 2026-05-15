@@ -8,19 +8,31 @@ import type { ProviderStatus } from './types.js';
 const SESSION_URL = `${ONLINE_SERVICE_URL}/session`;
 const SESSION_INFO_URL = `${ONLINE_SERVICE_URL}/session/info`;
 
+export type ApiKeyStatus = 'checking' | 'present' | 'no-key' | 'service-down';
+
 export function useOpenAIRealtime() {
   const providerRef = useRef<OpenAIRealtimeProvider | null>(null);
   const [status, setStatus] = useState<ProviderStatus>('idle');
   const [error, setError] = useState<string | null>(null);
-  const [hasApiKey, setHasApiKey] = useState<boolean | null>(null); // null = checking
+  const [apiKeyStatus, setApiKeyStatus] = useState<ApiKeyStatus>('checking');
 
   useEffect(() => {
-    fetch(SESSION_INFO_URL)
-      .then((r) => r.json())
-      .then((d: { hasApiKey: boolean }) => setHasApiKey(d.hasApiKey))
-      .catch(() => setHasApiKey(false));
-
+    let cancelled = false;
+    const poll = () => {
+      fetch(SESSION_INFO_URL)
+        .then((r) => r.json())
+        .then((d: { hasApiKey: boolean }) => {
+          if (cancelled) return;
+          setApiKeyStatus(d.hasApiKey ? 'present' : 'no-key');
+        })
+        .catch(() => { if (!cancelled) setApiKeyStatus('service-down'); });
+    };
+    poll();
+    // Re-poll every 3 s so UI auto-updates when service comes up or key is set.
+    const id = setInterval(poll, 3000);
     return () => {
+      cancelled = true;
+      clearInterval(id);
       providerRef.current?.stop();
     };
   }, []);
@@ -60,5 +72,5 @@ export function useOpenAIRealtime() {
     setStatus('stopped');
   }, []);
 
-  return { status, error, hasApiKey, start, stop };
+  return { status, error, apiKeyStatus, start, stop };
 }

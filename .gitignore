@@ -59,6 +59,10 @@ desktop.ini
 test-results/
 playwright-report/
 playwright/.cache/
+.playwright-mcp/
+
+# --- Manual testing screenshots (root-level transient artifacts) ---
+/*.png
 
 # --- Claude / Plans ---
 .claude/local/

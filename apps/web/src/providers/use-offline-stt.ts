@@ -20,12 +20,19 @@ export function useOfflineSTT() {
   const [whisperStatus, setWhisperStatus] = useState<string | null>(null); // null = checking
 
   useEffect(() => {
-    fetch(HEALTHZ_URL)
-      .then((r) => r.json())
-      .then((d: OfflineHealthz) => setWhisperStatus(d.whisper_status))
-      .catch(() => setWhisperStatus('unavailable'));
-
+    let cancelled = false;
+    const poll = () => {
+      fetch(HEALTHZ_URL)
+        .then((r) => r.json())
+        .then((d: OfflineHealthz) => { if (!cancelled) setWhisperStatus(d.whisper_status); })
+        .catch(() => { if (!cancelled) setWhisperStatus('unavailable'); });
+    };
+    poll();
+    // Re-poll every 3s so UI auto-updates when WHL becomes ready (e.g., after model download).
+    const id = setInterval(poll, 3000);
     return () => {
+      cancelled = true;
+      clearInterval(id);
       providerRef.current?.stop();
     };
   }, []);

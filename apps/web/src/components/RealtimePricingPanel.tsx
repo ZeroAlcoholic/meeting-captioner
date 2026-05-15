@@ -81,6 +81,7 @@ function fmtTokens(n: number): string {
 // ─── Component ────────────────────────────────────────────────────────────────
 export function RealtimePricingPanel() {
   const langPair        = useSettingsStore((s) => s.langPair);
+  const audioSource     = useSettingsStore((s) => s.audioSource);
   const sessionStartAt  = useSettingsStore((s) => s.sessionStartAt);
   const sessionElapsedMs = useSettingsStore((s) => s.sessionElapsedMs);
   const resetSession    = useSettingsStore((s) => s.resetSession);
@@ -99,81 +100,23 @@ export function RealtimePricingPanel() {
   const bk        = calcCost(totalMs, langPair);
 
   return (
-    <div className={styles.panel}>
-      <div className={styles.header}>
-        <span className={styles.title}>Realtime API Cost Estimate</span>
-        <span className={styles.model}>gpt-4o-realtime-preview · {langPair}</span>
-        <div className={styles.timerGroup}>
-          {isLive && <span className={styles.liveDot} aria-label="Live" />}
-          <span className={styles.timer} data-live={isLive}>
-            {fmtDuration(totalMs)}
-          </span>
-          {!isLive && hasData && (
-            <button
-              type="button"
-              className={styles.resetBtn}
-              onClick={resetSession}
-              aria-label="Reset session cost"
-            >
-              Reset
-            </button>
-          )}
-        </div>
-      </div>
-
-      {!hasData ? (
-        <p className={styles.idle}>Start a Realtime session to track cost automatically.</p>
-      ) : (
-        <>
-          <table className={styles.table}>
-            <thead>
-              <tr>
-                <th>Item</th>
-                <th>Tokens</th>
-                <th>Rate (USD/1M)</th>
-                <th>Cost (USD)</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td>Audio input (mic stream)</td>
-                <td>{fmtTokens(bk.audioInTokens)}</td>
-                <td>${AUDIO_IN_PER_M}</td>
-                <td>{fmtUsd(bk.audioInCost)}</td>
-              </tr>
-              <tr>
-                <td>Text output (translation)</td>
-                <td>{fmtTokens(bk.textOutTokens)}</td>
-                <td>${TEXT_OUT_PER_M}</td>
-                <td>{fmtUsd(bk.textOutCost)}</td>
-              </tr>
-              <tr className={styles.dimRow}>
-                <td>Text input (session instructions)</td>
-                <td>{fmtTokens(bk.textInTokens)}</td>
-                <td>${TEXT_IN_PER_M}</td>
-                <td>{fmtUsd(bk.textInCost)}</td>
-              </tr>
-            </tbody>
-            <tfoot>
-              <tr className={styles.totalRow}>
-                <td colSpan={3}>Estimated Total</td>
-                <td>
-                  <strong>{fmtUsd(bk.total)}</strong>
-                  <span className={styles.twd}> ≈ NT${bk.totalTWD.toFixed(1)}</span>
-                </td>
-              </tr>
-            </tfoot>
-          </table>
-
-          <div className={styles.assumptions}>
-            <strong>Assumptions:</strong>{' '}
-            audio input 10 tokens/sec · {Math.round(SPEECH_RATIO * 100)}% speech activity ·
-            {langPair === 'zh-TW→en'
-              ? ' Chinese→English expansion ×1.4'
-              : ' English→Chinese compression ×0.55'}{' '}
-            · audio output disabled (text-only session) · NT$1 ≈ US${(1 / TWD_PER_USD).toFixed(4)} (fixed)
-          </div>
-        </>
+    <div className={styles.chip}>
+      {isLive && <span className={styles.liveDot} aria-label="Live" />}
+      <span className={styles.timer} data-live={isLive}>{fmtDuration(totalMs)}</span>
+      <span className={styles.sep}>·</span>
+      <span className={styles.cost}>
+        {hasData ? `${fmtUsd(bk.total)} ≈ NT$${Math.round(bk.totalTWD)}` : '—'}
+      </span>
+      <span className={styles.pair}>{langPair}</span>
+      {!isLive && hasData && (
+        <button
+          type="button"
+          className={styles.resetBtn}
+          onClick={resetSession}
+          aria-label="Reset session cost"
+        >
+          ↺
+        </button>
       )}
     </div>
   );

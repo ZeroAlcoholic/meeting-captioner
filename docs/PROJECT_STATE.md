@@ -24,6 +24,7 @@ and streams normalized events to browser. WASAPI system audio loopback implement
 | **P1** | Scenario picker + Mode selector + Health row + Audio level meter | ✅ complete |
 | **P2** | OpenAI Realtime mic path (WebRTC + session bridge) | ✅ complete |
 | **P3** | WhisperLiveKit + CTranslate2 MT + WASAPI loopback | ✅ complete |
+| **P3.5** | Audit fixes: SPM tokenizer copy, Whisper pre-cache, ApiKey tri-state | ✅ complete |
 | P4 | Translation quality: dual-path MT, Voxtral/Speaches ASR adapters | pending |
 | P5 | Summary draft/refined/stable pipeline | pending |
 | P6 | Reliability + long-session stability | pending |
@@ -48,6 +49,18 @@ and streams normalized events to browser. WASAPI system audio loopback implement
 | C3 | OfflineAudioSource in settings-store; setAudioSource action | ✅ done | 44cc3f6 |
 | C4 | OfflineSTTProvider: audioSource param, skips mic when 'system' | ✅ done | 44cc3f6 |
 | C5 | AudioSourceSelector in SettingsPanel (full_offline mode only) | ✅ done | 44cc3f6 |
+
+---
+
+## P3.5 Audit Fixes
+
+| # | Task | Verification |
+|---|------|-------------|
+| 1 | `download_models.py` passes `copy_files=["source.spm","target.spm"]` to TransformersConverter | both model dirs now have source.spm + target.spm |
+| 2 | `run_whl.py` pre-instantiates `WhisperModel(WHL_MODEL,…)` to warm HF cache | first browser session no longer hits 30 s WS timeout |
+| 3 | `scripts/smoke_translate.py` validates both translation directions end-to-end | exits 0; en→zh-TW and zh-TW→en both produce non-empty output |
+| 4 | `useOpenAIRealtime` exports tri-state `apiKeyStatus` ('checking'\|'present'\|'no-key'\|'service-down') with 3 s polling | mirror of useOfflineSTT pattern; auto-recovers when service comes up |
+| 5 | `App.tsx` consumes `apiKeyStatus` for label/title/disabled/pricing-panel gate | distinguishes "no key" from "service down" honestly |
 
 ---
 

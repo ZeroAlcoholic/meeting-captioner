@@ -13,6 +13,7 @@ export function App() {
   const realtime = useOpenAIRealtime();
   const offline = useOfflineSTT();
   const modeId = useSettingsStore((s) => s.modeId);
+  const audioSource = useSettingsStore((s) => s.audioSource);
   const audioLevel = useSettingsStore((s) => s.audioLevel);
   const audioState = useSettingsStore((s) => s.health.audio.state);
   const startSession = useSettingsStore((s) => s.startSession);
@@ -43,20 +44,26 @@ export function App() {
   };
 
   const handleStop = () => {
-    fake.stop();
-    realtime.stop();
-    offline.stop();
-    stopSession();
+    if (fake.status === 'running') fake.stop();
+    if (realtime.status === 'running') { realtime.stop(); stopSession(); }
+    if (offline.status === 'running') offline.stop();
   };
 
   const showRealButton = modeId === 'online_full';
-  const realButtonDisabled = realtime.hasApiKey === false || isRunning;
-  const realButtonTitle =
-    realtime.hasApiKey === false
-      ? 'OPENAI_API_KEY not configured on server'
-      : realtime.hasApiKey === null
-        ? 'Checking API key…'
-        : undefined;
+  const showHybridButton = modeId === 'hybrid_privacy';
+  const realButtonDisabled = realtime.apiKeyStatus !== 'present' || isRunning;
+  const realButtonTitle: string | undefined = {
+    checking:       'Checking online service…',
+    present:        undefined,
+    'no-key':       'OPENAI_API_KEY not configured on server',
+    'service-down': 'Online service unreachable on :8787 — start it via start-dev.bat',
+  }[realtime.apiKeyStatus];
+  const realButtonLabel = {
+    checking:       '🎤 Checking…',
+    present:        '🎤 Start Real',
+    'no-key':       '🔑 No API Key',
+    'service-down': '⚠ Online Service Down',
+  }[realtime.apiKeyStatus];
 
   const showOfflineButton = modeId === 'full_offline';
   const offlineButtonDisabled = !offline.hasWhisper || isRunning;
@@ -69,7 +76,7 @@ export function App() {
       <header className="app-header">
         <div>
           <h1>Meeting Audio</h1>
-          <p className="app-subtitle">P2 — OpenAI Realtime mic path</p>
+          <p className="app-subtitle">Live Caption &amp; Translation</p>
         </div>
         <div className="app-controls">
           {isRunning && (
@@ -87,19 +94,32 @@ export function App() {
                   />
                 )}
               </div>
-              <span className="mic-state">{audioState}</span>
+              {audioState !== 'idle' && audioState !== 'stopped' && (
+                <span className="mic-state">{audioState}</span>
+              )}
             </div>
           )}
-          <span className="app-status" data-status={fake.status === 'running' ? 'running' : realtime.status}>
-            {fake.status === 'running' ? 'fake' : realtime.status}
+          <span className="app-status" data-status={
+            fake.status === 'running' ? 'running' :
+            offline.status === 'running' ? 'running' :
+            realtime.status === 'running' ? 'running' : 'idle'
+          }>
+            {fake.status === 'running' ? 'fake' :
+             offline.status === 'running' ? 'offline' :
+             realtime.status === 'running' ? realtime.status : 'idle'}
           </span>
+          <span className="audio-source-chip" title={audioSource === 'system' ? 'System audio (WASAPI)' : 'Microphone'}>
+            {audioSource === 'system' ? '🔊' : '🎤'}
+          </span>
+          {showRealButton && realtime.apiKeyStatus === 'present' && <RealtimePricingPanel />}
           <button
             type="button"
             onClick={handleStartFake}
             disabled={isRunning}
             data-testid="start-fake-replay"
+            title="Replay scripted captions — no audio required"
           >
-            Start Fake Replay
+            Demo
           </button>
           {showRealButton && (
             <button
@@ -109,7 +129,17 @@ export function App() {
               title={realButtonTitle}
               data-testid="start-real"
             >
-              {realtime.hasApiKey === false ? '🎤 No API Key' : '🎤 Start Real'}
+              {realButtonLabel}
+            </button>
+          )}
+          {showHybridButton && (
+            <button
+              type="button"
+              disabled
+              title="Hybrid Privacy — local STT + online translation, coming in P4"
+              data-testid="start-hybrid"
+            >
+              🔀 Hybrid (P4)
             </button>
           )}
           {showOfflineButton && (
@@ -146,7 +176,6 @@ export function App() {
       </header>
 
       <SettingsPanel open={settingsOpen} />
-      {showRealButton && <RealtimePricingPanel />}
 
       {activeError && (
         <div className="app-error" role="alert">
