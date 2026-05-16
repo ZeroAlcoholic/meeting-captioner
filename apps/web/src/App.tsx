@@ -1,19 +1,14 @@
 import { useState } from 'react';
-
-function formatEta(ms: number): string {
-  const totalSec = Math.max(0, Math.round(ms / 1000));
-  const m = Math.floor(totalSec / 60);
-  const s = totalSec % 60;
-  return m > 0 ? `${m}m ${s}s` : `${s}s`;
-}
 import { CaptionBoard } from './caption-board/CaptionBoard.js';
 import { SettingsPanel } from './components/SettingsPanel.js';
 import { RealtimePricingPanel } from './components/RealtimePricingPanel.js';
-import { rmsToWidthPercent } from './components/AudioLevelMeter.js';
+import { MicLevelBar } from './components/MicLevelBar.js';
+import { StartRealButton } from './components/StartRealButton.js';
 import { useOpenAIRealtime } from './providers/use-openai-realtime.js';
 import { useOfflineSTT } from './providers/use-offline-stt.js';
 import { useFakeReplay } from './providers/use-fake-replay.js';
 import { useSettingsStore } from './settings/use-settings-store.js';
+import { IS_ONLINE_ONLY } from './deployment.js';
 
 export function App() {
   const fake = useFakeReplay();
@@ -21,11 +16,9 @@ export function App() {
   const offline = useOfflineSTT();
   const modeId = useSettingsStore((s) => s.modeId);
   const audioSource = useSettingsStore((s) => s.audioSource);
-  const audioLevel = useSettingsStore((s) => s.audioLevel);
-  const audioState = useSettingsStore((s) => s.health.audio.state);
   const startSession = useSettingsStore((s) => s.startSession);
   const stopSession = useSettingsStore((s) => s.stopSession);
-  const [settingsOpen, setSettingsOpen]   = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const isRunning =
     fake.status === 'running' || realtime.status === 'running' || offline.status === 'running';
@@ -37,11 +30,16 @@ export function App() {
     void fake.start();
   };
 
-  const handleStartReal = () => {
+  const handleStartReal = async () => {
     fake.stop();
     offline.stop();
-    startSession();
-    void realtime.start();
+    // Start the cost timer ONLY after the realtime provider reaches the
+    // 'running' state. If start() fails (mic denied, /session error, SDP
+    // exchange refused), it returns false and we never accrue billed time
+    // for a session that never connected — the inflated-elapsed-total bug
+    // Codex flagged.
+    const ok = await realtime.start();
+    if (ok) startSession();
   };
 
   const handleStartOffline = () => {
@@ -56,27 +54,13 @@ export function App() {
     if (offline.status === 'running') offline.stop();
   };
 
-  const showRealButton = modeId === 'online_full';
-  const showHybridButton = modeId === 'hybrid_privacy';
-  const realButtonDisabled = realtime.apiKeyStatus !== 'present' || isRunning;
-  const renewalTitle =
-    realtime.status === 'running' && realtime.renewalEtaMs !== null
-      ? ` — Auto-renew in ${formatEta(realtime.renewalEtaMs)}`
-      : '';
-  const realButtonTitle: string | undefined = {
-    checking:       'Checking online service…',
-    present:        renewalTitle ? `Online ready${renewalTitle}` : undefined,
-    'no-key':       'OPENAI_API_KEY not configured on server',
-    'service-down': 'Online service unreachable on :8787 — start it via start-dev.bat',
-  }[realtime.apiKeyStatus];
-  const realButtonLabel = {
-    checking:       '🎤 Checking…',
-    present:        '🎤 Start Real',
-    'no-key':       '🔑 No API Key',
-    'service-down': '⚠ Online Service Down',
-  }[realtime.apiKeyStatus];
+  // In the online-slim distribution, hybrid/offline modes are filtered out of
+  // MODE_OPTIONS so modeId can only ever be 'online_full'. Guard with the
+  // build flag rather than runtime probing — keeps the React tree predictable.
+  const showRealButton = IS_ONLINE_ONLY || modeId === 'online_full';
+  const showHybridButton = !IS_ONLINE_ONLY && modeId === 'hybrid_privacy';
+  const showOfflineButton = !IS_ONLINE_ONLY && modeId === 'full_offline';
 
-  const showOfflineButton = modeId === 'full_offline';
   const offlineButtonDisabled = !offline.hasWhisper || isRunning;
   const offlineButtonTitle = !offline.hasWhisper
     ? `WhisperLive: ${offline.whisperStatus ?? 'checking…'}`
@@ -90,26 +74,7 @@ export function App() {
           <p className="app-subtitle">Live Caption &amp; Translation</p>
         </div>
         <div className="app-controls">
-          {isRunning && (
-            <div className="mic-level" data-state={audioState} title={`Mic: ${audioState}`}>
-              <span className="mic-icon">🎤</span>
-              <div className="mic-bar-wrap">
-                <div
-                  className="mic-bar-fill"
-                  style={{ width: `${audioLevel ? rmsToWidthPercent(audioLevel.rmsDb) : 0}%` }}
-                />
-                {audioLevel && (
-                  <div
-                    className="mic-bar-peak"
-                    style={{ left: `${rmsToWidthPercent(audioLevel.peakDb)}%` }}
-                  />
-                )}
-              </div>
-              {audioState !== 'idle' && audioState !== 'stopped' && (
-                <span className="mic-state">{audioState}</span>
-              )}
-            </div>
-          )}
+          <MicLevelBar visible={isRunning} />
           <span className="app-status" data-status={
             fake.status === 'running' ? 'running' :
             offline.status === 'running' ? 'running' :
@@ -119,9 +84,14 @@ export function App() {
              offline.status === 'running' ? 'offline' :
              realtime.status === 'running' ? realtime.status : 'idle'}
           </span>
-          <span className="audio-source-chip" title={audioSource === 'system' ? 'System audio (WASAPI)' : 'Microphone'}>
-            {audioSource === 'system' ? '🔊' : '🎤'}
-          </span>
+          {!IS_ONLINE_ONLY && (
+            <span
+              className="audio-source-chip"
+              title={audioSource === 'system' ? 'System audio (WASAPI)' : 'Microphone'}
+            >
+              {audioSource === 'system' ? '🔊' : '🎤'}
+            </span>
+          )}
           {showRealButton && realtime.apiKeyStatus === 'present' && <RealtimePricingPanel />}
           <button
             type="button"
@@ -133,15 +103,13 @@ export function App() {
             Demo
           </button>
           {showRealButton && (
-            <button
-              type="button"
+            <StartRealButton
+              apiKeyStatus={realtime.apiKeyStatus}
+              running={realtime.status === 'running'}
+              isOtherRunning={isRunning}
               onClick={handleStartReal}
-              disabled={realButtonDisabled}
-              title={realButtonTitle}
-              data-testid="start-real"
-            >
-              {realButtonLabel}
-            </button>
+              getRenewalEtaMs={realtime.getRenewalEtaMs}
+            />
           )}
           {showHybridButton && (
             <button
@@ -195,7 +163,7 @@ export function App() {
             <button
               type="button"
               className="app-error-retry"
-              onClick={() => realtime.retry()}
+              onClick={handleStartReal}
               data-testid="retry-real"
             >
               Retry

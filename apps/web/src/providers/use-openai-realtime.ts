@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ONLINE_SERVICE_URL } from '../config.js';
 import { settingsStore } from '../settings/use-settings-store.js';
-import { captionStore } from '../store/use-caption-store.js';
 import { OpenAIRealtimeProvider } from './openai-realtime-provider.js';
+import { createStoreBoundHandlers } from './coalesce-handlers.js';
 import type { ProviderStatus } from './types.js';
 
 const SESSION_URL = `${ONLINE_SERVICE_URL}/session`;
@@ -11,17 +11,37 @@ const SESSION_INFO_URL = `${ONLINE_SERVICE_URL}/session/info`;
 // Polling backoff: tight when something is wrong, relaxed once stable.
 const POLL_FAST_MS = 3_000;
 const POLL_SLOW_MS = 10_000;
-// How often UI redraws the renewal countdown (cheap, no network).
-const RENEWAL_TICK_MS = 1_000;
 
 export type ApiKeyStatus = 'checking' | 'present' | 'no-key' | 'service-down';
 
-export function useOpenAIRealtime() {
+export interface UseOpenAIRealtime {
+  status: ProviderStatus;
+  error: string | null;
+  apiKeyStatus: ApiKeyStatus;
+  /**
+   * Resolves to `true` if the realtime provider reached the `running`
+   * state, `false` if startup failed (mic denied, /session 5xx, SDP
+   * exchange failed, etc.). Callers use this to gate side effects like
+   * the session-cost timer that must not run for failed sessions.
+   */
+  start: () => Promise<boolean>;
+  stop: () => void;
+  retry: () => void;
+  /**
+   * Read the renewal ETA on demand. Returns null when no session is running.
+   * Pulled from a ref so consumers can poll without forcing the hook owner to
+   * re-render at 1 Hz — the previous design caused unnecessary App.tsx
+   * re-renders that cascaded through the caption board's shell.
+   */
+  getRenewalEtaMs: () => number | null;
+}
+
+export function useOpenAIRealtime(): UseOpenAIRealtime {
   const providerRef = useRef<OpenAIRealtimeProvider | null>(null);
+  const handlersRef = useRef<ReturnType<typeof createStoreBoundHandlers> | null>(null);
   const [status, setStatus] = useState<ProviderStatus>('idle');
   const [error, setError] = useState<string | null>(null);
   const [apiKeyStatus, setApiKeyStatus] = useState<ApiKeyStatus>('checking');
-  const [renewalEtaMs, setRenewalEtaMs] = useState<number | null>(null);
 
   // ── /session/info polling with backoff ───────────────────────────────────────
   useEffect(() => {
@@ -38,13 +58,11 @@ export function useOpenAIRealtime() {
         .then((d: { hasApiKey: boolean }) => {
           if (cancelled) return;
           setApiKeyStatus(d.hasApiKey ? 'present' : 'no-key');
-          // Stable signal — back off polling rate.
           schedule(POLL_SLOW_MS);
         })
         .catch(() => {
           if (cancelled) return;
           setApiKeyStatus('service-down');
-          // Service unreachable — keep polling tight to recover quickly.
           schedule(POLL_FAST_MS);
         });
     };
@@ -57,60 +75,67 @@ export function useOpenAIRealtime() {
     };
   }, []);
 
-  // ── Renewal ETA tick — only runs while a session is active ───────────────────
-  useEffect(() => {
-    if (status !== 'running') {
-      setRenewalEtaMs(null);
-      return undefined;
-    }
-    const tick = () => {
-      const eta = providerRef.current?.getRenewalEtaMs() ?? null;
-      setRenewalEtaMs(eta);
-    };
-    tick();
-    const id = setInterval(tick, RENEWAL_TICK_MS);
-    return () => clearInterval(id);
-  }, [status]);
-
-  const start = useCallback(async () => {
+  const start = useCallback(async (): Promise<boolean> => {
     setError(null);
-    // Do NOT clear captionStore here — pause/resume must preserve scrollback.
-    // Use the explicit Clear button in CaptionBoard to wipe.
-    const { langPair } = settingsStore.getState();
+    // If a previous provider instance exists, stop it cleanly first.
+    // Without this, a fast double-click on Start (or a renewal racing a
+    // manual restart) would orphan the prior provider with its timers,
+    // mic stream, and WebRTC pc still alive — a real memory + audio leak.
+    const previous = providerRef.current;
+    if (previous && previous.status !== 'stopped') {
+      previous.stop();
+      handlersRef.current?.flushPending();
+    }
+
+    const { langPair, includeSourceTranscript } = settingsStore.getState();
+    const handlers = createStoreBoundHandlers();
+    handlersRef.current = handlers;
     const provider = new OpenAIRealtimeProvider(
       SESSION_URL,
-      {
-        onTranscript: (e) => captionStore.getState().applyTranscript(e),
-        onTranslation: (e) => captionStore.getState().applyTranslation(e),
-        onHealth: (e) => settingsStore.getState().applyHealth(e),
-        onAudioLevel: (e) => settingsStore.getState().applyAudioLevel(e),
-      },
+      handlers,
       langPair,
+      undefined,
+      includeSourceTranscript,
     );
     providerRef.current = provider;
     setStatus('running');
 
     try {
       await provider.start();
-      // If provider stopped itself due to error (api_error, ICE failed), reflect that
+      // If a newer start() raced and replaced providerRef while we were
+      // awaiting, leave the newer one's state alone.
+      if (providerRef.current !== provider) return false;
       if (provider.status === 'stopped') {
+        // Internal error path (mic denied, /session non-2xx, SDP exchange
+        // failed). The provider already cleaned up; surface as not-running
+        // so callers don't start the cost timer.
         setStatus('idle');
+        return false;
       }
+      return true;
     } catch (err) {
+      if (providerRef.current !== provider) return false;
       setError(err instanceof Error ? err.message : String(err));
       setStatus('idle');
+      return false;
     }
   }, []);
 
   const stop = useCallback(() => {
     providerRef.current?.stop();
+    handlersRef.current?.flushPending();
     setStatus('stopped');
   }, []);
 
-  // F2 — manual retry binding for the UI when start() failed.
   const retry = useCallback(() => {
     void start();
   }, [start]);
 
-  return { status, error, apiKeyStatus, renewalEtaMs, start, stop, retry };
+  // Stable getter — consumers can read it inside their own intervals without
+  // bumping renders here. Returns null when no provider or not running.
+  const getRenewalEtaMs = useCallback((): number | null => {
+    return providerRef.current?.getRenewalEtaMs() ?? null;
+  }, []);
+
+  return { status, error, apiKeyStatus, start, stop, retry, getRenewalEtaMs };
 }

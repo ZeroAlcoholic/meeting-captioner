@@ -100,15 +100,21 @@
 /* ─── History: split paragraph streams ──────────────────────────────────────── */
 .history {
   display: grid;
-  /* Primary (translation target) on the LEFT — wider; secondary (source) RIGHT — narrower.
-     The component places the primary stream in the first .historyCol regardless of langPair. */
-  grid-template-columns: 1fr 0.78fr;
+  /* Default: single column (translation-only mode). The bilingual layout is
+     opted into via `data-bilingual` on the wrapping element. */
+  grid-template-columns: 1fr;
   column-gap: 1.75rem;
   /* Bottom-anchored without the flex-end overflow bug — see :first-child rule below. */
   align-items: end;
   overflow-y: auto;
   min-height: 0;
   padding-top: 0.25rem;
+}
+/* Bilingual: target on the LEFT (wider) + source on the RIGHT (narrower).
+   The component places the primary stream in the first .historyCol regardless
+   of langPair. */
+.history[data-bilingual] {
+  grid-template-columns: 1fr 0.78fr;
 }
 /* Subtle scrollbar — visible enough to hint scrollability, not distracting. */
 .history::-webkit-scrollbar { width: 6px; }
@@ -163,12 +169,15 @@
   color: #c0c8d8;
 }
 
-/* Secondary side is the source language — smaller, monospace if EN, sans CJK if ZH. */
+/* Secondary side is the source language — monospace if EN, sans CJK if ZH.
+   Bumped from 0.875rem to 1.05rem after user feedback that the English
+   history was too small relative to the Chinese counterpart (which the
+   zh-TW→en override already sized to 1rem CJK). */
 .historyTextSecondary {
   font-family: var(--font-ui, 'DM Mono', monospace);
-  font-size: 0.875rem;
+  font-size: 1.05rem;
   font-weight: 400;
-  line-height: 1.65;
+  line-height: 1.6;
   color: #6a7889;
   letter-spacing: 0.01em;
 }
@@ -202,18 +211,22 @@
   color: #edf0f5;
   letter-spacing: -0.01em;
 }
-.target[data-status='pending'] {
-  color: #2a3448;
-  font-weight: 400;
-}
-.target[data-status='frozen'] {
-  /* Slightly softer while a partial is in flight — visible but signals "previous final". */
+/* In-flight partial: target is slightly softer until the translation has
+   "caught up" to the source. Same intent as the old 'frozen' state, just
+   renamed to match the new state machine ('partial' | 'final' | 'paused'). */
+.target[data-status='partial'] {
   color: #d8dde8;
+}
+.target[data-status='paused'] {
+  color: #c0c8d8;
 }
 
 .source {
   font-family: var(--font-ui, 'DM Mono', monospace);
-  font-size: clamp(0.875rem, 1.4vw, 1.125rem);
+  /* Slightly tightened from clamp(0.875rem, 1.4vw, 1.125rem) so the live
+     English source doesn't overpower the big target while still staying
+     readable from projector distance. */
+  font-size: clamp(0.875rem, 1.15vw, 1.05rem);
   color: #4a5870;
   line-height: 1.5;
   letter-spacing: 0.01em;
@@ -235,33 +248,8 @@
   margin-top: 4px;
 }
 
-/* Translating hint — replaces target/source desync that the previous
-   half-fallback created. Sits below the (frozen) source row. */
-.translatingHint {
-  font-family: var(--font-ui, 'DM Mono', monospace);
-  font-size: 10px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: #5a6a7f;
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  margin-top: 2px;
-}
-.translatingHint::before {
-  content: '';
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: currentColor;
-  animation: hintPulse 1.2s ease-in-out infinite;
-}
-@keyframes hintPulse {
-  0%, 100% { opacity: 0.3; }
-  50%      { opacity: 1; }
-}
-
-/* Cursor — soft pulse instead of hard blink (less fatiguing over 90-min meetings). */
+/* Cursor — soft pulse next to the source while a partial is in flight.
+   Less fatiguing than a hard blink over 90-min meetings. */
 .cursor {
   display: inline-block;
   margin-left: 0.18em;
@@ -277,9 +265,14 @@
   50%      { opacity: 1; }
 }
 
+/* Source row dims slightly while idle so the eye is drawn to a fresh
+   partial when it lands. */
+.source[data-status='final'] {
+  opacity: 0.65;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .cursor,
-  .translatingHint::before {
+  .cursor {
     animation: none;
     opacity: 0.7;
   }

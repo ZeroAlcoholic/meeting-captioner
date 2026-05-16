@@ -19,6 +19,14 @@ const DEFAULT_LANG_PAIR = 'en→zh-TW';
 const SessionBodySchema = z
   .object({
     langPair: z.enum(['en→zh-TW', 'zh-TW→en']).optional(),
+    /**
+     * When true (default), the upstream session payload requests
+     * `audio.input.transcription: { model: 'gpt-realtime-whisper' }` so
+     * OpenAI emits source-language transcript deltas alongside the
+     * translation. When false, the field is omitted and OpenAI returns
+     * only translated text — saves the incremental whisper cost.
+     */
+    includeSourceTranscript: z.boolean().optional(),
   })
   .strict();
 
@@ -92,6 +100,18 @@ export async function registerSession(app: FastifyInstance): Promise<void> {
 
     const langPair = parsed.data.langPair ?? DEFAULT_LANG_PAIR;
     const outputLanguage = LANG_OUTPUT[langPair] ?? 'zh';
+    const includeSourceTranscript = parsed.data.includeSourceTranscript ?? true;
+
+    // Build the audio.input config conditionally so we don't request the
+    // `gpt-realtime-whisper` source transcription stream when the client
+    // opted into translation-only mode. `noise_reduction` stays in either
+    // mode because it gates how aggressively OpenAI cleans the mic signal.
+    const audioInput: Record<string, unknown> = {
+      noise_reduction: { type: 'near_field' },
+    };
+    if (includeSourceTranscript) {
+      audioInput.transcription = { model: 'gpt-realtime-whisper' };
+    }
 
     let res: Response;
     try {
@@ -105,10 +125,7 @@ export async function registerSession(app: FastifyInstance): Promise<void> {
           session: {
             model: 'gpt-realtime-translate',
             audio: {
-              input: {
-                transcription: { model: 'gpt-realtime-whisper' },
-                noise_reduction: { type: 'near_field' },
-              },
+              input: audioInput,
               output: { language: outputLanguage },
             },
           },

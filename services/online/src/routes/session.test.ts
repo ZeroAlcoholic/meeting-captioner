@@ -116,6 +116,46 @@ describe('POST /session', () => {
     expect(init.signal).toBeDefined();
   });
 
+  it('includes transcription:gpt-realtime-whisper by default (bilingual)', async () => {
+    const mockFn = vi.fn().mockResolvedValueOnce(
+      new Response(JSON.stringify(FAKE_SECRET), { status: 200 }),
+    );
+    vi.stubGlobal('fetch', mockFn);
+    mockConfig.OPENAI_API_KEY = 'sk-test';
+    const app = Fastify({ logger: false });
+    await registerSession(app);
+    await app.inject({ method: 'POST', url: '/session' });
+
+    const [, init] = mockFn.mock.calls[0] as [string, { body: string }];
+    const body = JSON.parse(init.body) as {
+      session: { audio: { input: Record<string, unknown> } };
+    };
+    expect(body.session.audio.input.transcription).toEqual({ model: 'gpt-realtime-whisper' });
+    expect(body.session.audio.input.noise_reduction).toEqual({ type: 'near_field' });
+  });
+
+  it('omits transcription when includeSourceTranscript=false (translation-only)', async () => {
+    const mockFn = vi.fn().mockResolvedValueOnce(
+      new Response(JSON.stringify(FAKE_SECRET), { status: 200 }),
+    );
+    vi.stubGlobal('fetch', mockFn);
+    mockConfig.OPENAI_API_KEY = 'sk-test';
+    const app = Fastify({ logger: false });
+    await registerSession(app);
+    await app.inject({
+      method: 'POST',
+      url: '/session',
+      payload: { includeSourceTranscript: false },
+    });
+
+    const [, init] = mockFn.mock.calls[0] as [string, { body: string }];
+    const body = JSON.parse(init.body) as {
+      session: { audio: { input: Record<string, unknown> } };
+    };
+    expect(body.session.audio.input.transcription).toBeUndefined();
+    expect(body.session.audio.input.noise_reduction).toEqual({ type: 'near_field' });
+  });
+
   it('sets output language "en" when langPair is zh-TW→en', async () => {
     const mockFn = vi.fn().mockResolvedValueOnce(
       new Response(JSON.stringify(FAKE_SECRET), { status: 200 }),

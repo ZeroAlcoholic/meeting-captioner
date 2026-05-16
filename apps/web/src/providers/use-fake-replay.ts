@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { settingsStore } from '../settings/use-settings-store.js';
-import { captionStore } from '../store/use-caption-store.js';
 import {
   FakeReplayProvider,
   FakeReplayScript,
   type FakeReplayScript as FakeReplayScriptType,
 } from './fake-replay-provider.js';
+import { createStoreBoundHandlers } from './coalesce-handlers.js';
 import type { ProviderStatus } from './types.js';
 
 async function loadScript(): Promise<FakeReplayScriptType> {
@@ -15,6 +14,7 @@ async function loadScript(): Promise<FakeReplayScriptType> {
 
 export function useFakeReplay() {
   const providerRef = useRef<FakeReplayProvider | null>(null);
+  const handlersRef = useRef<ReturnType<typeof createStoreBoundHandlers> | null>(null);
   const [status, setStatus] = useState<ProviderStatus>('idle');
   const [error, setError] = useState<string | null>(null);
 
@@ -24,20 +24,22 @@ export function useFakeReplay() {
 
   const start = useCallback(async () => {
     setError(null);
+    const previous = providerRef.current;
+    if (previous && previous.status !== 'stopped') {
+      previous.stop();
+      handlersRef.current?.flushPending();
+    }
     try {
       const script = await loadScript();
-      // Do NOT clear captionStore — Demo replay should append to whatever is already
-      // there, just like Stop+Start preserves history. Use the explicit Clear button.
-      const provider = new FakeReplayProvider(script, {
-        onTranscript: (e) => captionStore.getState().applyTranscript(e),
-        onTranslation: (e) => captionStore.getState().applyTranslation(e),
-        onHealth: (e) => settingsStore.getState().applyHealth(e),
-        onAudioLevel: (e) => settingsStore.getState().applyAudioLevel(e),
-      });
+      const handlers = createStoreBoundHandlers();
+      handlersRef.current = handlers;
+      const provider = new FakeReplayProvider(script, handlers);
       providerRef.current = provider;
       provider.start();
+      if (providerRef.current !== provider) return;
       setStatus('running');
     } catch (err) {
+      if (providerRef.current !== null && providerRef.current.status === 'running') return;
       setError(err instanceof Error ? err.message : String(err));
       setStatus('idle');
     }
@@ -45,6 +47,7 @@ export function useFakeReplay() {
 
   const stop = useCallback(() => {
     providerRef.current?.stop();
+    handlersRef.current?.flushPending();
     setStatus('stopped');
   }, []);
 

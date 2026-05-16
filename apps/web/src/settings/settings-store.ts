@@ -6,6 +6,7 @@ import type {
   HealthState,
 } from '@meeting-audio/contracts';
 import { createStore, type StoreApi } from 'zustand/vanilla';
+import { IS_ONLINE_ONLY } from '../deployment.js';
 
 export type ScenarioId = 'physical' | 'online_meeting_box' | 'hybrid' | 'advanced';
 export type ModeId = 'online_full' | 'hybrid_privacy' | 'full_offline';
@@ -35,7 +36,9 @@ export interface ModeOption {
   descriptionZh: string;
 }
 
-export const SCENARIO_OPTIONS: ScenarioOption[] = [
+// The full catalog. Deployment-aware variants are derived below so consumers
+// import a single name and get the right list for the active build.
+const ALL_SCENARIO_OPTIONS: ScenarioOption[] = [
   {
     id: 'physical',
     label: 'Physical Meeting',
@@ -71,7 +74,7 @@ export const SCENARIO_OPTIONS: ScenarioOption[] = [
   },
 ];
 
-export const MODE_OPTIONS: ModeOption[] = [
+const ALL_MODE_OPTIONS: ModeOption[] = [
   {
     id: 'online_full',
     label: 'Online Full',
@@ -94,6 +97,16 @@ export const MODE_OPTIONS: ModeOption[] = [
     descriptionZh: '音訊 → 本地語音辨識 → 本地翻譯。無雲端依賴。',
   },
 ];
+
+// In the online-slim build, offline-dependent modes/scenarios are hidden so
+// users never see options that the bundled provider stub cannot fulfil.
+export const SCENARIO_OPTIONS: ScenarioOption[] = IS_ONLINE_ONLY
+  ? ALL_SCENARIO_OPTIONS.filter((s) => s.id !== 'hybrid')
+  : ALL_SCENARIO_OPTIONS;
+
+export const MODE_OPTIONS: ModeOption[] = IS_ONLINE_ONLY
+  ? ALL_MODE_OPTIONS.filter((m) => m.id === 'online_full')
+  : ALL_MODE_OPTIONS;
 
 export interface HealthSnapshot {
   state: HealthState;
@@ -130,6 +143,17 @@ export interface SettingsState {
   modeId: ModeId;
   langPair: LangPair;
   audioSource: OfflineAudioSource;
+  /**
+   * When true (default), the server-side /session route adds
+   *   `audio.input.transcription: { model: 'gpt-realtime-whisper' }`
+   * to the upstream session payload, which makes OpenAI emit
+   * `session.input_transcript.delta` events carrying the source-language
+   * transcript. When false, only translation events arrive and the UI
+   * collapses to a single-column (translation-only) layout, saving the
+   * incremental `gpt-realtime-whisper` minutes on the bill at the cost of
+   * cross-checking the speaker's original words.
+   */
+  includeSourceTranscript: boolean;
   health: Record<HealthComponent, HealthSnapshot>;
   audioLevel: AudioLevelSnapshot | null;
   /** epoch ms when the current realtime session started; null when not running */
@@ -140,6 +164,7 @@ export interface SettingsState {
   setMode: (id: ModeId) => void;
   setLangPair: (id: LangPair) => void;
   setAudioSource: (s: OfflineAudioSource) => void;
+  setIncludeSourceTranscript: (v: boolean) => void;
   applyHealth: (event: HealthEvent) => void;
   applyAudioLevel: (event: AudioLevelEvent) => void;
   startSession: () => void;
@@ -161,6 +186,7 @@ export function createSettingsStore(): SettingsStore {
     modeId: DEFAULT_MODE,
     langPair: DEFAULT_LANG_PAIR,
     audioSource: 'mic',
+    includeSourceTranscript: true,
     health: defaultHealth(initialTimestamp),
     audioLevel: null,
     sessionStartAt: null,
@@ -174,6 +200,7 @@ export function createSettingsStore(): SettingsStore {
     setMode: (id) => set({ modeId: id }),
     setLangPair: (id) => set({ langPair: id }),
     setAudioSource: (audioSource) => set({ audioSource }),
+    setIncludeSourceTranscript: (v) => set({ includeSourceTranscript: v }),
 
     applyHealth: (event) =>
       set((state) => {
@@ -210,6 +237,7 @@ export function createSettingsStore(): SettingsStore {
         modeId: DEFAULT_MODE,
         langPair: DEFAULT_LANG_PAIR,
         audioSource: 'mic',
+        includeSourceTranscript: true,
         health: defaultHealth(new Date().toISOString()),
         audioLevel: null,
         sessionStartAt: null,

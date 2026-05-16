@@ -1,11 +1,12 @@
-import { createRequire } from 'node:module';
 import type { FastifyInstance } from 'fastify';
 import { config } from '../config.js';
 
-const require = createRequire(import.meta.url);
-// Read once at import time — the build process pins the version.
-const pkg = require('../../package.json') as { version?: string };
-const VERSION = pkg.version ?? '0.0.0';
+// Version is injected at build time by esbuild's `define` so the release
+// bundle does not depend on a runtime package.json lookup (which fails
+// inside a single-file CJS bundle). Dev / tests rely on the fallback.
+declare const __APP_VERSION__: string;
+const VERSION =
+  typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '0.0.0';
 
 const STARTUP_MS = Date.now();
 

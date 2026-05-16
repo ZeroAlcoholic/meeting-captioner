@@ -111,6 +111,27 @@ describe('settingsStore — reset', () => {
   });
 });
 
+describe('settingsStore — includeSourceTranscript', () => {
+  it('defaults to true (bilingual)', () => {
+    expect(createSettingsStore().getState().includeSourceTranscript).toBe(true);
+  });
+
+  it('setIncludeSourceTranscript toggles the flag', () => {
+    const store = createSettingsStore();
+    store.getState().setIncludeSourceTranscript(false);
+    expect(store.getState().includeSourceTranscript).toBe(false);
+    store.getState().setIncludeSourceTranscript(true);
+    expect(store.getState().includeSourceTranscript).toBe(true);
+  });
+
+  it('reset restores the bilingual default', () => {
+    const store = createSettingsStore();
+    store.getState().setIncludeSourceTranscript(false);
+    store.getState().reset();
+    expect(store.getState().includeSourceTranscript).toBe(true);
+  });
+});
+
 describe('SCENARIO_OPTIONS / MODE_OPTIONS', () => {
   it('exposes the four scenarios from CLAUDE.md', () => {
     expect(SCENARIO_OPTIONS.map((s) => s.id)).toEqual([

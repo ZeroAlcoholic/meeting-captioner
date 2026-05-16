@@ -1,8 +1,27 @@
-import 'dotenv/config';
 import { z } from 'zod';
+
+// ── Configuration policy ───────────────────────────────────────────────────
+//
+// `OPENAI_API_KEY` and every other config knob are read ONLY from the
+// system / user environment (cmd `setx`, PowerShell `$env:`, POSIX
+// `export`). The slim distribution explicitly does NOT support `.env`
+// files — keeping secrets out of the filesystem avoids accidental
+// commits, archival, backup-to-cloud, and copy-paste leaks.
+//
+// If a future deployment ever wants a `.env`, the user has to opt in
+// explicitly and load it themselves (e.g. `node --env-file=.env ...`
+// from Node 20.6+). The bundled server itself is hard-locked to
+// `process.env` and nothing else.
 
 const ConfigSchema = z.object({
   ONLINE_PORT: z.coerce.number().int().positive().default(8787),
+  /**
+   * Bind host. Defaults to 127.0.0.1 (loopback only) — the slim distribution
+   * carries no authentication, and the OpenAI API key lives in this process,
+   * so we must not expose /session to the LAN by default. Override to
+   * 0.0.0.0 only if you understand the implication.
+   */
+  ONLINE_HOST: z.string().default('127.0.0.1'),
   ONLINE_CORS_ORIGIN: z.string().default('http://localhost:5173'),
   OPENAI_API_KEY: z.string().optional(),
   // Hard cap on the upstream OpenAI client_secrets fetch. Above this we 504 the caller
@@ -14,7 +33,27 @@ const ConfigSchema = z.object({
   // OpenAI Realtime translation sessions cap around 30 min. We tell the client
   // to renew earlier so users never hit the silent freeze.
   SESSION_RENEW_MS: z.coerce.number().int().positive().default(25 * 60 * 1000),
+  /**
+   * Optional path (absolute or relative to cwd) to a built `apps/web/dist`
+   * directory. When set, the server serves the web app as static files at
+   * `/` so the slim distribution can run from a single process. Leave unset
+   * during dev — Vite handles the SPA at :5173.
+   */
+  WEB_DIST_PATH: z.string().optional(),
 });
 
 export const config = ConfigSchema.parse(process.env);
 export type Config = z.infer<typeof ConfigSchema>;
+
+// Startup diagnostic — printed once so end users can confirm at a glance
+// whether the system env carries an OPENAI_API_KEY, without ever logging
+// the key value itself.
+const keyLen = config.OPENAI_API_KEY?.length ?? 0;
+// eslint-disable-next-line no-console
+console.log(
+  `[config] OPENAI_API_KEY: ${
+    keyLen > 0
+      ? `set in system env (${keyLen} chars)`
+      : 'MISSING — set OPENAI_API_KEY in your user/system env, then restart'
+  }`,
+);

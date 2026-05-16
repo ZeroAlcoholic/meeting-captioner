@@ -9,6 +9,9 @@ coverage/
 .turbo/
 .cache/
 
+# --- Release artifacts produced by scripts/package-online.* ---
+release/
+
 # --- Python / uv ---
 __pycache__/
 *.py[cod]

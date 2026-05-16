@@ -174,6 +174,62 @@ describe('OpenAIRealtimeProvider', () => {
     provider.stop();
   });
 
+  it('translation-only mode synthesizes a zero-text partial transcript on each output delta', async () => {
+    // Regression guard (Codex P1): without this synthetic transcript the
+    // caption store sees no livePartial in translation-only mode, so
+    // applyTranslation routes drafts into the history map and LiveCaption
+    // shows blank until the 1 s flush. The provider must anchor the live
+    // segment by emitting an empty partial transcript alongside the
+    // translation event.
+    mockFetch();
+    const { handlers, transcripts, translations } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider(
+      'http://localhost:8787/session',
+      handlers,
+      'en→zh-TW',
+      undefined,
+      false, // includeSourceTranscript
+    );
+
+    await provider.start();
+    fireDCMessage(JSON.stringify({ type: 'session.output_transcript.delta', delta: '你好' }));
+
+    // Exactly one synthetic transcript paired with the translation.
+    expect(transcripts).toHaveLength(1);
+    expect(transcripts[0]!.status).toBe('partial');
+    expect(transcripts[0]!.text).toBe('');
+    expect(translations).toHaveLength(1);
+    expect(translations[0]!.targetText).toBe('你好');
+    // Same segmentId on both sides — that's what lets applyTranslation
+    // route the draft into liveTranslation.
+    expect(transcripts[0]!.segmentId).toBe(translations[0]!.sourceSegmentId);
+
+    provider.stop();
+  });
+
+  it('bilingual mode does NOT synthesize a partial transcript on output deltas', async () => {
+    // Negative case: when source transcription is enabled OpenAI sends its
+    // own input_transcript.delta — synthesizing a second partial would
+    // race the real one and corrupt inputAcc display.
+    mockFetch();
+    const { handlers, transcripts, translations } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider(
+      'http://localhost:8787/session',
+      handlers,
+      'en→zh-TW',
+      undefined,
+      true, // includeSourceTranscript (default)
+    );
+
+    await provider.start();
+    fireDCMessage(JSON.stringify({ type: 'session.output_transcript.delta', delta: '你好' }));
+
+    expect(transcripts).toHaveLength(0);
+    expect(translations).toHaveLength(1);
+
+    provider.stop();
+  });
+
   it('session.output_transcript.delta → onTranslation with accumulated targetText and status:draft', async () => {
     mockFetch();
     const { handlers, translations } = makeHandlers();
@@ -290,6 +346,44 @@ describe('OpenAIRealtimeProvider', () => {
 
     expect(provider.status).toBe('stopped');
     expect(healthEvents.find((e) => e.state === 'api_error')).toBeDefined();
+  });
+
+  it('stop() called between fetch and SDP exchange short-circuits cleanly (no NPE, no misleading api_error)', async () => {
+    // Robustness: races where the user clicks Stop during the multi-await
+    // bring-up must not throw or emit a 'connected' health event after the
+    // stop. We block the SDP fetch on a never-resolving promise, call stop()
+    // mid-flight, then resolve to let start() see status !== 'running'.
+    let resolveSdp: ((r: Response) => void) | null = null;
+    const sdpPromise = new Promise<Response>((r) => { resolveSdp = r; });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn()
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ client_secret: { value: 'tok' } }), { status: 200 }),
+        )
+        .mockReturnValueOnce(sdpPromise),
+    );
+    const { handlers, healthEvents } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+
+    const startPromise = provider.start();
+    // Yield enough microtasks for /session fetch to resolve and SDP fetch to be issued.
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    provider.stop();
+    // Now let the SDP promise resolve — the abort guard must take over.
+    resolveSdp!(new Response('mock-sdp', { status: 200 }));
+    await startPromise;
+
+    expect(provider.status).toBe('stopped');
+    // We must NOT see 'transport: connected' after stop() — that would
+    // indicate the bring-up completed in spite of the abort.
+    const connectedAfterStop = healthEvents
+      .filter((e) => e.component === 'transport')
+      .map((e) => e.state)
+      .includes('connected');
+    expect(connectedAfterStop).toBe(false);
   });
 
   it('mic acquire failure → emits health.audio.failed (not transport.api_error) and stops', async () => {

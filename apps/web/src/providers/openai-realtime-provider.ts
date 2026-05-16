@@ -61,6 +61,7 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
   private renewDelayMs = DEFAULT_SESSION_RENEW_MS;
   private iceRestartAttempt = 0;
   private iceRestartTimer: ReturnType<typeof setTimeout> | null = null;
+  private renewalRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private inputAcc = '';
   private outputAcc = '';
   private currentSegmentId = '';
@@ -71,6 +72,12 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
     private readonly handlers: CaptionProviderHandlers,
     private readonly langPair: string = 'en→zh-TW',
     mic?: AudioSource,
+    /**
+     * Forwarded verbatim to the /session POST body. When false, the server
+     * omits `audio.input.transcription` from the upstream OpenAI payload,
+     * so only translation deltas arrive (no `session.input_transcript.delta`).
+     */
+    private readonly includeSourceTranscript: boolean = true,
   ) {
     this.mic = mic ?? new MicrophoneAudioProvider();
   }
@@ -92,6 +99,14 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
     this.iceRestartAttempt = 0;
     this.newSegment();
 
+    // Robustness: each await can yield control. If the caller invokes stop()
+    // between awaits, cleanup() nulls this.pc and the next line would NPE.
+    // This guard short-circuits the bring-up so partial state never reaches
+    // user-visible UI events or the dc handler attachment. Read through the
+    // public getter so TS does not narrow _status to a literal that defeats
+    // the check.
+    const aborted = (): boolean => this.status !== 'running';
+
     // Step 1: mic acquisition. Failures here are AUDIO failures, not transport.
     let stream: MediaStream;
     try {
@@ -104,6 +119,13 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       this.cleanup();
       return;
     }
+    if (aborted()) {
+      // User pressed Stop while mic dialog was open. mic.acquire returned a
+      // stream but we never used it — release tracks so the OS mic indicator
+      // turns off.
+      stream.getTracks().forEach((t) => t.stop());
+      return;
+    }
 
     // Step 2+: token broker → SDP exchange. Failures here are TRANSPORT failures.
     try {
@@ -111,13 +133,18 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       const sessionRes = await fetch(this.sessionUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ langPair: this.langPair }),
+        body: JSON.stringify({
+          langPair: this.langPair,
+          includeSourceTranscript: this.includeSourceTranscript,
+        }),
       });
+      if (aborted()) return;
       if (!sessionRes.ok) {
         const text = await sessionRes.text().catch(() => '');
         throw new Error(`/session failed (${sessionRes.status}): ${text || sessionRes.statusText}`);
       }
       const sessionData = (await sessionRes.json()) as SessionResponse;
+      if (aborted()) return;
       const { client_secret } = sessionData;
       this.renewDelayMs =
         sessionData.session_renewal_recommended_ms ?? DEFAULT_SESSION_RENEW_MS;
@@ -136,7 +163,9 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       this.pc.onconnectionstatechange = () => this.handleConnectionState();
 
       const offer = await this.pc.createOffer();
+      if (aborted() || !this.pc) return;
       await this.pc.setLocalDescription(offer);
+      if (aborted() || !this.pc) return;
       const sdpRes = await fetch(OPENAI_TRANSLATION_CALLS_URL, {
         method: 'POST',
         headers: {
@@ -145,15 +174,20 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
         },
         body: offer.sdp!,
       });
+      if (aborted() || !this.pc) return;
       if (!sdpRes.ok) {
         throw new Error(`OpenAI SDP exchange failed (${sdpRes.status})`);
       }
-      await this.pc.setRemoteDescription({ type: 'answer', sdp: await sdpRes.text() });
+      const sdpText = await sdpRes.text();
+      if (aborted() || !this.pc) return;
+      await this.pc.setRemoteDescription({ type: 'answer', sdp: sdpText });
+      if (aborted() || !this.pc) return;
       this.emitHealth('transport', 'connected');
 
       this.startLevelPolling();
       this.scheduleRenewal(this.renewDelayMs);
     } catch (err) {
+      if (aborted()) return; // user already stopped; don't surface a misleading error
       const message = err instanceof Error ? err.message : 'Unknown error starting Realtime';
       this.emitHealth('transport', 'api_error', message);
       this._status = 'stopped';
@@ -175,10 +209,12 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
     if (this.segmentFlushTimer !== null) clearTimeout(this.segmentFlushTimer);
     if (this.renewTimer !== null) clearTimeout(this.renewTimer);
     if (this.iceRestartTimer !== null) clearTimeout(this.iceRestartTimer);
+    if (this.renewalRetryTimer !== null) clearTimeout(this.renewalRetryTimer);
     this.levelInterval = null;
     this.segmentFlushTimer = null;
     this.renewTimer = null;
     this.iceRestartTimer = null;
+    this.renewalRetryTimer = null;
     this.renewScheduledAtMs = 0;
     this.pc?.close();
     this.pc = null;
@@ -212,10 +248,22 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Session renewal failed';
-      this.emitHealth('transport', 'degraded', `Renewal failed: ${message}; will retry`);
-      // Keep the provider in a state where a future renewal can happen.
-      this._status = 'running';
-      this.scheduleRenewal(RENEW_RETRY_MS);
+      this.emitHealth('transport', 'failed', `Renewal failed: ${message}; will retry in 5 min`);
+      // start()'s failure path already ran cleanup and set _status='stopped'.
+      // We previously flipped it back to 'running' so a future renewSession
+      // would re-enter — but that lied about the connection state, leaving
+      // the user staring at a UI that says "running" while no audio flows.
+      // Schedule a fresh start() retry instead, leaving _status='stopped'
+      // until that retry actually reconnects.
+      if (this.status === 'stopped') {
+        // Schedule one retry — cleanup() will cancel it if user stops or
+        // restarts manually before it fires.
+        this.renewalRetryTimer = setTimeout(() => {
+          this.renewalRetryTimer = null;
+          if (this._status !== 'stopped') return;
+          void this.start();
+        }, RENEW_RETRY_MS);
+      }
     }
   }
 
@@ -300,6 +348,34 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
         if (!ev.delta) break;
         this.outputAcc += ev.delta;
         const meta = LANG_PAIR_META[this.langPair] ?? DEFAULT_META;
+
+        // Translation-only mode (includeSourceTranscript=false): OpenAI
+        // never emits `session.input_transcript.delta` because no upstream
+        // whisper transcription was requested. Without an input-side
+        // transcript event the store never sets `livePartial`, so the
+        // caption store's `applyTranslation` routes every draft into the
+        // finalized `translations` map — and `LiveCaption` only renders
+        // `liveTranslation`, leaving the main view blank until the 1 s
+        // flush emits a final segment.
+        //
+        // Synthesize a zero-text partial transcript here to anchor the
+        // live segment. The UI hides the (empty) source row anyway via
+        // the bilingual gate, so this is invisible to the user but keeps
+        // the live caption area updating at draft rate.
+        if (!this.includeSourceTranscript) {
+          const synth: TranscriptEvent = {
+            kind: 'transcript',
+            provider: 'openai-realtime',
+            mode: 'online_full',
+            source: 'microphone',
+            segmentId: this.currentSegmentId,
+            status: 'partial',
+            text: '',
+            startMs: this.startMs,
+          };
+          this.handlers.onTranscript(synth);
+        }
+
         // Convert accumulated simplified Chinese to Traditional Chinese (Taiwan)
         const targetText = meta.tgt === 'zh-TW' ? s2tw(this.outputAcc) : this.outputAcc;
         const tr: TranslationEvent = {
@@ -315,6 +391,10 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
           updatedAt: iso(),
         };
         this.handlers.onTranslation(tr);
+        // Translation-only mode: input deltas never fire, so the segment
+        // flush has to be driven from here too — otherwise nothing ever
+        // finalizes and the live caption sticks on a partial forever.
+        this.resetSegmentFlushTimer();
         break;
       }
 

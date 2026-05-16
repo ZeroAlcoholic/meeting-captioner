@@ -1,7 +1,15 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+  memo,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { useSettingsStore } from '../settings/use-settings-store.js';
-import { useCaptionStore } from '../store/use-caption-store.js';
-import { captionStore } from '../store/use-caption-store.js';
+import { useCaptionStore, captionStore } from '../store/use-caption-store.js';
+import type { CaptionSegment, CaptionTranslation } from '../store/caption-store.js';
+import type { LangPair } from '../settings/settings-store.js';
 import {
   formatElapsedFromStart,
   groupParagraphsForSide,
@@ -13,19 +21,13 @@ import styles from './CaptionBoard.module.css';
 function downloadTranscript(): void {
   const { segments, translations, sessionStartMs } = captionStore.getState();
   if (segments.length === 0) return;
-  // Anchor for elapsed-time labels: the FIRST (smallest startMs) segment.
-  // We can't use sessionStartMs (which is Date.now() at first event) because
-  // providers emit startMs in their own time origin (fake replay = relative).
   const anchorMs = segments[0]?.startMs ?? 0;
 
-  // Group EN and ZH independently — same as on-screen.
   const en = groupParagraphsForSide({
     segments,
     translations,
     side: 'en',
     accessor: (s, t) => {
-      // Pick the EN side: if a translation exists with English target, use it;
-      // otherwise the segment text is presumed English (standard mic→en path).
       if (t && t.targetLanguage.startsWith('en')) return t.targetText;
       if (t && t.sourceLanguage.startsWith('en')) return t.sourceText;
       return s.text;
@@ -49,7 +51,6 @@ function downloadTranscript(): void {
   }
   lines.push('');
 
-  // Interleave by start time so the export reads chronologically.
   const merged: Array<{ side: 'en' | 'zh'; p: Paragraph }> = [
     ...en.map((p) => ({ side: 'en' as const, p })),
     ...zh.map((p) => ({ side: 'zh' as const, p })),
@@ -72,86 +73,40 @@ function downloadTranscript(): void {
   URL.revokeObjectURL(url);
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// ─── HistoryStream ───────────────────────────────────────────────────────────
+// Subscribes ONLY to finalized segments + translations. Its store snapshot
+// changes once per finalized segment (≈ once per spoken sentence) — never on
+// per-character partial deltas. Result: paragraph grouping is recomputed at
+// sentence rate, not at 30+ Hz.
 
-/**
- * Pick the live segment by latest startMs. We can't blindly use `segments.at(-1)`
- * because `upsertSorted` inserts revised segments by startMs, so a late revision
- * with an earlier startMs could push the wrong one to the end of the array.
- *
- * Returns the segment whose startMs is greatest. If multiple segments share the
- * max startMs (rare, partial+final at same instant), prefer the more recent
- * status (partial > revised > final reflects "most recently emitted").
- */
-function pickLiveSegment<T extends { segmentId: string; startMs: number; status: string }>(
-  segments: readonly T[],
-): T | undefined {
-  if (segments.length === 0) return undefined;
-  let best = segments[0]!;
-  for (let i = 1; i < segments.length; i++) {
-    const s = segments[i]!;
-    if (s.startMs > best.startMs) best = s;
-  }
-  return best;
+interface HistoryStreamProps {
+  langPair: LangPair;
 }
 
-// ─── Component ───────────────────────────────────────────────────────────────
-export function CaptionBoard() {
+const HistoryStream = memo(function HistoryStream({ langPair }: HistoryStreamProps) {
   const segments = useCaptionStore((s) => s.segments);
   const translations = useCaptionStore((s) => s.translations);
-  const langPair = useSettingsStore((s) => s.langPair);
-
-  // Elapsed-time anchor for history labels — derived from the first (oldest)
-  // segment in the buffer. Robust against providers that emit relative-time
-  // startMs (fake replay) vs wall-clock startMs (OpenAI Realtime).
-  const anchorMs = segments[0]?.startMs ?? 0;
-
-  const boardRef = useRef<HTMLDivElement>(null);
+  const bilingual = useSettingsStore((s) => s.includeSourceTranscript);
   const historyRef = useRef<HTMLDivElement>(null);
-  // autoPin pauses when user manually scrolls up; resumes when they scroll back to bottom.
+
+  // Scroll state lives here — parent shell doesn't need to know about it.
   const [autoPin, setAutoPin] = useState(true);
-  // Count of new finalized segments arriving while scroll is paused (powers the pill).
   const [pendingNew, setPendingNew] = useState(0);
-  // Snapshot of how many segments existed when the user paused scrolling.
   const segmentsAtPauseRef = useRef<number>(0);
-  const [confirmingClear, setConfirmingClear] = useState(false);
-  // Mirror in a ref so a rapid second click within the same render cycle reads
-  // the LATEST value (React batches state updates; reading from the closure
-  // would incorrectly see false on the second synchronous click).
-  const confirmingClearRef = useRef(false);
-  const confirmTimeoutRef = useRef<number | null>(null);
 
-  // ─── Hotkey-driven UI state ───
-  // Space: freeze the live-caption area on whatever was on screen at the
-  // moment of pressing — useful for "wait, what did they just say?" moments.
-  // History keeps receiving new segments; only the live area is paused.
-  const [frozen, setFrozen] = useState(false);
-  // `.`: force-show the auto-hidden Export/Clear chrome without needing a hover
-  // (helps for projector/touch use where mouse hover isn't available).
-  const [forceShowChrome, setForceShowChrome] = useState(false);
-  // `f`: fullscreen the board element. Tracked from fullscreenchange so the
-  // state stays in sync when the user exits via Esc.
-  const [isFullscreen, setIsFullscreen] = useState(false);
-  // Snapshot of what was on the live caption area at the moment we froze.
-  // Read while `frozen === true`; ignored otherwise.
-  const frozenSnapshotRef = useRef<{
-    target: string;
-    source: string;
-    showHint: boolean;
-    hintText: string;
-  } | null>(null);
-
-  // Live segment = the most recent partial/revised/final by startMs.
-  const liveSegment = pickLiveSegment(segments);
+  // The last finalized segment is always rendered by LiveCaption (either as
+  // the live area's static content when no partial is in flight, or as the
+  // stable underlay while a fresh partial waits for its translation). So
+  // history must EXCLUDE it — otherwise the same line appears twice on the
+  // board, which was the P3.6 → P3.7 regression caught during the
+  // browser-level verification pass.
   const historySegments = useMemo(
-    () => (liveSegment ? segments.filter((s) => s.segmentId !== liveSegment.segmentId) : segments),
-    [segments, liveSegment],
+    () => (segments.length > 0 ? segments.slice(0, -1) : segments),
+    [segments],
   );
 
   const isZhTarget = langPair === 'en→zh-TW';
 
-  // Independent paragraph streams. Accessors map seg.text/translation.target to
-  // each side's actual language, regardless of which side is "source" vs "target".
   const zhParagraphs = useMemo(
     () =>
       groupParagraphsForSide({
@@ -159,7 +114,7 @@ export function CaptionBoard() {
         translations,
         side: 'zh',
         accessor: (s, t) =>
-          isZhTarget ? t?.targetText ?? '' : s.text /* zh-TW→en: source IS the Chinese */,
+          isZhTarget ? t?.targetText ?? '' : s.text,
       }),
     [historySegments, translations, isZhTarget],
   );
@@ -170,18 +125,18 @@ export function CaptionBoard() {
         translations,
         side: 'en',
         accessor: (s, t) =>
-          isZhTarget ? s.text /* en→zh-TW: source IS the English */ : t?.targetText ?? '',
+          isZhTarget ? s.text : t?.targetText ?? '',
       }),
     [historySegments, translations, isZhTarget],
   );
 
-  // Primary side = translation target (the bigger column on the left).
   const primaryParagraphs = isZhTarget ? zhParagraphs : enParagraphs;
   const secondaryParagraphs = isZhTarget ? enParagraphs : zhParagraphs;
   const primarySide: 'zh' | 'en' = isZhTarget ? 'zh' : 'en';
   const secondarySide: 'zh' | 'en' = isZhTarget ? 'en' : 'zh';
 
-  // ─── Scroll bookkeeping ───
+  const anchorMs = segments[0]?.startMs ?? 0;
+
   useEffect(() => {
     const el = historyRef.current;
     if (!el) return;
@@ -190,11 +145,9 @@ export function CaptionBoard() {
       const nowPinned = fromBottom < 32;
       setAutoPin((wasPinned) => {
         if (wasPinned && !nowPinned) {
-          // user just scrolled up — snapshot baseline for "new since pause"
           segmentsAtPauseRef.current = segments.length;
           setPendingNew(0);
         } else if (!wasPinned && nowPinned) {
-          // resumed at bottom — clear pending count
           setPendingNew(0);
         }
         return nowPinned;
@@ -204,20 +157,209 @@ export function CaptionBoard() {
     return () => el.removeEventListener('scroll', onScroll);
   }, [segments.length]);
 
-  // Track new segments while paused.
   useEffect(() => {
     if (autoPin) return;
     const delta = segments.length - segmentsAtPauseRef.current;
     if (delta > 0) setPendingNew(delta);
   }, [segments.length, autoPin]);
 
+  // Pin to bottom when finalized paragraphs arrive. Runs at sentence rate,
+  // not at partial-delta rate — that is the key perf win.
   useLayoutEffect(() => {
     if (!autoPin) return;
     const el = historyRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [primaryParagraphs, secondaryParagraphs, autoPin]);
 
-  // ─── Clear with inline confirm (no native confirm() dialog) ───
+  function jumpToLatest(): void {
+    const el = historyRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    setAutoPin(true);
+    setPendingNew(0);
+  }
+
+  return (
+    <>
+      <div
+        ref={historyRef}
+        className={styles.history}
+        data-testid="caption-history"
+        data-bilingual={bilingual || undefined}
+      >
+        <div className={styles.historyCol} data-side={primarySide} data-role="primary">
+          {primaryParagraphs.map((p) => (
+            <div key={`p-${p.id}`} className={styles.historyRow}>
+              <span className={styles.historyTime}>
+                {formatElapsedFromStart(p.startMs, anchorMs)}
+              </span>
+              <p
+                className={`${styles.historyText} ${styles.historyTextPrimary}`}
+                data-conf={p.confLow ? 'low' : 'high'}
+              >
+                {p.text}
+              </p>
+            </div>
+          ))}
+        </div>
+        {bilingual && (
+          <div className={styles.historyCol} data-side={secondarySide} data-role="secondary">
+            {secondaryParagraphs.map((p) => (
+              <div key={`s-${p.id}`} className={styles.historyRow}>
+                <span className={styles.historyTime}>
+                  {formatElapsedFromStart(p.startMs, anchorMs)}
+                </span>
+                <p
+                  className={`${styles.historyText} ${styles.historyTextSecondary}`}
+                  data-conf={p.confLow ? 'low' : 'high'}
+                >
+                  {p.text}
+                </p>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      {!autoPin && pendingNew > 0 && (
+        <button
+          type="button"
+          className={styles.pill}
+          onClick={jumpToLatest}
+          data-testid="jump-to-latest"
+        >
+          ↓ {pendingNew} new
+        </button>
+      )}
+    </>
+  );
+});
+
+// ─── LiveCaption ─────────────────────────────────────────────────────────────
+// Subscribes only to livePartial (and its translation). When a partial-delta
+// arrives this is the ONLY component in the tree that re-renders.
+
+interface LiveCaptionProps {
+  frozen: boolean;
+  langPair: LangPair;
+}
+
+interface DisplayedLive {
+  target: string;
+  source: string;
+  /** 'partial' = current utterance in flight; 'final' = last finalized; 'paused' = Space-freeze snapshot. */
+  status: 'partial' | 'final' | 'paused';
+}
+
+function computeDisplayed(
+  live: CaptionSegment | null,
+  lastFinal: CaptionSegment | undefined,
+  liveTranslation: CaptionTranslation | undefined,
+  lastFinalTranslation: CaptionTranslation | undefined,
+): DisplayedLive | null {
+  if (!live && !lastFinal) return null;
+
+  // Active utterance: the user expects to see what is being said RIGHT NOW
+  // in the big text — not the previous final in big text and the current
+  // partial as a tiny hint below it. Source updates char-by-char (throttled
+  // to 20 Hz by the coalescing handler). Target updates as soon as the
+  // first translation draft chunk lands; until then it's a placeholder.
+  if (live) {
+    return {
+      source: live.text,
+      target: liveTranslation?.targetText ?? '',
+      status: 'partial',
+    };
+  }
+
+  // Idle (no in-flight partial): show the most recent finalized utterance.
+  return {
+    source: lastFinal!.text,
+    target: lastFinalTranslation?.targetText ?? '',
+    status: 'final',
+  };
+}
+
+const LiveCaption = memo(function LiveCaption({ frozen, langPair }: LiveCaptionProps) {
+  const live = useCaptionStore((s) => s.livePartial);
+  const lastFinal = useCaptionStore((s) => s.segments.at(-1));
+  const bilingual = useSettingsStore((s) => s.includeSourceTranscript);
+  // Live translation is kept in its own slot — see CaptionState.liveTranslation.
+  const liveTranslation = useCaptionStore((s): CaptionTranslation | undefined =>
+    s.liveTranslation && live && s.liveTranslation.sourceSegmentId === live.segmentId
+      ? s.liveTranslation
+      : undefined,
+  );
+  const lastFinalTranslation = useCaptionStore((s) =>
+    lastFinal ? s.translations[lastFinal.segmentId] : undefined,
+  );
+
+  const frozenSnapshotRef = useRef<DisplayedLive | null>(null);
+  const liveDisplayed = computeDisplayed(
+    live,
+    lastFinal,
+    liveTranslation,
+    lastFinalTranslation,
+  );
+
+  if (frozen && frozenSnapshotRef.current === null && liveDisplayed) {
+    frozenSnapshotRef.current = { ...liveDisplayed, status: 'paused' };
+  } else if (!frozen && frozenSnapshotRef.current !== null) {
+    frozenSnapshotRef.current = null;
+  }
+
+  const displayed: DisplayedLive | null = frozen
+    ? frozenSnapshotRef.current
+    : liveDisplayed;
+
+  if (!displayed) {
+    return (
+      <div className={styles.empty} data-lang-pair={langPair} data-testid="caption-empty">
+        <p>Waiting for captions…</p>
+      </div>
+    );
+  }
+
+  const isPartial = displayed.status === 'partial';
+
+  return (
+    <div className={styles.current} data-testid="caption-current" data-status={displayed.status}>
+      <div
+        className={styles.target}
+        data-testid="caption-target"
+        data-status={displayed.status}
+      >
+        {displayed.target || '…'}
+      </div>
+      {bilingual && (
+        <div className={styles.source} data-testid="caption-source" data-status={displayed.status}>
+          {displayed.source}
+          {isPartial && (
+            <span className={styles.cursor} aria-hidden="true" />
+          )}
+        </div>
+      )}
+      {frozen && (
+        <span className={styles.pausedBadge} data-testid="paused-badge">
+          ⏸ paused · press space to resume
+        </span>
+      )}
+    </div>
+  );
+});
+
+// ─── CaptionBoard (shell) ────────────────────────────────────────────────────
+
+export function CaptionBoard() {
+  const langPair = useSettingsStore((s) => s.langPair);
+  const boardRef = useRef<HTMLDivElement>(null);
+  const [confirmingClear, setConfirmingClear] = useState(false);
+  const confirmingClearRef = useRef(false);
+  const confirmTimeoutRef = useRef<number | null>(null);
+
+  const [frozen, setFrozen] = useState(false);
+  const [forceShowChrome, setForceShowChrome] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
   function onClearClick(): void {
     if (!confirmingClearRef.current) {
       confirmingClearRef.current = true;
@@ -239,28 +381,12 @@ export function CaptionBoard() {
     setConfirmingClear(false);
   }
 
-  // Cleanup on unmount.
   useEffect(() => {
     return () => {
       if (confirmTimeoutRef.current !== null) window.clearTimeout(confirmTimeoutRef.current);
     };
   }, []);
 
-  function jumpToLatest(): void {
-    const el = historyRef.current;
-    if (!el) return;
-    el.scrollTop = el.scrollHeight;
-    setAutoPin(true);
-    setPendingNew(0);
-  }
-
-  // ─── Hotkey listener (document-scoped, ignores form inputs) ───
-  // Bindings:
-  //   f       — toggle fullscreen on the board element
-  //   Space   — toggle freeze of the live caption area (history keeps flowing)
-  //   .       — toggle persistent visibility of Export/Clear chrome
-  // Form inputs (input/textarea/select/contentEditable) are exempted so typing
-  // in the settings panel doesn't trigger meeting-control hotkeys.
   useEffect(() => {
     function isTypingTarget(t: EventTarget | null): boolean {
       if (!(t instanceof HTMLElement)) return false;
@@ -293,8 +419,6 @@ export function CaptionBoard() {
     return () => document.removeEventListener('keydown', onKey);
   }, []);
 
-  // Track real fullscreen state — including exit-via-Esc which doesn't
-  // route through our keydown handler.
   useEffect(() => {
     function onFsChange(): void {
       setIsFullscreen(document.fullscreenElement === boardRef.current);
@@ -302,69 +426,6 @@ export function CaptionBoard() {
     document.addEventListener('fullscreenchange', onFsChange);
     return () => document.removeEventListener('fullscreenchange', onFsChange);
   }, []);
-
-  // ─── Live caption: freeze on previous final while a new partial is in progress ───
-  const lastFinalSegment = useMemo(
-    () => historySegments.at(-1),
-    [historySegments],
-  );
-
-  const liveIsPartial = !!liveSegment && liveSegment.status !== 'final';
-  // When a partial is mid-flight, the new translation hasn't arrived yet.
-  // Freeze BOTH target and source on the previous final so they stay in sync,
-  // and surface the partial as a small "translating · …" hint underneath.
-  // When the live segment itself is final (e.g., short utterance that finalized
-  // before any partial), show its own translation.
-  const displayedLiveTarget =
-    liveIsPartial && lastFinalSegment
-      ? translations[lastFinalSegment.segmentId]?.targetText
-      : liveSegment
-        ? translations[liveSegment.segmentId]?.targetText
-        : undefined;
-  const displayedLiveSource =
-    liveIsPartial && lastFinalSegment
-      ? lastFinalSegment.text
-      : liveSegment?.text;
-
-  if (!liveSegment) {
-    return (
-      <div className={styles.empty} data-lang-pair={langPair} data-testid="caption-empty">
-        <p>Waiting for captions…</p>
-      </div>
-    );
-  }
-
-  const partialPreview =
-    liveIsPartial && liveSegment.text.length > 56
-      ? liveSegment.text.slice(0, 54) + '…'
-      : liveSegment?.text ?? '';
-
-  // Freeze snapshot bookkeeping: when `frozen` flips on, capture exactly what
-  // is currently on the live area. When it flips off, drop the snapshot so
-  // the live area resumes tracking the latest segment. Snapshots use refs to
-  // avoid an extra render cycle and to remain stable while frozen is true.
-  if (frozen && frozenSnapshotRef.current === null) {
-    frozenSnapshotRef.current = {
-      target: displayedLiveTarget ?? '…',
-      source: displayedLiveSource ?? '',
-      showHint: liveIsPartial && !!lastFinalSegment,
-      hintText: partialPreview,
-    };
-  } else if (!frozen && frozenSnapshotRef.current !== null) {
-    frozenSnapshotRef.current = null;
-  }
-  const renderedTarget = frozen
-    ? frozenSnapshotRef.current?.target ?? '…'
-    : displayedLiveTarget ?? '…';
-  const renderedSource = frozen
-    ? frozenSnapshotRef.current?.source ?? ''
-    : displayedLiveSource ?? '';
-  const renderedShowHint = frozen
-    ? frozenSnapshotRef.current?.showHint ?? false
-    : liveIsPartial && !!lastFinalSegment;
-  const renderedHintText = frozen
-    ? frozenSnapshotRef.current?.hintText ?? ''
-    : partialPreview;
 
   return (
     <div
@@ -397,79 +458,9 @@ export function CaptionBoard() {
         </button>
       </div>
 
-      <div ref={historyRef} className={styles.history} data-testid="caption-history">
-        <div className={styles.historyCol} data-side={primarySide} data-role="primary">
-          {primaryParagraphs.map((p) => (
-            <div key={`p-${p.id}`} className={styles.historyRow}>
-              <span className={styles.historyTime}>
-                {formatElapsedFromStart(p.startMs, anchorMs)}
-              </span>
-              <p
-                className={`${styles.historyText} ${styles.historyTextPrimary}`}
-                data-conf={p.confLow ? 'low' : 'high'}
-              >
-                {p.text}
-              </p>
-            </div>
-          ))}
-        </div>
-        <div className={styles.historyCol} data-side={secondarySide} data-role="secondary">
-          {secondaryParagraphs.map((p) => (
-            <div key={`s-${p.id}`} className={styles.historyRow}>
-              <span className={styles.historyTime}>
-                {formatElapsedFromStart(p.startMs, anchorMs)}
-              </span>
-              <p
-                className={`${styles.historyText} ${styles.historyTextSecondary}`}
-                data-conf={p.confLow ? 'low' : 'high'}
-              >
-                {p.text}
-              </p>
-            </div>
-          ))}
-        </div>
-      </div>
+      <HistoryStream langPair={langPair} />
 
-      {!autoPin && pendingNew > 0 && (
-        <button
-          type="button"
-          className={styles.pill}
-          onClick={jumpToLatest}
-          data-testid="jump-to-latest"
-        >
-          ↓ {pendingNew} new
-        </button>
-      )}
-
-      <div
-        className={styles.current}
-        data-testid="caption-current"
-        data-status={liveSegment.status}
-      >
-        <div
-          className={styles.target}
-          data-testid="caption-target"
-          data-status={frozen ? 'paused' : liveIsPartial ? 'frozen' : 'final'}
-        >
-          {renderedTarget}
-        </div>
-        <div className={styles.source} data-testid="caption-source">
-          {renderedSource}
-          {!frozen && liveIsPartial && !lastFinalSegment && (
-            <span className={styles.cursor} aria-hidden="true" />
-          )}
-        </div>
-        {renderedShowHint && (
-          <span className={styles.translatingHint} data-testid="translating-hint">
-            translating · {renderedHintText}
-          </span>
-        )}
-        {frozen && (
-          <span className={styles.pausedBadge} data-testid="paused-badge">
-            ⏸ paused · press space to resume
-          </span>
-        )}
-      </div>
+      <LiveCaption frozen={frozen} langPair={langPair} />
     </div>
   );
 }

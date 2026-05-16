@@ -45,6 +45,47 @@ function LangPairSelector() {
   );
 }
 
+/**
+ * Toggle that drives the upstream `audio.input.transcription` config.
+ * Default ON (bilingual). Change takes effect on the next Start — we don't
+ * mid-flight `session.update` here because the existing renewal path
+ * already covers session rebuild and keeps things simple.
+ */
+function SourceTranscriptToggle() {
+  const includeSource = useSettingsStore((s) => s.includeSourceTranscript);
+  const setIncludeSource = useSettingsStore((s) => s.setIncludeSourceTranscript);
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <span style={{ fontSize: 11, opacity: 0.6, textTransform: 'uppercase', letterSpacing: 1 }}>
+        Source transcript
+      </span>
+      <label
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: '4px 10px',
+          borderRadius: 4,
+          border: '1px solid #555',
+          color: '#e8e8e8',
+          fontSize: 13,
+          cursor: 'pointer',
+          userSelect: 'none',
+        }}
+        title="When ON, the server requests gpt-realtime-whisper to also stream the speaker's original-language transcript. OFF saves the incremental whisper minutes but hides the source row. Applies on next Start."
+      >
+        <input
+          type="checkbox"
+          checked={includeSource}
+          onChange={(e) => setIncludeSource(e.target.checked)}
+          data-testid="toggle-source-transcript"
+        />
+        <span>{includeSource ? 'Bilingual (default)' : 'Translation only'}</span>
+      </label>
+    </div>
+  );
+}
+
 
 export function SettingsPanel({ open }: SettingsPanelProps) {
   const hasAudioLevel = useSettingsStore((s) => s.audioLevel !== null);
@@ -55,6 +96,7 @@ export function SettingsPanel({ open }: SettingsPanelProps) {
         <ScenarioPicker />
         <ModeSelector />
         <LangPairSelector />
+        <SourceTranscriptToggle />
         <HealthRow />
       </div>
       {hasAudioLevel && <AudioLevelMeter />}
