@@ -3,90 +3,54 @@ import { useSettingsStore } from '../settings/use-settings-store.js';
 import styles from './RealtimePricingPanel.module.css';
 
 // ─── Pricing constants ────────────────────────────────────────────────────────
-// gpt-4o-realtime-preview rates — hardcoded, no API calls (rates as of 2025-01)
-const AUDIO_IN_PER_M  = 100;   // USD / 1M audio input  tokens
-const TEXT_IN_PER_M   = 5;     // USD / 1M text  input  tokens
-const TEXT_OUT_PER_M  = 20;    // USD / 1M text  output tokens
+//
+// Source: OpenAI Realtime API pricing (verified May 2026).
+//   gpt-realtime-translate ......... $0.034 / min realtime audio (flat)
+//   gpt-realtime-whisper ........... $0.017 / min realtime audio (flat)
+//
+// The previous version of this panel used `gpt-4o-realtime-preview` rates
+// (token-based, $100/M audio in + $5/M text in + $20/M text out). That was
+// off by an order of magnitude for the model we actually call —
+// `gpt-realtime-translate` — which prices per minute of audio, NOT per
+// token. Business users budgeting from the old numbers would have planned
+// for ~10× the real bill. This rewrite mirrors OpenAI's documented flat
+// per-minute rate exactly, and tracks translate / whisper minutes
+// separately so the historical total stays correct even after the user
+// toggles bilingual mode between sessions.
 
-// 1 audio token = 100 ms of audio = 10 tokens/sec (OpenAI Realtime spec)
-const AUDIO_TOKENS_PER_SEC = 10;
-
-// Session instructions sent once at start — ~70 tokens text input
-const SESSION_PROMPT_TOKENS = 70;
-
-// Assumed speech activity ratio within the session duration
-const SPEECH_RATIO = 0.65;
-
-// Translation token ratios relative to spoken English-token equivalent
-const ZH_OUTPUT_RATIO = 0.55;   // Chinese out ≈ 55% of English token count
-const EN_OUTPUT_RATIO = 1.40;   // English out ≈ 140% (expansion from Chinese)
-
-// Words per minute while actively speaking in a business meeting
-const WORDS_PER_MIN = 120;
-const EN_TOKENS_PER_WORD = 1.3;
-
-const TWD_PER_USD = 32; // fixed exchange rate
+const TRANSLATE_USD_PER_MIN = 0.034;
+const WHISPER_USD_PER_MIN = 0.017;
+const TWD_PER_USD = 32; // fixed display-only rate; the bill is in USD
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-interface CostBreakdown {
-  durationSec:    number;
-  audioInTokens:  number;
-  textInTokens:   number;
-  textOutTokens:  number;
-  audioInCost:    number;
-  textInCost:     number;
-  textOutCost:    number;
-  total:          number;
-  totalTWD:       number;
-}
 
-function calcCost(elapsedMs: number, langPair: string): CostBreakdown {
-  const durationSec = elapsedMs / 1000;
-  const speechSec   = durationSec * SPEECH_RATIO;
-
-  const audioInTokens = Math.round(speechSec * AUDIO_TOKENS_PER_SEC);
-  const textInTokens  = SESSION_PROMPT_TOKENS;
-
-  const wordsSpoken    = (speechSec / 60) * WORDS_PER_MIN;
-  const enTokensEquiv  = wordsSpoken * EN_TOKENS_PER_WORD;
-  const textOutTokens  = Math.round(
-    langPair === 'zh-TW→en' ? enTokensEquiv * EN_OUTPUT_RATIO : enTokensEquiv * ZH_OUTPUT_RATIO,
-  );
-
-  const audioInCost = (audioInTokens / 1_000_000) * AUDIO_IN_PER_M;
-  const textInCost  = (textInTokens  / 1_000_000) * TEXT_IN_PER_M;
-  const textOutCost = (textOutTokens / 1_000_000) * TEXT_OUT_PER_M;
-  const total       = audioInCost + textInCost + textOutCost;
-
-  return {
-    durationSec, audioInTokens, textInTokens, textOutTokens,
-    audioInCost, textInCost, textOutCost,
-    total, totalTWD: total * TWD_PER_USD,
-  };
-}
-
-function fmtDuration(ms: number): string {
-  const s = Math.floor(ms / 1000);
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = s % 60;
+function fmtDuration(min: number): string {
+  const totalSec = Math.floor(min * 60);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const sec = totalSec % 60;
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
 }
 
-function fmtUsd(n: number): string { return `$${n.toFixed(4)}`; }
-function fmtTokens(n: number): string {
-  return n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
+function fmtUsd(n: number): string {
+  // Two decimals up to $100, four below — gives meaningful resolution on
+  // a short 1-min demo while staying compact for a 1-hour meeting.
+  return n >= 1 ? `$${n.toFixed(2)}` : `$${n.toFixed(4)}`;
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
 export function RealtimePricingPanel() {
-  const langPair        = useSettingsStore((s) => s.langPair);
-  const audioSource     = useSettingsStore((s) => s.audioSource);
-  const sessionStartAt  = useSettingsStore((s) => s.sessionStartAt);
-  const sessionElapsedMs = useSettingsStore((s) => s.sessionElapsedMs);
-  const resetSession    = useSettingsStore((s) => s.resetSession);
+  const langPair = useSettingsStore((s) => s.langPair);
+  const sessionStartAt = useSettingsStore((s) => s.sessionStartAt);
+  const translateMinutesAccum = useSettingsStore((s) => s.translateMinutesAccum);
+  const whisperMinutesAccum = useSettingsStore((s) => s.whisperMinutesAccum);
+  const activeSessionBilingual = useSettingsStore((s) => s.activeSessionBilingual);
+  const includeSourceTranscript = useSettingsStore((s) => s.includeSourceTranscript);
+  const resetSession = useSettingsStore((s) => s.resetSession);
 
-  // Force re-render every second while a session is live
+  // Force re-render every second while a session is live so the timer and
+  // cost both tick visibly. The interval cleans up on stop, and React's
+  // dependency on sessionStartAt ensures we only run it when needed.
   const [, setTick] = useState(0);
   useEffect(() => {
     if (!sessionStartAt) return;
@@ -94,18 +58,40 @@ export function RealtimePricingPanel() {
     return () => clearInterval(id);
   }, [sessionStartAt]);
 
-  const isLive    = sessionStartAt !== null;
-  const totalMs   = sessionElapsedMs + (isLive ? Date.now() - sessionStartAt : 0);
-  const hasData   = totalMs > 0;
-  const bk        = calcCost(totalMs, langPair);
+  const isLive = sessionStartAt !== null;
+  // Live session contributes minutes-so-far AT THE SNAPSHOT MODE — using
+  // the snapshot rather than the current toggle is what fixes the
+  // "historical bilingual total recalculates wrong after later switching
+  // to translation-only" regression flagged by Codex.
+  const liveMin = isLive ? (Date.now() - sessionStartAt) / 60_000 : 0;
+  const liveBilingual = isLive && activeSessionBilingual === true;
+  const translateMin = translateMinutesAccum + liveMin;
+  const whisperMin = whisperMinutesAccum + (liveBilingual ? liveMin : 0);
+  const total = translateMin * TRANSLATE_USD_PER_MIN + whisperMin * WHISPER_USD_PER_MIN;
+  const totalTWD = total * TWD_PER_USD;
+  const hasData = translateMin > 0;
+
+  // Tooltip rate reflects what the CURRENT live session is billed at (or
+  // what the next Start would use, if not running).
+  const tooltipBilingual = isLive ? liveBilingual : includeSourceTranscript;
+  const ratePerMin = tooltipBilingual ? TRANSLATE_USD_PER_MIN + WHISPER_USD_PER_MIN : TRANSLATE_USD_PER_MIN;
+  const rateLabel = `$${ratePerMin.toFixed(3)}/min ${tooltipBilingual ? 'bilingual' : 'translate'}`;
 
   return (
-    <div className={styles.chip}>
+    <div
+      className={styles.chip}
+      title={
+        `OpenAI Realtime pricing — ${rateLabel}.\n` +
+        `Translate minutes: ${translateMin.toFixed(2)}  Whisper minutes: ${whisperMin.toFixed(2)}.\n` +
+        `Source: openai.com/api/pricing\n` +
+        `Displayed total is wall-clock × rate per mode; the actual OpenAI invoice may differ slightly depending on session start/stop boundaries.`
+      }
+    >
       {isLive && <span className={styles.liveDot} aria-label="Live" />}
-      <span className={styles.timer} data-live={isLive}>{fmtDuration(totalMs)}</span>
+      <span className={styles.timer} data-live={isLive}>{fmtDuration(translateMin)}</span>
       <span className={styles.sep}>·</span>
       <span className={styles.cost}>
-        {hasData ? `${fmtUsd(bk.total)} ≈ NT$${Math.round(bk.totalTWD)}` : '—'}
+        {hasData ? `${fmtUsd(total)} ≈ NT$${Math.round(totalTWD)}` : '—'}
       </span>
       <span className={styles.pair}>{langPair}</span>
       {!isLive && hasData && (

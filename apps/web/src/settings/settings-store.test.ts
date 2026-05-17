@@ -111,6 +111,86 @@ describe('settingsStore — reset', () => {
   });
 });
 
+describe('settingsStore — session accounting (mode-aware)', () => {
+  it('snapshots bilingual mode at startSession so mid-session toggle does not skew rate', () => {
+    const store = createSettingsStore();
+    const api = store.getState();
+    api.setIncludeSourceTranscript(true);
+    api.startSession();
+    expect(store.getState().activeSessionBilingual).toBe(true);
+    // Mid-session toggle must NOT change the active snapshot.
+    api.setIncludeSourceTranscript(false);
+    expect(store.getState().activeSessionBilingual).toBe(true);
+  });
+
+  it('stopSession accumulates translate-only minutes when bilingual snapshot was false', async () => {
+    const store = createSettingsStore();
+    const api = store.getState();
+    api.setIncludeSourceTranscript(false);
+    api.startSession();
+    await new Promise((r) => setTimeout(r, 50));
+    api.stopSession();
+    const s = store.getState();
+    expect(s.translateMinutesAccum).toBeGreaterThan(0);
+    expect(s.whisperMinutesAccum).toBe(0);
+    expect(s.activeSessionBilingual).toBeNull();
+  });
+
+  it('stopSession accumulates BOTH translate + whisper minutes when bilingual', async () => {
+    const store = createSettingsStore();
+    const api = store.getState();
+    api.setIncludeSourceTranscript(true);
+    api.startSession();
+    await new Promise((r) => setTimeout(r, 50));
+    api.stopSession();
+    const s = store.getState();
+    expect(s.translateMinutesAccum).toBeGreaterThan(0);
+    // Whisper minutes track translate minutes 1:1 during bilingual sessions.
+    expect(s.whisperMinutesAccum).toBeCloseTo(s.translateMinutesAccum, 6);
+  });
+
+  it('mixed-mode sessions accumulate per-mode minutes correctly (Codex P2)', async () => {
+    // First session bilingual, then translation-only, then bilingual again.
+    // translate accumulator should grow on every session; whisper only on
+    // bilingual ones. This is what fixes the pricing-recalculates-wrong bug.
+    const store = createSettingsStore();
+    const api = store.getState();
+
+    api.setIncludeSourceTranscript(true);
+    api.startSession();
+    await new Promise((r) => setTimeout(r, 30));
+    api.stopSession();
+    const after1 = store.getState();
+    expect(after1.whisperMinutesAccum).toBeGreaterThan(0);
+    const w1 = after1.whisperMinutesAccum;
+    const t1 = after1.translateMinutesAccum;
+
+    api.setIncludeSourceTranscript(false);
+    api.startSession();
+    await new Promise((r) => setTimeout(r, 30));
+    api.stopSession();
+    const after2 = store.getState();
+    // Translate grew, whisper did NOT.
+    expect(after2.translateMinutesAccum).toBeGreaterThan(t1);
+    expect(after2.whisperMinutesAccum).toBe(w1);
+  });
+
+  it('resetSession clears all accumulators + snapshot', async () => {
+    const store = createSettingsStore();
+    const api = store.getState();
+    api.setIncludeSourceTranscript(true);
+    api.startSession();
+    await new Promise((r) => setTimeout(r, 20));
+    api.stopSession();
+    api.resetSession();
+    const s = store.getState();
+    expect(s.translateMinutesAccum).toBe(0);
+    expect(s.whisperMinutesAccum).toBe(0);
+    expect(s.activeSessionBilingual).toBeNull();
+    expect(s.sessionStartAt).toBeNull();
+  });
+});
+
 describe('settingsStore — includeSourceTranscript', () => {
   it('defaults to true (bilingual)', () => {
     expect(createSettingsStore().getState().includeSourceTranscript).toBe(true);

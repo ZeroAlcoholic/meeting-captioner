@@ -347,6 +347,36 @@ const LiveCaption = memo(function LiveCaption({ frozen, langPair }: LiveCaptionP
   );
 });
 
+// ─── ReconnectingIndicator ───────────────────────────────────────────────────
+// Subscribes to transport health state. Shows a visible amber pill while
+// the provider is in the middle of a renewal (state='reconnecting' for the
+// 1-2 s gap during normal 25-min refresh) or an auto-retry backoff
+// (state='failed' with retry timer pending). The speaker sees that the
+// system is auto-healing instead of staring at a frozen caption area.
+
+const ReconnectingIndicator = memo(function ReconnectingIndicator() {
+  const transportState = useSettingsStore((s) => s.health.transport.state);
+  const transportMessage = useSettingsStore((s) => s.health.transport.message);
+
+  if (transportState !== 'reconnecting' && transportState !== 'failed') {
+    return null;
+  }
+  const label = transportState === 'reconnecting' ? 'Reconnecting…' : 'Auto-recovering';
+  return (
+    <div
+      className={styles.reconnectPill}
+      data-state={transportState}
+      role="status"
+      aria-live="polite"
+      title={transportMessage ?? label}
+      data-testid="reconnect-pill"
+    >
+      <span className={styles.reconnectSpinner} aria-hidden="true" />
+      <span>{label}</span>
+    </div>
+  );
+});
+
 // ─── CaptionBoard (shell) ────────────────────────────────────────────────────
 
 export function CaptionBoard() {
@@ -457,6 +487,8 @@ export function CaptionBoard() {
           {confirmingClear ? '✕ Confirm clear' : '✕ Clear'}
         </button>
       </div>
+
+      <ReconnectingIndicator />
 
       <HistoryStream langPair={langPair} />
 

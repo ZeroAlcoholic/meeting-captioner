@@ -278,6 +278,56 @@
   }
 }
 
+/* Reconnect indicator — top-center, fixed inside the board. Shows during
+   normal renewal (transient ~1-2 s) AND during persistent retry backoff
+   (could be minutes). The status attribute differentiates amber pulse vs
+   red-tinted "still trying" so a glance tells the speaker which is which. */
+.reconnectPill {
+  position: absolute;
+  top: 0.75rem;
+  left: 50%;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  font-family: var(--font-ui, 'DM Mono', monospace);
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border-radius: 999px;
+  z-index: 3;
+  border: 1px solid var(--amber-dim, #7a5920);
+  background: rgba(199, 146, 54, 0.16);
+  color: var(--amber, #c79236);
+  /* Subtle entry so it doesn't snap in. */
+  animation: reconnectIn 200ms ease-out;
+}
+.reconnectPill[data-state='failed'] {
+  border-color: #7a3a3a;
+  background: rgba(180, 60, 60, 0.18);
+  color: #f4a3a3;
+}
+.reconnectSpinner {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  animation: reconnectSpin 0.9s linear infinite;
+}
+@keyframes reconnectSpin {
+  to { transform: rotate(360deg); }
+}
+@keyframes reconnectIn {
+  from { opacity: 0; transform: translate(-50%, -4px); }
+  to   { opacity: 1; transform: translate(-50%, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .reconnectSpinner { animation: none; }
+  .reconnectPill { animation: none; }
+}
+
 /* "↓ N new" pill — appears bottom-right of the board when scroll is paused. */
 .pill {
   position: absolute;

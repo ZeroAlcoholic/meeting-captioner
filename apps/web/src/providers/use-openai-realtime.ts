@@ -81,8 +81,14 @@ export function useOpenAIRealtime(): UseOpenAIRealtime {
     // Without this, a fast double-click on Start (or a renewal racing a
     // manual restart) would orphan the prior provider with its timers,
     // mic stream, and WebRTC pc still alive — a real memory + audio leak.
+    //
+    // Critically: we must call stop() even when previous.status is already
+    // 'stopped', because the persistent renewal-retry path leaves the
+    // instance in the stopped state with a pending renewalRetryTimer.
+    // Without this cleanup the old timer fires later and spins up a
+    // parallel session under the user's new manual session.
     const previous = providerRef.current;
-    if (previous && previous.status !== 'stopped') {
+    if (previous) {
       previous.stop();
       handlersRef.current?.flushPending();
     }

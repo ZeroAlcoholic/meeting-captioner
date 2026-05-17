@@ -158,8 +158,28 @@ export interface SettingsState {
   audioLevel: AudioLevelSnapshot | null;
   /** epoch ms when the current realtime session started; null when not running */
   sessionStartAt: number | null;
-  /** accumulated ms from all completed sessions (not including the current running one) */
-  sessionElapsedMs: number;
+  /**
+   * Translate minutes accumulated across all completed sessions in the
+   * current accounting period (does NOT include the running session;
+   * derive that separately from sessionStartAt). Always grows while a
+   * session is live.
+   */
+  translateMinutesAccum: number;
+  /**
+   * Whisper minutes accumulated across all completed sessions that were
+   * configured as bilingual. Only grows during bilingual sessions; lets
+   * the pricing panel show the correct historical total even after the
+   * user later toggles to translation-only.
+   */
+  whisperMinutesAccum: number;
+  /**
+   * Snapshot of `includeSourceTranscript` taken at startSession(). Null
+   * when no session is running. The pricing panel reads this so the live
+   * cost rate reflects what the running session is actually being charged
+   * for, NOT a mid-session toggle change (which doesn't take effect until
+   * the next Start anyway).
+   */
+  activeSessionBilingual: boolean | null;
   setScenario: (id: ScenarioId) => void;
   setMode: (id: ModeId) => void;
   setLangPair: (id: LangPair) => void;
@@ -190,7 +210,9 @@ export function createSettingsStore(): SettingsStore {
     health: defaultHealth(initialTimestamp),
     audioLevel: null,
     sessionStartAt: null,
-    sessionElapsedMs: 0,
+    translateMinutesAccum: 0,
+    whisperMinutesAccum: 0,
+    activeSessionBilingual: null,
 
     setScenario: (id) =>
       set({
@@ -219,17 +241,37 @@ export function createSettingsStore(): SettingsStore {
         },
       }),
 
-    startSession: () => set({ sessionStartAt: Date.now() }),
-
-    stopSession: () =>
+    startSession: () =>
       set((state) => ({
-        sessionElapsedMs:
-          state.sessionElapsedMs +
-          (state.sessionStartAt ? Date.now() - state.sessionStartAt : 0),
-        sessionStartAt: null,
+        sessionStartAt: Date.now(),
+        // Snapshot the bilingual mode at session start so the pricing
+        // panel uses the rate the session is actually billed at, even if
+        // the user toggles the setting mid-session (the toggle is
+        // documented as "applies on next Start" anyway).
+        activeSessionBilingual: state.includeSourceTranscript,
       })),
 
-    resetSession: () => set({ sessionStartAt: null, sessionElapsedMs: 0 }),
+    stopSession: () =>
+      set((state) => {
+        const elapsedMin = state.sessionStartAt
+          ? (Date.now() - state.sessionStartAt) / 60_000
+          : 0;
+        const wasBilingual = state.activeSessionBilingual === true;
+        return {
+          translateMinutesAccum: state.translateMinutesAccum + elapsedMin,
+          whisperMinutesAccum: state.whisperMinutesAccum + (wasBilingual ? elapsedMin : 0),
+          sessionStartAt: null,
+          activeSessionBilingual: null,
+        };
+      }),
+
+    resetSession: () =>
+      set({
+        sessionStartAt: null,
+        translateMinutesAccum: 0,
+        whisperMinutesAccum: 0,
+        activeSessionBilingual: null,
+      }),
 
     reset: () =>
       set({
@@ -241,7 +283,9 @@ export function createSettingsStore(): SettingsStore {
         health: defaultHealth(new Date().toISOString()),
         audioLevel: null,
         sessionStartAt: null,
-        sessionElapsedMs: 0,
+        translateMinutesAccum: 0,
+        whisperMinutesAccum: 0,
+        activeSessionBilingual: null,
       }),
   }));
 }

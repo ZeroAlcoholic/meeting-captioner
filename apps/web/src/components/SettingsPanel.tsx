@@ -10,9 +10,18 @@ export interface SettingsPanelProps {
   open: boolean;
 }
 
-function LangPairSelector() {
+/**
+ * Combined Language + Source-transcript control. The toggle used to sit in
+ * its own column which forced the settings row to consume more horizontal
+ * width than needed; nesting it under the Language buttons (slightly
+ * dropped down) keeps the controls visually grouped — language pair on
+ * top, capture mode beneath — and frees a column slot.
+ */
+function LanguageBlock() {
   const langPair = useSettingsStore((s) => s.langPair);
   const setLangPair = useSettingsStore((s) => s.setLangPair);
+  const includeSource = useSettingsStore((s) => s.includeSourceTranscript);
+  const setIncludeSource = useSettingsStore((s) => s.setIncludeSourceTranscript);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
       <span style={{ fontSize: 11, opacity: 0.6, textTransform: 'uppercase', letterSpacing: 1 }}>
@@ -41,34 +50,19 @@ function LangPairSelector() {
           </button>
         ))}
       </div>
-    </div>
-  );
-}
-
-/**
- * Toggle that drives the upstream `audio.input.transcription` config.
- * Default ON (bilingual). Change takes effect on the next Start — we don't
- * mid-flight `session.update` here because the existing renewal path
- * already covers session rebuild and keeps things simple.
- */
-function SourceTranscriptToggle() {
-  const includeSource = useSettingsStore((s) => s.includeSourceTranscript);
-  const setIncludeSource = useSettingsStore((s) => s.setIncludeSourceTranscript);
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-      <span style={{ fontSize: 11, opacity: 0.6, textTransform: 'uppercase', letterSpacing: 1 }}>
-        Source transcript
-      </span>
+      {/* Source transcript toggle nested below — sub-label "TRANSCRIPT" so
+          users read it as a sub-option of Language, not a peer block. */}
       <label
         style={{
           display: 'inline-flex',
           alignItems: 'center',
           gap: 8,
+          marginTop: 6,
           padding: '4px 10px',
           borderRadius: 4,
           border: '1px solid #555',
           color: '#e8e8e8',
-          fontSize: 13,
+          fontSize: 12,
           cursor: 'pointer',
           userSelect: 'none',
         }}
@@ -80,7 +74,12 @@ function SourceTranscriptToggle() {
           onChange={(e) => setIncludeSource(e.target.checked)}
           data-testid="toggle-source-transcript"
         />
-        <span>{includeSource ? 'Bilingual (default)' : 'Translation only'}</span>
+        <span>
+          <span style={{ opacity: 0.55, marginRight: 6, fontSize: 10, letterSpacing: 1, textTransform: 'uppercase' }}>
+            Transcript
+          </span>
+          {includeSource ? 'Bilingual' : 'Translation only'}
+        </span>
       </label>
     </div>
   );
@@ -95,8 +94,7 @@ export function SettingsPanel({ open }: SettingsPanelProps) {
       <div className={styles.row}>
         <ScenarioPicker />
         <ModeSelector />
-        <LangPairSelector />
-        <SourceTranscriptToggle />
+        <LanguageBlock />
         <HealthRow />
       </div>
       {hasAudioLevel && <AudioLevelMeter />}

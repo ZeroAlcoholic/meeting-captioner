@@ -65,7 +65,13 @@ export interface CreateCaptionStoreOptions {
   persistKey?: string | null;
 }
 
-const DEFAULT_MAX_SEGMENTS = 500;
+// Buffer cap. Sized for a long business meeting: at ~2-3 s per segment
+// (typical conversational pace) a 90-minute meeting produces ~1800-2700
+// segments. 3000 gives ~100 minutes of headroom before the oldest
+// segment is pruned from scrollback / persisted state. Storage cost is
+// bounded — at ~200 bytes per JSON segment the on-disk persisted state
+// peaks around 600 KB, well within the 5-10 MB localStorage quota.
+const DEFAULT_MAX_SEGMENTS = 3000;
 const PERSIST_DEBOUNCE_MS = 800;
 const PERSIST_VERSION = 2;
 

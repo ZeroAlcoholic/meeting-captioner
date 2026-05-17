@@ -409,6 +409,128 @@ describe('OpenAIRealtimeProvider', () => {
     expect(transportFails).toHaveLength(0);
   });
 
+  it('renewal failure schedules persistent retry backoff (5 → 10 → 20 → 30 min cap)', async () => {
+    // Long-meeting robustness: the previous single-shot 5-min retry could
+    // give up forever after one bad transient. The persistent backoff must
+    // keep climbing 5 → 10 → 20 → 30 → 30 → 30 (cap) on each consecutive
+    // failure, AND the renewalRetryTimer must be set every time so
+    // cleanup() can cancel it on user-initiated stop.
+    vi.useFakeTimers();
+
+    // First /session succeeds (initial start). Every subsequent /session
+    // fetch fails so each renewal attempt fails too.
+    const fetchMock = vi.fn();
+    // Initial bring-up: /session OK + SDP OK
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          client_secret: { value: 'tok' },
+          session_renewal_recommended_ms: 1000, // 1s renewal so we can test quickly
+        }),
+        { status: 200 },
+      ),
+    );
+    fetchMock.mockResolvedValueOnce(new Response('mock-answer-sdp', { status: 200 }));
+    // Every subsequent /session fails (renewal attempts).
+    fetchMock.mockResolvedValue(new Response('upstream gone', { status: 503 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { handlers, healthEvents } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+    await provider.start();
+    expect(provider.status).toBe('running');
+
+    // Extract retry-delay minutes from the latest 'failed' health message.
+    const lastRetryMinutes = (): number | null => {
+      const last = healthEvents
+        .filter((e) => e.component === 'transport' && e.state === 'failed')
+        .at(-1);
+      const m = last?.message?.match(/auto-retry in (\d+) min/);
+      return m ? Number(m[1]) : null;
+    };
+
+    // 1) Trigger first renewal at the recommended interval (1s).
+    await vi.advanceTimersByTimeAsync(1000);
+    await Promise.resolve(); // let the awaited start() reject and reach catch
+    await Promise.resolve();
+    expect(lastRetryMinutes()).toBe(5);
+
+    // 2) Advance the 5-min retry timer. Next start() also fails → 10 min.
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(lastRetryMinutes()).toBe(10);
+
+    // 3) Advance 10 min → 20 min.
+    await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(lastRetryMinutes()).toBe(20);
+
+    // 4) Advance 20 min → 30 min (cap).
+    await vi.advanceTimersByTimeAsync(20 * 60 * 1000);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(lastRetryMinutes()).toBe(30);
+
+    // 5) Cap holds.
+    await vi.advanceTimersByTimeAsync(30 * 60 * 1000);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(lastRetryMinutes()).toBe(30);
+
+    provider.stop();
+  });
+
+  it('stop() cancels the pending renewal-retry timer even when already stopped', async () => {
+    // Regression guard (Codex P1): after a renewal failure the instance
+    // settles into _status='stopped' WITH a renewalRetryTimer pending.
+    // If the user manually starts a new session, the hook calls stop()
+    // on the prior provider — that stop() must run cleanup() even though
+    // status is already 'stopped', otherwise the orphan timer fires later
+    // and opens a parallel session.
+    vi.useFakeTimers();
+    const fetchMock = vi.fn();
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          client_secret: { value: 'tok' },
+          session_renewal_recommended_ms: 1000,
+        }),
+        { status: 200 },
+      ),
+    );
+    fetchMock.mockResolvedValueOnce(new Response('mock-answer-sdp', { status: 200 }));
+    // All subsequent /session fail → renewal kicks into retry backoff.
+    fetchMock.mockResolvedValue(new Response('gone', { status: 503 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { handlers } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+    await provider.start();
+    expect(provider.status).toBe('running');
+
+    // Trigger the first renewal (which will fail and schedule a 5-min retry).
+    await vi.advanceTimersByTimeAsync(1000);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(provider.status).toBe('stopped');
+    // Retry timer is now armed.
+
+    // Snapshot how many fetch calls were made before stop().
+    const callsBeforeStop = fetchMock.mock.calls.length;
+
+    // Now: manual stop() while still in 'stopped'. Must cancel retry timer.
+    provider.stop();
+
+    // Advance well past the 5-min retry threshold. If the timer wasn't
+    // cancelled the provider would call /session again on its own.
+    await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(fetchMock.mock.calls.length).toBe(callsBeforeStop);
+  });
+
   it('connectionState=failed → health transport.failed and stop()', async () => {
     mockFetch();
     const { handlers, healthEvents } = makeHandlers();

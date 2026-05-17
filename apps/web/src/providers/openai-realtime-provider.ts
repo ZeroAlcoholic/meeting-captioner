@@ -23,8 +23,16 @@ const PEAK_DECAY_DB_PER_TICK = 0.1;
 const DEFAULT_SESSION_RENEW_MS = 25 * 60 * 1000;
 // Bounded ICE-restart strategy: 3 attempts, 3 s → 6 s → 12 s.
 const ICE_RESTART_DELAYS_MS = [3000, 6000, 12000];
-// Re-arm renewal 5 min later if a renewal attempt itself failed.
-const RENEW_RETRY_MS = 5 * 60 * 1000;
+// Persistent renewal-retry backoff: 5, 10, 20 then 30-min cap forever.
+// A long business meeting that hits OpenAI flakiness mid-stream must heal
+// itself without operator intervention — the previous single-shot 5-min
+// retry could leave a 90-min meeting silently dead after one bad transient.
+const RENEWAL_RETRY_BACKOFF_MS = [
+  5 * 60 * 1000,
+  10 * 60 * 1000,
+  20 * 60 * 1000,
+  30 * 60 * 1000,
+];
 
 function iso(): string {
   return new Date().toISOString();
@@ -62,6 +70,7 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
   private iceRestartAttempt = 0;
   private iceRestartTimer: ReturnType<typeof setTimeout> | null = null;
   private renewalRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private renewalRetryAttempt = 0;
   private inputAcc = '';
   private outputAcc = '';
   private currentSegmentId = '';
@@ -184,6 +193,11 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       if (aborted() || !this.pc) return;
       this.emitHealth('transport', 'connected');
 
+      // Bring-up succeeded — any prior renewal-retry backoff state is now
+      // moot. Reset the counter so a fresh failure later starts at 5 min,
+      // not at whatever the previous failure escalated to.
+      this.renewalRetryAttempt = 0;
+
       this.startLevelPolling();
       this.scheduleRenewal(this.renewDelayMs);
     } catch (err) {
@@ -196,7 +210,16 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
   }
 
   stop(): void {
-    if (this._status === 'stopped') return;
+    if (this._status === 'stopped') {
+      // The provider is already in the 'stopped' resting state, but the
+      // persistent renewal-retry timer set in scheduleRenewalRetry() can
+      // still be pending — if we returned here without cleanup() the OLD
+      // instance would later fire start() in parallel with a newer one
+      // the user manually created, opening a duplicate mic + WebRTC
+      // session. Always cancel pending work before returning.
+      this.cleanup();
+      return;
+    }
     this._status = 'stopped';
     this.flushSegment();
     this.cleanup();
@@ -248,23 +271,49 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Session renewal failed';
-      this.emitHealth('transport', 'failed', `Renewal failed: ${message}; will retry in 5 min`);
-      // start()'s failure path already ran cleanup and set _status='stopped'.
-      // We previously flipped it back to 'running' so a future renewSession
-      // would re-enter — but that lied about the connection state, leaving
-      // the user staring at a UI that says "running" while no audio flows.
-      // Schedule a fresh start() retry instead, leaving _status='stopped'
-      // until that retry actually reconnects.
+      // Persistent backoff retry — long meetings must heal themselves even
+      // if the first retry also fails. Counter resets to 0 on any
+      // successful start(). cleanup() cancels the pending timer if the
+      // user manually stops or restarts in the interim.
       if (this.status === 'stopped') {
-        // Schedule one retry — cleanup() will cancel it if user stops or
-        // restarts manually before it fires.
-        this.renewalRetryTimer = setTimeout(() => {
-          this.renewalRetryTimer = null;
-          if (this._status !== 'stopped') return;
-          void this.start();
-        }, RENEW_RETRY_MS);
+        this.scheduleRenewalRetry(message);
       }
     }
+  }
+
+  /**
+   * Schedule the next renewal retry using the persistent backoff sequence.
+   * Called from renewSession's catch AND from the retry timer's own
+   * callback when its start() attempt also fails. The recursion is what
+   * makes the long-meeting auto-recovery actually persist.
+   */
+  private scheduleRenewalRetry(reason?: string): void {
+    const idx = Math.min(this.renewalRetryAttempt, RENEWAL_RETRY_BACKOFF_MS.length - 1);
+    const delay = RENEWAL_RETRY_BACKOFF_MS[idx]!;
+    this.renewalRetryAttempt += 1;
+    const minutes = Math.round(delay / 60_000);
+    const detail = reason ? `${reason}; ` : '';
+    this.emitHealth(
+      'transport',
+      'failed',
+      `${detail}auto-retry in ${minutes} min (attempt #${this.renewalRetryAttempt})`,
+    );
+    this.renewalRetryTimer = setTimeout(async () => {
+      this.renewalRetryTimer = null;
+      if (this._status !== 'stopped') return;
+      try {
+        await this.start();
+      } catch {
+        // start()'s own catch already runs cleanup + sets _status='stopped';
+        // surfaced via api_error event.
+      }
+      // If the retry attempt itself did not reach running, schedule the
+      // NEXT one with the bumped backoff. cleanup() cancels this timer
+      // if user manually stops or starts in the interim.
+      if (this.status === 'stopped') {
+        this.scheduleRenewalRetry();
+      }
+    }, delay);
   }
 
   private handleIceState(): void {
