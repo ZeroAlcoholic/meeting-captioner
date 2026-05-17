@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { CaptionBoard } from './caption-board/CaptionBoard.js';
 import { SettingsPanel } from './components/SettingsPanel.js';
 import { RealtimePricingPanel } from './components/RealtimePricingPanel.js';
@@ -16,6 +16,7 @@ export function App() {
   const offline = useOfflineSTT();
   const modeId = useSettingsStore((s) => s.modeId);
   const audioSource = useSettingsStore((s) => s.audioSource);
+  const includeSourceTranscript = useSettingsStore((s) => s.includeSourceTranscript);
   const startSession = useSettingsStore((s) => s.startSession);
   const stopSession = useSettingsStore((s) => s.stopSession);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -30,9 +31,16 @@ export function App() {
     void fake.start();
   };
 
-  const handleStartReal = async () => {
+  const handleStartReal = useCallback(async () => {
     fake.stop();
     offline.stop();
+    // Always drain any in-flight session into the cost accumulators before
+    // starting anew. stopSession() is idempotent (no-op when sessionStartAt
+    // is null), so this is safe for both the cold-start and the auto-
+    // restart-on-toggle-change paths. Without this drain, the
+    // toggle-triggered restart would overwrite sessionStartAt and lose
+    // the accumulated minutes from the pre-toggle interval.
+    stopSession();
     // Start the cost timer ONLY after the realtime provider reaches the
     // 'running' state. If start() fails (mic denied, /session error, SDP
     // exchange refused), it returns false and we never accrue billed time
@@ -40,7 +48,25 @@ export function App() {
     // Codex flagged.
     const ok = await realtime.start();
     if (ok) startSession();
-  };
+  }, [fake, offline, realtime, startSession, stopSession]);
+
+  // ─── Auto-restart on mid-session source-transcript toggle ─────────────────
+  // The upstream OpenAI session config is fixed at /session creation, so a
+  // mid-session toggle change would otherwise be silently ignored until the
+  // user manually clicks Stop+Start. That's confusing — the toggle visibly
+  // flips, the UI gate opens/closes, but the actual data stream doesn't
+  // change. Detect the change while a real session is running and trigger
+  // a fresh Stop+Start automatically. The existing reconnecting pill
+  // covers the ~1-2 s visual gap.
+  const prevIncludeSourceRef = useRef(includeSourceTranscript);
+  useEffect(() => {
+    if (prevIncludeSourceRef.current !== includeSourceTranscript) {
+      prevIncludeSourceRef.current = includeSourceTranscript;
+      if (realtime.status === 'running') {
+        void handleStartReal();
+      }
+    }
+  }, [includeSourceTranscript, realtime.status, handleStartReal]);
 
   const handleStartOffline = () => {
     fake.stop();

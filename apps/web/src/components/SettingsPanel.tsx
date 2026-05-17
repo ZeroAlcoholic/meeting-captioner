@@ -66,7 +66,7 @@ function LanguageBlock() {
           cursor: 'pointer',
           userSelect: 'none',
         }}
-        title="When ON, the server requests gpt-realtime-whisper to also stream the speaker's original-language transcript. OFF saves the incremental whisper minutes but hides the source row. Applies on next Start."
+        title="When ON, the server requests gpt-realtime-whisper to also stream the speaker's original-language transcript. OFF saves the incremental whisper minutes but hides the source row. Toggling mid-session automatically restarts the OpenAI connection (~1-2 s gap, captions preserved)."
       >
         <input
           type="checkbox"

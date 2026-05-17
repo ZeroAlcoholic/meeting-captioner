@@ -18,10 +18,21 @@ kills browser sessions at exactly 10 min mid-meeting. We patch the manager
 instance after construction to extend that cap (env: WHL_MAX_CONN_TIME, default
 3600 s = 1 h). This stays compatible with WHL upstream — no fork required.
 """
+import logging
 import os
 
 from huggingface_hub import snapshot_download
 from whisper_live.server import TranscriptionServer
+
+# Silence the per-probe traceback noise. services/offline pings :9090 every
+# 5 s for a TCP-level liveness check; the modern `websockets` library
+# rejects that probe (HTTP/1.0 + no Upgrade headers) with a full ERROR
+# traceback ("opening handshake failed → InvalidMessage: did not receive a
+# valid HTTP request"). That message is correct but useless — the probe
+# IS supposed to be a quick reachability test, not a real WS handshake.
+# Suppressing only this logger keeps the legitimate session errors
+# visible while hiding the probe spam.
+logging.getLogger("websockets.server").setLevel(logging.CRITICAL)
 
 MODEL = os.environ.get("WHL_MODEL", "distil-large-v3")
 MAX_CONN_TIME = int(os.environ.get("WHL_MAX_CONN_TIME", "3600"))  # seconds
