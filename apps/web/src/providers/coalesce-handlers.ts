@@ -70,15 +70,16 @@ export function createStoreBoundHandlers(
       // Only `final` bypasses the queue. `partial` and `revised` are both
       // in-flight and contribute to the same 20 Hz throttle.
       if (e.status === 'final') {
-        // Drop ANY in-flight partial — defense in depth. The provider's
-        // newSegment() runs AFTER flushSegment(), so in practice a queued
-        // partial's segmentId always matches the final's. But if that
-        // invariant ever breaks (provider refactor, deadline-triggered
-        // flush, race with .completed event), a queued partial for the
-        // just-finalized segment would land after the final and ghost-
-        // rewrite livePartial. Cheaper to drop the partial unconditionally
-        // — its content is fully subsumed by the final's text.
-        pendingTranscript = null;
+        // Drop in-flight partial ONLY when it's for the same segment as
+        // the final — that partial is fully subsumed by the final's text
+        // and would ghost-rewrite livePartial if flushed afterward. A
+        // pending partial for a DIFFERENT segment (e.g. final-A arrived
+        // out-of-order while partial-B is already queued) must be kept;
+        // dropping it would lose a fresh live caption for the next
+        // utterance for one full coalesce tick (~50 ms).
+        if (pendingTranscript && pendingTranscript.segmentId === e.segmentId) {
+          pendingTranscript = null;
+        }
         captionStore.getState().applyTranscript(e);
         return;
       }
@@ -87,11 +88,11 @@ export function createStoreBoundHandlers(
     },
     onTranslation(e: TranslationEvent) {
       // `final` translations bypass — `draft` and `refined` are throttled.
-      // Same defense as transcripts: a queued draft for the just-finalized
-      // segment would otherwise land after the final and overwrite the
-      // committed translations[] entry with stale draft text.
+      // Same per-segment match rule as transcripts above.
       if (e.status === 'final') {
-        pendingTranslation = null;
+        if (pendingTranslation && pendingTranslation.sourceSegmentId === e.sourceSegmentId) {
+          pendingTranslation = null;
+        }
         captionStore.getState().applyTranslation(e);
         return;
       }

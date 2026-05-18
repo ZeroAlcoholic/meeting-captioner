@@ -40,6 +40,10 @@ export interface UseOpenAIRealtime {
 export function useOpenAIRealtime(): UseOpenAIRealtime {
   const providerRef = useRef<OpenAIRealtimeProvider | null>(null);
   const handlersRef = useRef<ReturnType<typeof createStoreBoundHandlers> | null>(null);
+  // Holds the current provider's onStatus unsubscribe so we can detach
+  // before swapping providers (start-restart cycle) without leaking the
+  // old subscription into the new provider's lifecycle.
+  const statusUnsubRef = useRef<(() => void) | null>(null);
   const [status, setStatus] = useState<ProviderStatus>('idle');
   const [error, setError] = useState<string | null>(null);
   const [apiKeyStatus, setApiKeyStatus] = useState<ApiKeyStatus>('checking');
@@ -72,6 +76,8 @@ export function useOpenAIRealtime(): UseOpenAIRealtime {
     return () => {
       cancelled = true;
       if (timer !== null) clearTimeout(timer);
+      statusUnsubRef.current?.();
+      statusUnsubRef.current = null;
       providerRef.current?.stop();
     };
   }, []);
@@ -93,6 +99,12 @@ export function useOpenAIRealtime(): UseOpenAIRealtime {
       previous.stop();
       handlersRef.current?.flushPending();
     }
+    // Drop the previous provider's status subscription before overwriting
+    // its ref — otherwise the old instance's late callbacks (timer-driven
+    // retry, in-flight cleanup) would still mutate React state and step on
+    // the new provider's events.
+    statusUnsubRef.current?.();
+    statusUnsubRef.current = null;
 
     const { langPair, includeSourceTranscript, micDistance } = settingsStore.getState();
     const handlers = createStoreBoundHandlers();
@@ -111,6 +123,20 @@ export function useOpenAIRealtime(): UseOpenAIRealtime {
       micDistance,
     );
     providerRef.current = provider;
+    // Subscribe to internal status transitions — keeps React in sync when
+    // the provider self-transitions during transparent renewal (running →
+    // idle → running) or falls into retry backoff (running → stopped). The
+    // optimistic setStatus('running') below stays so the button reflects
+    // intent immediately; the subscription corrects later if start() failed
+    // or a renewal mid-session changed state behind the consumer's back.
+    statusUnsubRef.current = provider.onStatus((s) => {
+      if (providerRef.current !== provider) return; // stale callback
+      // Re-frame internal 'stopped' as 'idle' for the UI: the provider's
+      // retry timer will spin a new start() up, so the consumer's "is the
+      // button labelled running?" state matters more than the literal
+      // internal transition. 'idle' makes the user see Start as available.
+      setStatus(s === 'stopped' ? 'idle' : s);
+    });
     setStatus('running');
 
     try {

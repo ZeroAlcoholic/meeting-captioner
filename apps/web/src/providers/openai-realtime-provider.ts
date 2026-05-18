@@ -90,6 +90,13 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
   readonly name = 'openai-realtime';
 
   private _status: ProviderStatus = 'idle';
+  // Subscribers notified whenever _status transitions. The hook uses this
+  // to keep React state in sync with the provider's internal lifecycle —
+  // critical during renewal: the provider may transition running → idle →
+  // running (transparent renewal) or running → stopped (entered retry
+  // backoff) without the consumer ever calling stop(), and the UI must
+  // reflect those changes or it shows "running" over dead captions.
+  private statusListeners: Set<(s: ProviderStatus) => void> = new Set();
   private pc: RTCPeerConnection | null = null;
   private readonly mic: AudioSource;
   private levelInterval: ReturnType<typeof setInterval> | null = null;
@@ -151,6 +158,25 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
     return this._status;
   }
 
+  /**
+   * Subscribe to provider status transitions. Returns an unsubscribe function.
+   * Used by the React hook to keep its useState in lockstep with the provider
+   * so the UI can't display "running" while the provider has fallen into
+   * retry-backoff stopped state behind its back.
+   */
+  onStatus(fn: (s: ProviderStatus) => void): () => void {
+    this.statusListeners.add(fn);
+    return () => this.statusListeners.delete(fn);
+  }
+
+  private setStatus(s: ProviderStatus): void {
+    if (this._status === s) return;
+    this._status = s;
+    for (const fn of this.statusListeners) {
+      try { fn(s); } catch { /* listener errors must not corrupt provider state */ }
+    }
+  }
+
   /** Milliseconds remaining before the next scheduled session renewal, or null when no renewal is pending. */
   getRenewalEtaMs(): number | null {
     if (this.renewTimer === null || this.renewScheduledAtMs === 0) return null;
@@ -160,7 +186,7 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
 
   async start(): Promise<void> {
     if (this._status === 'running') return;
-    this._status = 'running';
+    this.setStatus('running');
     this.iceRestartAttempt = 0;
     this.newSegment();
 
@@ -180,7 +206,7 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       const message = err instanceof Error ? err.message : 'Microphone unavailable';
       // mic.acquire already emitted health.audio.failed; surface the error and stop.
       this.emitHealth('audio', 'failed', message);
-      this._status = 'stopped';
+      this.setStatus('stopped');
       this.cleanup();
       return;
     }
@@ -284,7 +310,7 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       if (aborted()) return; // user already stopped; don't surface a misleading error
       const message = err instanceof Error ? err.message : 'Unknown error starting Realtime';
       this.emitHealth('transport', 'api_error', message);
-      this._status = 'stopped';
+      this.setStatus('stopped');
       this.cleanup();
     }
   }
@@ -300,7 +326,7 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       this.cleanup();
       return;
     }
-    this._status = 'stopped';
+    this.setStatus('stopped');
     this.flushSegment();
     this.cleanup();
     this.emitHealth('audio', 'stopped');
@@ -345,7 +371,7 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
     this.emitHealth('transport', 'reconnecting', 'Renewing OpenAI session before 30-min cap');
     this.flushSegment();
     this.cleanup();
-    this._status = 'idle';
+    this.setStatus('idle');
     // Re-enter start(); captionStore is intentionally NOT cleared.
     try {
       await this.start();

@@ -115,6 +115,56 @@ describe('createStoreBoundHandlers — partial throttling', () => {
     expect(captionStore.getState().translations['s1']?.status).toBe('final');
   });
 
+  it('out-of-order: final(A) does NOT clear queued partial(B) for different segment', () => {
+    // Regression guard (Codex review): an earlier defense-in-depth change
+    // unconditionally cleared `pendingTranscript` on ANY final. In an
+    // out-of-order arrival (final A is delivered AFTER partial B is already
+    // queued — possible during async translation handler refactors or
+    // network jitter), that defense would drop the legitimate B partial
+    // and the live caption area would go blank until the next coalesce
+    // tick (~50 ms gap of frozen UI). The segmentId match check ensures
+    // only the SAME-segment partial is cleared.
+    const queue: Array<() => void> = [];
+    const handlers = createStoreBoundHandlers({
+      scheduler: (cb) => { queue.push(cb); },
+    });
+
+    // Partial B is queued first.
+    handlers.onTranscript(partial('s-B', 'next utterance'));
+    // Then final A arrives out-of-order (different segment).
+    handlers.onTranscript(final('s-A', 'previous utterance.'));
+
+    // Final A committed straight to segments. Pending B is preserved.
+    expect(captionStore.getState().segments).toHaveLength(1);
+    expect(captionStore.getState().segments[0]?.segmentId).toBe('s-A');
+
+    // Flush the queue — partial B reaches livePartial as expected.
+    queue.forEach((fn) => fn());
+    expect(captionStore.getState().livePartial?.segmentId).toBe('s-B');
+    expect(captionStore.getState().livePartial?.text).toBe('next utterance');
+  });
+
+  it('out-of-order: final translation for A does NOT clear pending draft for B', () => {
+    const queue: Array<() => void> = [];
+    const handlers = createStoreBoundHandlers({
+      scheduler: (cb) => { queue.push(cb); },
+    });
+
+    // First a transcript-partial for B (so the store routes B's draft to
+    // liveTranslation, not into translations[]).
+    handlers.onTranscript(partial('s-B', 'B src'));
+    handlers.onTranslation(draft('s-B', 'B 翻譯草稿'));
+
+    // Now final-translation for a DIFFERENT segment arrives.
+    handlers.onTranslation({ ...draft('s-A', 'A 最終翻譯'), status: 'final' });
+
+    // Both arrived; pending B should survive.
+    queue.forEach((fn) => fn());
+    expect(captionStore.getState().translations['s-A']?.targetText).toBe('A 最終翻譯');
+    expect(captionStore.getState().liveTranslation?.sourceSegmentId).toBe('s-B');
+    expect(captionStore.getState().liveTranslation?.targetText).toBe('B 翻譯草稿');
+  });
+
   it('forwards health and audio-level synchronously', () => {
     const handlers = createStoreBoundHandlers({ scheduler: () => {} });
     const health: HealthEvent = {

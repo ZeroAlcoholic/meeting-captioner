@@ -38,10 +38,21 @@ export class OfflineSTTProvider implements CaptionProvider {
   // exceeded the threshold. Surfaced as a degraded-audio health event
   // every 50 drops so the user sees the symptom instead of a silent gap.
   private wsBackpressureDropCount = 0;
+  // Consecutive (run-length) drops — separate from the cumulative count.
+  // Reset on every successful send. Once we've dropped this many in a
+  // row, the WS is effectively dead even though readyState says OPEN
+  // (sustained backpressure, no recovery in sight). Force-close so the
+  // existing onclose → scheduleReconnect machinery takes over.
+  private wsBackpressureConsecutiveDrops = 0;
   // 1 MB ≈ 16 s of 16 kHz mono Float32 — plenty of headroom for a
   // transient WHL stall (model load, MT pause) without inviting an
   // unbounded memory leak across a long meeting.
   private static readonly WS_BACKPRESSURE_THRESHOLD = 1_000_000;
+  // 100 consecutive drops at typical AudioWorklet cadence (60–100 Hz)
+  // = ~1–1.7 s of nonstop drops. Long enough to ride out a brief MT
+  // executor stall; short enough that a truly wedged WS triggers a
+  // reconnect within ~2 s instead of dropping audio forever.
+  private static readonly WS_BACKPRESSURE_FORCE_RECONNECT_DROPS = 100;
 
   constructor(
     private readonly wsUrl: string,
@@ -189,6 +200,7 @@ export class OfflineSTTProvider implements CaptionProvider {
         // OOM the tab. Drop frames above the threshold and surface the symptom.
         if (this.ws.bufferedAmount > OfflineSTTProvider.WS_BACKPRESSURE_THRESHOLD) {
           this.wsBackpressureDropCount += 1;
+          this.wsBackpressureConsecutiveDrops += 1;
           if (this.wsBackpressureDropCount % 50 === 0) {
             this.emitHealth(
               'audio',
@@ -196,8 +208,26 @@ export class OfflineSTTProvider implements CaptionProvider {
               `Offline service slow — ${this.wsBackpressureDropCount} PCM frames dropped (buffer ${Math.round(this.ws.bufferedAmount / 1024)} KB)`,
             );
           }
+          // Sustained backpressure — the WS is dead in everything but name.
+          // Force-close so onclose triggers scheduleReconnect; otherwise the
+          // session would silently drop audio indefinitely while the readyState
+          // stays OPEN.
+          if (
+            this.wsBackpressureConsecutiveDrops >=
+            OfflineSTTProvider.WS_BACKPRESSURE_FORCE_RECONNECT_DROPS
+          ) {
+            this.emitHealth(
+              'transport',
+              'reconnecting',
+              `Sustained WS backpressure (${this.wsBackpressureConsecutiveDrops} consecutive drops) — forcing reconnect`,
+            );
+            this.wsBackpressureConsecutiveDrops = 0;
+            try { this.ws.close(); } catch { /* noop */ }
+          }
           return;
         }
+        // Successful send — buffer is draining, reset the consecutive counter.
+        this.wsBackpressureConsecutiveDrops = 0;
         this.ws.send(ev.data);
       };
 
@@ -253,6 +283,7 @@ export class OfflineSTTProvider implements CaptionProvider {
     }
     this.reconnectAttempts = 0;
     this.wsBackpressureDropCount = 0;
+    this.wsBackpressureConsecutiveDrops = 0;
     this.workletNode?.disconnect();
     this.workletNode?.port.close();
     void this.audioCtx?.close();

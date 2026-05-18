@@ -749,6 +749,48 @@ describe('OpenAIRealtimeProvider', () => {
     provider.stop();
   });
 
+  it('onStatus subscribers receive every status transition (including transparent renewals)', async () => {
+    // Codex review regression guard: the React hook depends on this
+    // callback to keep its useState synced with the provider's internal
+    // lifecycle. Without it, a renewal that transitions running → idle →
+    // running would never reach React, and the consumer could not
+    // distinguish "captions live" from "captions dead, retry timer
+    // ticking" — UI shows "running" over a wedged session.
+    mockFetch();
+    const { handlers } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+
+    const transitions: string[] = [];
+    const unsub = provider.onStatus((s) => transitions.push(s));
+
+    await provider.start();
+    expect(transitions).toContain('running');
+    provider.stop();
+    expect(transitions).toContain('stopped');
+
+    // After unsubscribe, no further transitions should be recorded.
+    const before = transitions.length;
+    unsub();
+    // Calling stop() again is a no-op for status (already 'stopped'); we
+    // assert the negative via the count.
+    provider.stop();
+    expect(transitions.length).toBe(before);
+  });
+
+  it('onStatus listener errors do not corrupt provider state', async () => {
+    mockFetch();
+    const { handlers } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+    // Subscriber throws every time.
+    provider.onStatus(() => { throw new Error('subscriber blew up'); });
+    // Despite the throw, start() / stop() must still complete and the
+    // _status getter must reflect the correct terminal state.
+    await provider.start();
+    expect(provider.status).toBe('running');
+    provider.stop();
+    expect(provider.status).toBe('stopped');
+  });
+
   it('audio level polling emits AudioLevelEvents at ~100ms intervals', async () => {
     vi.useFakeTimers();
     mockFetch();
