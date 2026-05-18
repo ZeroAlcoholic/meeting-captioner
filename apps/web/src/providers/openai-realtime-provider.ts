@@ -16,6 +16,15 @@ const s2tw = Converter({ from: 'cn', to: 'tw' });
 const OPENAI_TRANSLATION_CALLS_URL = 'https://api.openai.com/v1/realtime/translations/calls';
 
 const SEGMENT_FLUSH_MS = 1000;
+// Absolute upper bound on a single segment's duration. Without this a
+// continuous monologue (no >1 s gap between deltas) NEVER hits the
+// debounce-based flush above, so no `final` ever lands → segments[] stays
+// empty → HistoryStream is permanently blank → LiveCaption shows a single
+// unbounded partial that visually "freezes" on whatever scrolled off the
+// screen first. 12 s gives natural paragraph rhythm for both presenter
+// monologues and rapid Q&A, and bounds the live partial's text length
+// so the rendering cost per delta stays flat.
+const MAX_SEGMENT_DURATION_MS = 12_000;
 const AUDIO_LEVEL_INTERVAL_MS = 100;
 const PEAK_HOLD_MS = 2000;
 const PEAK_DECAY_DB_PER_TICK = 0.1;
@@ -23,15 +32,18 @@ const PEAK_DECAY_DB_PER_TICK = 0.1;
 const DEFAULT_SESSION_RENEW_MS = 25 * 60 * 1000;
 // Bounded ICE-restart strategy: 3 attempts, 3 s → 6 s → 12 s.
 const ICE_RESTART_DELAYS_MS = [3000, 6000, 12000];
-// Persistent renewal-retry backoff: 5, 10, 20 then 30-min cap forever.
-// A long business meeting that hits OpenAI flakiness mid-stream must heal
-// itself without operator intervention — the previous single-shot 5-min
-// retry could leave a 90-min meeting silently dead after one bad transient.
+// Persistent renewal-retry backoff: 30s → 1m → 3m → 5m → 10m cap forever.
+// Previous schedule started at 5 min which is unacceptable for live meeting
+// service — a transient OpenAI hiccup would leave captions dark for 5
+// minutes before the first heal attempt. Starting at 30 s recovers
+// transient failures quickly while the longer tail still backs off if
+// the failure is persistent (rate limit, hard outage).
 const RENEWAL_RETRY_BACKOFF_MS = [
+  30 * 1000,
+  60 * 1000,
+  3 * 60 * 1000,
   5 * 60 * 1000,
   10 * 60 * 1000,
-  20 * 60 * 1000,
-  30 * 60 * 1000,
 ];
 
 // Stale-data detection. If we observe RMS above the silence floor for a
@@ -40,7 +52,17 @@ const RENEWAL_RETRY_BACKOFF_MS = [
 // Without this, OpenAI hiccups manifest as a frozen caption area with
 // "Connected" health, with no way for the user to know.
 const STALE_DATA_THRESHOLD_MS = 30_000;
-const STALE_AUDIO_ACTIVE_DB = -40;
+// Per-micDistance audio-active threshold. A flat -40 dB was tuned for
+// close/headset mics (typical RMS ~-25 dB) but completely missed Far-field
+// mics (~-42 dB) and Raw signal (~-48 dB) — the wedge detector silently
+// did nothing for those configurations because no sample ever counted as
+// "audio active". Loosening with micDistance makes detection consistent
+// across the three capture modes.
+const STALE_AUDIO_ACTIVE_DB_BY_MIC: Record<'close' | 'far' | 'off', number> = {
+  close: -40,
+  far: -48,
+  off: -52,
+};
 
 function iso(): string {
   return new Date().toISOString();
@@ -73,6 +95,11 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
   private levelInterval: ReturnType<typeof setInterval> | null = null;
   private segmentFlushTimer: ReturnType<typeof setTimeout> | null = null;
   private renewTimer: ReturnType<typeof setTimeout> | null = null;
+  // Absolute-deadline timer paired with segmentFlushTimer. Set on the first
+  // delta of a segment, never reset on subsequent deltas — guarantees the
+  // segment flushes after MAX_SEGMENT_DURATION_MS even under continuous
+  // speech. Cleared in flushSegment() so the next segment starts fresh.
+  private segmentDeadlineTimer: ReturnType<typeof setTimeout> | null = null;
   private renewScheduledAtMs = 0;
   private renewDelayMs = DEFAULT_SESSION_RENEW_MS;
   private iceRestartAttempt = 0;
@@ -82,6 +109,18 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
   // Stale-data detection state.
   private lastDcEventAt = 0;
   private lastAudioActiveAt = 0;
+  // Cumulative count of audio-active samples (>STALE_AUDIO_ACTIVE_DB)
+  // observed SINCE the last DC event. The 100 ms polling tick means each
+  // tick is one sample; 100 samples ≈ 10 s of cumulative active speech.
+  // Natural sentence pauses (silent ticks) don't subtract — they just
+  // don't add. This is the fix for the previous stretch-based detector
+  // that reset on every >1 s pause and consequently never fired during
+  // real meeting speech (which has natural micro-pauses every few seconds).
+  private audioActiveSamplesSinceDc = 0;
+  // Diagnostic counters — surfaced via periodic console dump so silent
+  // WebRTC wedges leave forensic evidence in DevTools.
+  private dcEventCount = 0;
+  private diagInterval: ReturnType<typeof setInterval> | null = null;
   private inputAcc = '';
   private outputAcc = '';
   private currentSegmentId = '';
@@ -236,9 +275,11 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       // starts now, not at whatever the previous run left behind.
       this.lastDcEventAt = Date.now();
       this.lastAudioActiveAt = 0;
+      this.audioActiveSamplesSinceDc = 0;
 
       this.startLevelPolling();
       this.scheduleRenewal(this.renewDelayMs);
+      this.startDiagnosticDump();
     } catch (err) {
       if (aborted()) return; // user already stopped; don't surface a misleading error
       const message = err instanceof Error ? err.message : 'Unknown error starting Realtime';
@@ -269,14 +310,18 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
   private cleanup(): void {
     if (this.levelInterval !== null) clearInterval(this.levelInterval);
     if (this.segmentFlushTimer !== null) clearTimeout(this.segmentFlushTimer);
+    if (this.segmentDeadlineTimer !== null) clearTimeout(this.segmentDeadlineTimer);
     if (this.renewTimer !== null) clearTimeout(this.renewTimer);
     if (this.iceRestartTimer !== null) clearTimeout(this.iceRestartTimer);
     if (this.renewalRetryTimer !== null) clearTimeout(this.renewalRetryTimer);
+    if (this.diagInterval !== null) clearInterval(this.diagInterval);
     this.levelInterval = null;
     this.segmentFlushTimer = null;
+    this.segmentDeadlineTimer = null;
     this.renewTimer = null;
     this.iceRestartTimer = null;
     this.renewalRetryTimer = null;
+    this.diagInterval = null;
     this.renewScheduledAtMs = 0;
     this.pc?.close();
     this.pc = null;
@@ -330,12 +375,17 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
     const idx = Math.min(this.renewalRetryAttempt, RENEWAL_RETRY_BACKOFF_MS.length - 1);
     const delay = RENEWAL_RETRY_BACKOFF_MS[idx]!;
     this.renewalRetryAttempt += 1;
-    const minutes = Math.round(delay / 60_000);
+    // Format "30 sec" for sub-minute delays, "N min" for the rest. Operator
+    // confidence drops if we report "auto-retry in 0 min" for a 30 s delay.
+    const humanDelay =
+      delay < 60_000
+        ? `${Math.round(delay / 1000)} sec`
+        : `${Math.round(delay / 60_000)} min`;
     const detail = reason ? `${reason}; ` : '';
     this.emitHealth(
       'transport',
       'failed',
-      `${detail}auto-retry in ${minutes} min (attempt #${this.renewalRetryAttempt})`,
+      `${detail}auto-retry in ${humanDelay} (attempt #${this.renewalRetryAttempt})`,
     );
     this.renewalRetryTimer = setTimeout(async () => {
       this.renewalRetryTimer = null;
@@ -357,12 +407,19 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
 
   private handleIceState(): void {
     const state = this.pc?.iceConnectionState;
+    // Diagnostic: every transition logged. Surfaces wedged-DC scenarios
+    // where iceConnectionState='connected' but DC events stopped.
+    console.info('[openai-rt] iceConnectionState →', state);
     if (state === 'disconnected') {
       this.emitHealth('transport', 'reconnecting');
       this.attemptIceRestart();
     } else if (state === 'failed') {
-      this.emitHealth('transport', 'failed', 'ICE connection failed');
-      this.stop();
+      // ICE truly dead. Don't stop() — that leaves the user with a frozen
+      // caption area and a manual Start button to click, defeating the
+      // self-healing premise. Renew the whole session (fresh SDP + ICE)
+      // and let the renewal-retry backoff escalate if it also fails.
+      this.emitHealth('transport', 'reconnecting', 'ICE failed — rebuilding session');
+      void this.renewSession();
     } else if (state === 'connected' || state === 'completed') {
       // Healthy ICE — reset backoff so a future blip starts fresh.
       this.iceRestartAttempt = 0;
@@ -371,19 +428,30 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
 
   private handleConnectionState(): void {
     const state = this.pc?.connectionState;
-    // connectionState aggregates ICE+DTLS. 'failed' is more authoritative
-    // than iceConnectionState alone; act on it immediately.
+    console.info('[openai-rt] connectionState →', state);
+    // connectionState aggregates ICE+DTLS. 'failed' means the transport
+    // can't recover via ICE restart alone — go straight to a full session
+    // renewal (same self-heal premise as ICE failure above). 'disconnected'
+    // is transient (browser waits ~30s before promoting to 'failed') so we
+    // surface it but don't tear down — let ICE restart or the stale
+    // detector handle recovery.
     if (state === 'failed') {
-      this.emitHealth('transport', 'failed', 'Peer connection failed');
-      this.stop();
+      this.emitHealth('transport', 'reconnecting', 'Peer connection failed — rebuilding session');
+      void this.renewSession();
+    } else if (state === 'disconnected') {
+      this.emitHealth('transport', 'reconnecting', 'Peer connection disconnected — waiting for recovery');
     }
   }
 
   private attemptIceRestart(): void {
     if (this.iceRestartTimer !== null) return; // restart already pending
     if (this.iceRestartAttempt >= ICE_RESTART_DELAYS_MS.length) {
-      this.emitHealth('transport', 'failed', 'ICE restart attempts exhausted');
-      this.stop();
+      // ICE restart didn't bring the connection back. Escalate to a full
+      // session renewal instead of giving up — the renewal-retry backoff
+      // takes over from there so the meeting heals without operator
+      // intervention.
+      this.emitHealth('transport', 'reconnecting', 'ICE restart exhausted — rebuilding session');
+      void this.renewSession();
       return;
     }
     const delay = ICE_RESTART_DELAYS_MS[this.iceRestartAttempt];
@@ -400,6 +468,10 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
     // Any DC event proves the upstream session is alive — feed the
     // stale-data detector so we don't false-positive while events flow.
     this.lastDcEventAt = Date.now();
+    this.dcEventCount += 1;
+    // Reset the per-DC audio-active counter: each DC event "consumes" the
+    // accumulated audio evidence, so the next stale window starts fresh.
+    this.audioActiveSamplesSinceDc = 0;
     switch (ev.type) {
       case 'session.created':
       case 'session.updated':
@@ -489,6 +561,22 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
         break;
       }
 
+      // Utterance-completion signals. Different OpenAI Realtime endpoints
+      // emit slightly different completion event names; we listen for the
+      // documented patterns + the .completed/.done variants the Translation
+      // endpoint uses. Any of them means "this utterance is finalized" — we
+      // commit immediately rather than waiting for the 1 s debounce or 12 s
+      // deadline. Unknown event types still fall through harmlessly.
+      case 'session.input_transcript.completed':
+      case 'session.input_transcript.done':
+      case 'session.output_transcript.completed':
+      case 'session.output_transcript.done':
+      case 'response.output_audio_transcript.done':
+      case 'response.done':
+      case 'conversation.item.input_audio_transcription.completed':
+        if (this._status === 'running') this.flushSegment();
+        break;
+
       case 'error': {
         const msg = ev.error?.message ?? 'OpenAI Realtime error';
         this.emitHealth('transport', 'api_error', msg);
@@ -505,9 +593,25 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
     this.segmentFlushTimer = setTimeout(() => {
       if (this._status === 'running') this.flushSegment();
     }, SEGMENT_FLUSH_MS);
+    // Arm the absolute deadline only on the FIRST delta of a segment —
+    // resetting it on every delta would defeat the purpose (the bug we're
+    // fixing). flushSegment() clears it so the next segment can arm a fresh one.
+    if (this.segmentDeadlineTimer === null) {
+      this.segmentDeadlineTimer = setTimeout(() => {
+        this.segmentDeadlineTimer = null;
+        if (this._status === 'running') this.flushSegment();
+      }, MAX_SEGMENT_DURATION_MS);
+    }
   }
 
   private flushSegment(): void {
+    // Clear the deadline whether or not there's text to flush — if a stray
+    // empty flush fires we still want the next segment to start with a fresh
+    // deadline window, not inherit the old one.
+    if (this.segmentDeadlineTimer !== null) {
+      clearTimeout(this.segmentDeadlineTimer);
+      this.segmentDeadlineTimer = null;
+    }
     if (!this.inputAcc && !this.outputAcc) return;
     const meta = LANG_PAIR_META[this.langPair] ?? DEFAULT_META;
     // Apply Traditional Chinese conversion to transcript text when source is zh-TW
@@ -574,26 +678,42 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
         peakDb = Math.max(peakDb - PEAK_DECAY_DB_PER_TICK, rmsDb);
       }
 
-      // Stale-data detection. Track when audio was last "loud" so we can
-      // distinguish "user is silent" (no DC events expected) from "user
-      // is speaking but upstream session is wedged" (force renewal).
-      if (rmsDb > STALE_AUDIO_ACTIVE_DB) {
+      // Stale-data detection. Count cumulative audio-active ticks since the
+      // last DC event — this tolerates natural sentence-boundary pauses
+      // (silent ticks just don't increment) while still requiring meaningful
+      // evidence that the user IS speaking. The previous stretch-based
+      // detector reset on every >1 s pause, so a presenter who spoke in
+      // 5-second sentences with 1-2 s gaps NEVER accumulated enough stretch
+      // to trip the threshold even when DC was wedged for minutes.
+      const audioActiveDb = STALE_AUDIO_ACTIVE_DB_BY_MIC[this.micDistance];
+      if (rmsDb > audioActiveDb) {
         this.lastAudioActiveAt = nowMs;
+        this.audioActiveSamplesSinceDc += 1;
       }
-      if (
-        this.lastDcEventAt > 0 &&
-        this.lastAudioActiveAt > this.lastDcEventAt &&
-        nowMs - this.lastDcEventAt > STALE_DATA_THRESHOLD_MS
-      ) {
-        this.emitHealth(
-          'transport',
-          'degraded',
-          'No transcript for 30 s while audio active — auto-renewing session',
-        );
-        // Reset to suppress double-fire while renewSession runs (it will
-        // tear down and re-init, resetting lastDcEventAt on success).
-        this.lastDcEventAt = 0;
-        void this.renewSession();
+      // Fire when: DC has been silent past the threshold AND we have at least
+      // ~10 s of cumulative audio activity since that silence began (100
+      // samples × 100 ms tick = 10 s). The cumulative-evidence check is what
+      // prevents a false renewal when the user returns from a long silence
+      // and OpenAI's first response is still in flight — that first frame
+      // alone won't satisfy the 100-sample requirement.
+      const STALE_AUDIO_EVIDENCE_SAMPLES = 100;
+      if (this.lastDcEventAt > 0) {
+        const dcGap = nowMs - this.lastDcEventAt;
+        if (
+          dcGap > STALE_DATA_THRESHOLD_MS &&
+          this.audioActiveSamplesSinceDc >= STALE_AUDIO_EVIDENCE_SAMPLES
+        ) {
+          this.emitHealth(
+            'transport',
+            'degraded',
+            `Wedged: ${Math.round(dcGap / 1000)}s no DC events while audio active — auto-renewing session`,
+          );
+          // Reset to suppress double-fire while renewSession runs (it will
+          // tear down and re-init, resetting lastDcEventAt on success).
+          this.lastDcEventAt = 0;
+          this.audioActiveSamplesSinceDc = 0;
+          void this.renewSession();
+        }
       }
 
       const ev: AudioLevelEvent = {
@@ -605,6 +725,33 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       };
       this.handlers.onAudioLevel(ev);
     }, AUDIO_LEVEL_INTERVAL_MS);
+  }
+
+  /**
+   * Periodic console.log of provider internals — fires every 10 s while the
+   * session is running. Surfaces the silent-wedge scenario where the UI
+   * still shows "running" but no DC events arrive: the dump shows DC count
+   * frozen, time-since-last-DC growing, pc states, and stale-detector
+   * baselines. Reading these in DevTools is how we figure out WHY the
+   * stale detector didn't trigger when captions visibly stopped.
+   */
+  private startDiagnosticDump(): void {
+    this.diagInterval = setInterval(() => {
+      const now = Date.now();
+      const sinceDc = this.lastDcEventAt > 0 ? now - this.lastDcEventAt : -1;
+      const sinceAudio = this.lastAudioActiveAt > 0 ? now - this.lastAudioActiveAt : -1;
+      console.info('[openai-rt diag]', {
+        status: this._status,
+        pcConn: this.pc?.connectionState,
+        pcIce: this.pc?.iceConnectionState,
+        dcEvents: this.dcEventCount,
+        sinceLastDcMs: sinceDc,
+        sinceLastAudioMs: sinceAudio,
+        // ~100 samples = ~10 s of cumulative speech; threshold for wedge fire.
+        audioSamplesSinceDc: this.audioActiveSamplesSinceDc,
+        renewalEtaMs: this.getRenewalEtaMs(),
+      });
+    }, 10_000);
   }
 
   private emitHealth(component: HealthComponent, state: HealthState, message?: string): void {

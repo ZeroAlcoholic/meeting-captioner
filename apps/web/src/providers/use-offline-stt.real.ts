@@ -22,18 +22,42 @@ export function useOfflineSTT() {
 
   useEffect(() => {
     let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    // Backoff state: tight when the service is reachable (so the UI flips to
+    // "ready" promptly after model download), exponential when it's down (so
+    // we don't hammer :8000 and flood the console with ERR_CONNECTION_REFUSED
+    // when the user is running the online-only launcher).
+    const BASE_OK_MS = 3_000;
+    const FAIL_DELAYS_MS = [3_000, 6_000, 12_000, 30_000, 60_000];
+    let failCount = 0;
+
+    const schedule = (delay: number) => {
+      if (cancelled) return;
+      timer = setTimeout(poll, delay);
+    };
+
     const poll = () => {
       fetch(HEALTHZ_URL)
         .then((r) => r.json())
-        .then((d: OfflineHealthz) => { if (!cancelled) setWhisperStatus(d.whisper_status); })
-        .catch(() => { if (!cancelled) setWhisperStatus('unavailable'); });
+        .then((d: OfflineHealthz) => {
+          if (cancelled) return;
+          setWhisperStatus(d.whisper_status);
+          failCount = 0;
+          schedule(BASE_OK_MS);
+        })
+        .catch(() => {
+          if (cancelled) return;
+          setWhisperStatus('unavailable');
+          const idx = Math.min(failCount, FAIL_DELAYS_MS.length - 1);
+          failCount += 1;
+          schedule(FAIL_DELAYS_MS[idx]!);
+        });
     };
+
     poll();
-    // Re-poll every 3s so UI auto-updates when WHL becomes ready (e.g., after model download).
-    const id = setInterval(poll, 3000);
     return () => {
       cancelled = true;
-      clearInterval(id);
+      if (timer !== null) clearTimeout(timer);
       providerRef.current?.stop();
     };
   }, []);

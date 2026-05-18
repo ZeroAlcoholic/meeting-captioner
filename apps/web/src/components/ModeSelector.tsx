@@ -15,13 +15,15 @@ export function ModeSelector() {
             key={opt.id}
             className={styles.option}
             data-selected={modeId === opt.id}
-            data-disabled="false"
+            data-disabled={!opt.enabled}
+            title={opt.hint}
           >
             <input
               type="radio"
               name="mode"
               value={opt.id}
               checked={modeId === opt.id}
+              disabled={!opt.enabled}
               onChange={() => setMode(opt.id as ModeId)}
               data-testid={`mode-${opt.id}`}
               className={styles.radio}
@@ -29,6 +31,7 @@ export function ModeSelector() {
             <span className={styles.label}>
               {opt.label}
               <span className={styles.labelZh}> {opt.labelZh}</span>
+              {opt.hint && <span className={styles.hint}> · {opt.hint}</span>}
             </span>
             <span className={styles.desc}>{opt.descriptionZh}</span>
           </label>

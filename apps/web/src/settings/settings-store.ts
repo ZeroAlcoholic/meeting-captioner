@@ -49,6 +49,15 @@ export interface ModeOption {
   labelZh: string;
   description: string;
   descriptionZh: string;
+  /**
+   * False when this build cannot satisfy the mode (e.g. online-slim has no
+   * offline STT). The UI still SHOWS the option so users understand the
+   * feature exists, but renders it greyed-out + non-selectable instead of
+   * hiding it entirely (which made earlier testers think we'd dropped the
+   * feature).
+   */
+  enabled: boolean;
+  hint?: string;
 }
 
 // The full catalog. Deployment-aware variants are derived below so consumers
@@ -96,6 +105,7 @@ const ALL_MODE_OPTIONS: ModeOption[] = [
     labelZh: '線上全功能',
     description: 'Audio → OpenAI Realtime → transcript & translation.',
     descriptionZh: '音訊 → OpenAI Realtime → 轉錄與翻譯。',
+    enabled: true,
   },
   {
     id: 'hybrid_privacy',
@@ -103,6 +113,7 @@ const ALL_MODE_OPTIONS: ModeOption[] = [
     labelZh: '混合隱私',
     description: 'Audio → local STT → online translation/summary.',
     descriptionZh: '音訊 → 本地語音辨識 → 雲端翻譯/摘要。',
+    enabled: true,
   },
   {
     id: 'full_offline',
@@ -110,18 +121,29 @@ const ALL_MODE_OPTIONS: ModeOption[] = [
     labelZh: '完全離線',
     description: 'Audio → local STT → local translation. No cloud.',
     descriptionZh: '音訊 → 本地語音辨識 → 本地翻譯。無雲端依賴。',
+    enabled: true,
   },
 ];
 
-// In the online-slim build, offline-dependent modes/scenarios are hidden so
-// users never see options that the bundled provider stub cannot fulfil.
-export const SCENARIO_OPTIONS: ScenarioOption[] = IS_ONLINE_ONLY
-  ? ALL_SCENARIO_OPTIONS.filter((s) => s.id !== 'hybrid')
-  : ALL_SCENARIO_OPTIONS;
+// In the online-slim build, offline-dependent modes/scenarios stay in the
+// list but are marked `enabled: false`. The UI greys them out so users see
+// the feature exists ("you'd get this in the full build") but can't select
+// it. Previous behaviour was to filter them out entirely, which made the
+// online-slim UI feel like a stripped-down product instead of a deliberate
+// distribution choice.
+export const SCENARIO_OPTIONS: ScenarioOption[] = ALL_SCENARIO_OPTIONS.map((s) => {
+  if (IS_ONLINE_ONLY && s.id === 'hybrid') {
+    return { ...s, enabled: false, hint: 'Requires offline STT — full build only.' };
+  }
+  return s;
+});
 
-export const MODE_OPTIONS: ModeOption[] = IS_ONLINE_ONLY
-  ? ALL_MODE_OPTIONS.filter((m) => m.id === 'online_full')
-  : ALL_MODE_OPTIONS;
+export const MODE_OPTIONS: ModeOption[] = ALL_MODE_OPTIONS.map((m) => {
+  if (IS_ONLINE_ONLY && (m.id === 'hybrid_privacy' || m.id === 'full_offline')) {
+    return { ...m, enabled: false, hint: 'Requires offline STT — full build only.' };
+  }
+  return m;
+});
 
 export interface HealthSnapshot {
   state: HealthState;
@@ -260,9 +282,22 @@ export type SettingsStore = StoreApi<SettingsState>;
 export function createSettingsStore(): SettingsStore {
   const initialTimestamp = new Date().toISOString();
   const hydrated = loadPrefs();
+  // If a previous full-build session left an offline mode persisted but the
+  // current build is online-only, fall back to defaults — otherwise the user
+  // would land on a disabled (greyed-out) selection they couldn't easily fix.
+  const isEnabled = (
+    list: { id: string; enabled: boolean }[],
+    id: string | undefined,
+  ): boolean => Boolean(id && list.find((o) => o.id === id)?.enabled);
+  const safeScenario = isEnabled(SCENARIO_OPTIONS, hydrated?.scenarioId)
+    ? hydrated!.scenarioId!
+    : DEFAULT_SCENARIO;
+  const safeMode = isEnabled(MODE_OPTIONS, hydrated?.modeId)
+    ? hydrated!.modeId!
+    : DEFAULT_MODE;
   const store = createStore<SettingsState>((set) => ({
-    scenarioId: hydrated?.scenarioId ?? DEFAULT_SCENARIO,
-    modeId: hydrated?.modeId ?? DEFAULT_MODE,
+    scenarioId: safeScenario,
+    modeId: safeMode,
     langPair: hydrated?.langPair ?? DEFAULT_LANG_PAIR,
     audioSource: hydrated?.audioSource ?? 'mic',
     includeSourceTranscript: hydrated?.includeSourceTranscript ?? true,

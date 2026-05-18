@@ -293,6 +293,62 @@ describe('OpenAIRealtimeProvider', () => {
     provider.stop();
   });
 
+  it('absolute deadline finalizes continuous speech every ~12s even without a >1s gap', async () => {
+    // Critical UX regression guard: a presenter who talks continuously
+    // (no >1 s pauses) would previously NEVER hit the debounce flush, so
+    // segments[] stayed empty, HistoryStream was blank, and LiveCaption
+    // showed a single unbounded growing partial that visually "froze" on
+    // the first few words once the text overflowed. The deadline timer
+    // forces a finalization regardless of inter-delta gaps.
+    vi.useFakeTimers();
+    mockFetch();
+    const { handlers, transcripts } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+    await provider.start();
+
+    // Pump a delta every 500 ms for 13 s — well under the 1 s debounce so
+    // the segmentFlushTimer would NEVER fire on its own.
+    for (let i = 0; i < 26; i++) {
+      fireDCMessage(
+        JSON.stringify({ type: 'session.input_transcript.delta', delta: `word${i} ` }),
+      );
+      await vi.advanceTimersByTimeAsync(500);
+    }
+
+    // At t=13 s with deltas at 500 ms cadence, we should have hit the
+    // 12 s deadline exactly once → 1 final emitted.
+    const finals = transcripts.filter((t) => t.status === 'final');
+    expect(finals.length).toBeGreaterThanOrEqual(1);
+    // The final should contain SOME of the accumulated text — the exact
+    // boundary depends on when within the 500 ms window the deadline lands.
+    expect(finals[0]!.text.length).toBeGreaterThan(0);
+    expect(finals[0]!.text).toMatch(/^word/);
+
+    provider.stop();
+  });
+
+  it('session.input_transcript.completed event triggers immediate finalization', async () => {
+    // When OpenAI tells us an utterance is done, we shouldn't wait the
+    // 1 s debounce — commit instantly so the next sentence starts in a
+    // fresh segment with a fresh segmentId.
+    mockFetch();
+    const { handlers, transcripts } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+    await provider.start();
+
+    fireDCMessage(JSON.stringify({ type: 'session.input_transcript.delta', delta: 'Hello world' }));
+    expect(transcripts.filter((t) => t.status === 'final')).toHaveLength(0);
+
+    // OpenAI signals utterance complete — no waiting on debounce.
+    fireDCMessage(JSON.stringify({ type: 'session.input_transcript.completed' }));
+
+    const finals = transcripts.filter((t) => t.status === 'final');
+    expect(finals).toHaveLength(1);
+    expect(finals[0]!.text).toBe('Hello world');
+
+    provider.stop();
+  });
+
   it('flush produces new segment — subsequent deltas use a new segmentId', async () => {
     vi.useFakeTimers();
     mockFetch();
@@ -409,12 +465,13 @@ describe('OpenAIRealtimeProvider', () => {
     expect(transportFails).toHaveLength(0);
   });
 
-  it('renewal failure schedules persistent retry backoff (5 → 10 → 20 → 30 min cap)', async () => {
-    // Long-meeting robustness: the previous single-shot 5-min retry could
-    // give up forever after one bad transient. The persistent backoff must
-    // keep climbing 5 → 10 → 20 → 30 → 30 → 30 (cap) on each consecutive
-    // failure, AND the renewalRetryTimer must be set every time so
-    // cleanup() can cancel it on user-initiated stop.
+  it('renewal failure schedules persistent retry backoff (30s → 1m → 3m → 5m → 10m cap)', async () => {
+    // Long-meeting robustness: the persistent backoff must keep climbing
+    // 30s → 1m → 3m → 5m → 10m → 10m (cap) on each consecutive failure,
+    // AND the renewalRetryTimer must be set every time so cleanup() can
+    // cancel it on user-initiated stop. The schedule was originally
+    // 5/10/20/30 min — too long for a live meeting; tightened so transient
+    // OpenAI hiccups recover in under a minute.
     vi.useFakeTimers();
 
     // First /session succeeds (initial start). Every subsequent /session
@@ -440,44 +497,53 @@ describe('OpenAIRealtimeProvider', () => {
     await provider.start();
     expect(provider.status).toBe('running');
 
-    // Extract retry-delay minutes from the latest 'failed' health message.
-    const lastRetryMinutes = (): number | null => {
+    // Extract retry-delay (seconds or minutes) from the latest 'failed' health message.
+    const lastRetrySec = (): number | null => {
       const last = healthEvents
         .filter((e) => e.component === 'transport' && e.state === 'failed')
         .at(-1);
-      const m = last?.message?.match(/auto-retry in (\d+) min/);
-      return m ? Number(m[1]) : null;
+      const min = last?.message?.match(/auto-retry in (\d+) min/);
+      if (min) return Number(min[1]) * 60;
+      const sec = last?.message?.match(/auto-retry in (\d+) sec/);
+      if (sec) return Number(sec[1]);
+      return null;
     };
 
     // 1) Trigger first renewal at the recommended interval (1s).
     await vi.advanceTimersByTimeAsync(1000);
-    await Promise.resolve(); // let the awaited start() reject and reach catch
     await Promise.resolve();
-    expect(lastRetryMinutes()).toBe(5);
+    await Promise.resolve();
+    expect(lastRetrySec()).toBe(30);
 
-    // 2) Advance the 5-min retry timer. Next start() also fails → 10 min.
+    // 2) Advance 30 s → next failure schedules 1 min.
+    await vi.advanceTimersByTimeAsync(30 * 1000);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(lastRetrySec()).toBe(60);
+
+    // 3) Advance 1 min → 3 min.
+    await vi.advanceTimersByTimeAsync(60 * 1000);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(lastRetrySec()).toBe(180);
+
+    // 4) Advance 3 min → 5 min.
+    await vi.advanceTimersByTimeAsync(3 * 60 * 1000);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(lastRetrySec()).toBe(300);
+
+    // 5) Advance 5 min → 10 min (cap).
     await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
     await Promise.resolve();
     await Promise.resolve();
-    expect(lastRetryMinutes()).toBe(10);
+    expect(lastRetrySec()).toBe(600);
 
-    // 3) Advance 10 min → 20 min.
+    // 6) Cap holds.
     await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
     await Promise.resolve();
     await Promise.resolve();
-    expect(lastRetryMinutes()).toBe(20);
-
-    // 4) Advance 20 min → 30 min (cap).
-    await vi.advanceTimersByTimeAsync(20 * 60 * 1000);
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(lastRetryMinutes()).toBe(30);
-
-    // 5) Cap holds.
-    await vi.advanceTimersByTimeAsync(30 * 60 * 1000);
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(lastRetryMinutes()).toBe(30);
+    expect(lastRetrySec()).toBe(600);
 
     provider.stop();
   });
@@ -531,7 +597,12 @@ describe('OpenAIRealtimeProvider', () => {
     expect(fetchMock.mock.calls.length).toBe(callsBeforeStop);
   });
 
-  it('connectionState=failed → health transport.failed and stop()', async () => {
+  it('connectionState=failed → triggers session renewal (not stop)', async () => {
+    // Business-meeting reliability: a peer connection failure must self-heal
+    // via a fresh session bring-up rather than dropping the user back to a
+    // manual "click Start" state. The renewal path runs cleanup+start; the
+    // event itself must be a non-terminal 'reconnecting' (not 'failed' +
+    // stop) so the UI surfaces a recovery state rather than a dead session.
     mockFetch();
     const { handlers, healthEvents } = makeHandlers();
     const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
@@ -539,14 +610,32 @@ describe('OpenAIRealtimeProvider', () => {
 
     fakeConnectionState = 'failed';
     lastPC?.fireConn();
+    // Microtask flush so the void renewSession() chain starts.
+    await Promise.resolve();
 
-    expect(provider.status).toBe('stopped');
+    // Health is 'reconnecting' with the rebuild message — NOT a terminal
+    // 'failed' that would leave the user staring at a stopped session.
     expect(
-      healthEvents.some((e) => e.component === 'transport' && e.state === 'failed'),
+      healthEvents.some(
+        (e) =>
+          e.component === 'transport' &&
+          e.state === 'reconnecting' &&
+          e.message?.includes('rebuilding session'),
+      ),
     ).toBe(true);
+    // No terminal 'failed' for the peer-connection failure itself.
+    expect(
+      healthEvents.filter(
+        (e) =>
+          e.component === 'transport' &&
+          e.state === 'failed' &&
+          e.message?.includes('Peer connection failed'),
+      ),
+    ).toHaveLength(0);
+    provider.stop();
   });
 
-  it('ICE disconnected → backoff schedules restartIce with 3s/6s/12s, then stops after 3 attempts', async () => {
+  it('ICE disconnected → backoff schedules restartIce with 3s/6s/12s, then triggers session renewal', async () => {
     vi.useFakeTimers();
     mockFetch();
     const { handlers, healthEvents } = makeHandlers();
@@ -571,14 +660,27 @@ describe('OpenAIRealtimeProvider', () => {
     vi.advanceTimersByTime(12_000);
     expect(fakeRestartIce).toHaveBeenCalledTimes(3);
 
-    // Attempt 4 — exhausted, transition to failed + stop()
+    // Attempt 4 — exhausted, escalates to full session renewal (not stop).
     lastPC?.fireIce();
-    expect(provider.status).toBe('stopped');
+    await Promise.resolve();
     expect(
       healthEvents.some(
-        (e) => e.component === 'transport' && e.state === 'failed',
+        (e) =>
+          e.component === 'transport' &&
+          e.state === 'reconnecting' &&
+          e.message?.includes('rebuilding session'),
       ),
     ).toBe(true);
+    // No terminal 'failed' for ICE exhaustion — renewal is in flight.
+    expect(
+      healthEvents.filter(
+        (e) =>
+          e.component === 'transport' &&
+          e.state === 'failed' &&
+          e.message?.includes('ICE restart attempts exhausted'),
+      ),
+    ).toHaveLength(0);
+    provider.stop();
   });
 
   it('ICE returning to connected resets the backoff counter', async () => {

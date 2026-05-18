@@ -70,12 +70,15 @@ export function createStoreBoundHandlers(
       // Only `final` bypasses the queue. `partial` and `revised` are both
       // in-flight and contribute to the same 20 Hz throttle.
       if (e.status === 'final') {
-        // Drop any in-flight partial for THIS segment so the final lands
-        // cleanly — otherwise a queued partial would overwrite a freshly
-        // committed final on the next flush.
-        if (pendingTranscript && pendingTranscript.segmentId === e.segmentId) {
-          pendingTranscript = null;
-        }
+        // Drop ANY in-flight partial — defense in depth. The provider's
+        // newSegment() runs AFTER flushSegment(), so in practice a queued
+        // partial's segmentId always matches the final's. But if that
+        // invariant ever breaks (provider refactor, deadline-triggered
+        // flush, race with .completed event), a queued partial for the
+        // just-finalized segment would land after the final and ghost-
+        // rewrite livePartial. Cheaper to drop the partial unconditionally
+        // — its content is fully subsumed by the final's text.
+        pendingTranscript = null;
         captionStore.getState().applyTranscript(e);
         return;
       }
@@ -84,10 +87,11 @@ export function createStoreBoundHandlers(
     },
     onTranslation(e: TranslationEvent) {
       // `final` translations bypass — `draft` and `refined` are throttled.
+      // Same defense as transcripts: a queued draft for the just-finalized
+      // segment would otherwise land after the final and overwrite the
+      // committed translations[] entry with stale draft text.
       if (e.status === 'final') {
-        if (pendingTranslation && pendingTranslation.sourceSegmentId === e.sourceSegmentId) {
-          pendingTranslation = null;
-        }
+        pendingTranslation = null;
         captionStore.getState().applyTranslation(e);
         return;
       }

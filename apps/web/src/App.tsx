@@ -21,6 +21,9 @@ export function App() {
   const startSession = useSettingsStore((s) => s.startSession);
   const stopSession = useSettingsStore((s) => s.stopSession);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Forwarded to SettingsPanel so its outside-click detector knows to
+  // ignore clicks on the ⚙ toggle itself (otherwise close+reopen race).
+  const settingsToggleRef = useRef<HTMLButtonElement>(null);
 
   const isRunning =
     fake.status === 'running' || realtime.status === 'running' || offline.status === 'running';
@@ -175,6 +178,7 @@ export function App() {
             Stop
           </button>
           <button
+            ref={settingsToggleRef}
             type="button"
             onClick={() => setSettingsOpen((o) => !o)}
             data-testid="settings-toggle"
@@ -188,7 +192,11 @@ export function App() {
         </div>
       </header>
 
-      <SettingsPanel open={settingsOpen} />
+      <SettingsPanel
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        triggerRef={settingsToggleRef}
+      />
 
       {activeError && (
         <div className="app-error" role="alert">

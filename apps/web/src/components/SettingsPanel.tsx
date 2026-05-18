@@ -1,3 +1,4 @@
+import { useEffect, useRef, type RefObject } from 'react';
 import { AudioLevelMeter } from './AudioLevelMeter.js';
 import { HealthRow } from './HealthRow.js';
 import { ModeSelector } from './ModeSelector.js';
@@ -14,6 +15,19 @@ const MIC_DISTANCE_OPTIONS: Array<{ id: MicDistance; label: string; hint: string
 
 export interface SettingsPanelProps {
   open: boolean;
+  /**
+   * Called when the user clicks anywhere outside the panel, or presses
+   * Escape. Lets the parent collapse the panel so the caption board is
+   * visible again — meeting operators don't want a settings panel pinned
+   * over their captions after they're done tweaking.
+   */
+  onClose?: () => void;
+  /**
+   * Ref to the toggle button (the ⚙ in the header). Clicks on that button
+   * must NOT count as "outside" — otherwise the close handler fires first,
+   * then the button's onClick re-opens, looking like the toggle is broken.
+   */
+  triggerRef?: RefObject<HTMLElement>;
 }
 
 /**
@@ -30,7 +44,7 @@ function LanguageBlock() {
   const setIncludeSource = useSettingsStore((s) => s.setIncludeSourceTranscript);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-      <span style={{ fontSize: 11, opacity: 0.6, textTransform: 'uppercase', letterSpacing: 1 }}>
+      <span style={{ fontSize: 12, opacity: 0.65, textTransform: 'uppercase', letterSpacing: 1 }}>
         Language
       </span>
       <div style={{ display: 'flex', gap: 6 }}>
@@ -42,14 +56,14 @@ function LanguageBlock() {
             title={opt.hint}
             onClick={() => setLangPair(opt.id as LangPair)}
             style={{
-              padding: '4px 10px',
+              padding: '5px 12px',
               borderRadius: 4,
               border: langPair === opt.id ? '2px solid #4a9eff' : '1px solid #555',
               background: langPair === opt.id ? '#1a3a5c' : 'transparent',
               color: '#e8e8e8',
               cursor: 'pointer',
               fontWeight: langPair === opt.id ? 700 : 400,
-              fontSize: 13,
+              fontSize: 14,
             }}
           >
             {opt.label}
@@ -68,7 +82,7 @@ function LanguageBlock() {
           borderRadius: 4,
           border: '1px solid #555',
           color: '#e8e8e8',
-          fontSize: 12,
+          fontSize: 13,
           cursor: 'pointer',
           userSelect: 'none',
         }}
@@ -101,7 +115,7 @@ function MicDistanceBlock() {
   const setMicDistance = useSettingsStore((s) => s.setMicDistance);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-      <span style={{ fontSize: 11, opacity: 0.6, textTransform: 'uppercase', letterSpacing: 1 }}>
+      <span style={{ fontSize: 12, opacity: 0.65, textTransform: 'uppercase', letterSpacing: 1 }}>
         Mic distance
       </span>
       <div style={{ display: 'flex', gap: 6 }}>
@@ -113,14 +127,14 @@ function MicDistanceBlock() {
             title={opt.hint}
             onClick={() => setMicDistance(opt.id)}
             style={{
-              padding: '4px 10px',
+              padding: '5px 12px',
               borderRadius: 4,
               border: micDistance === opt.id ? '2px solid #4a9eff' : '1px solid #555',
               background: micDistance === opt.id ? '#1a3a5c' : 'transparent',
               color: '#e8e8e8',
               cursor: 'pointer',
               fontWeight: micDistance === opt.id ? 700 : 400,
-              fontSize: 13,
+              fontSize: 14,
             }}
           >
             {opt.label}
@@ -132,16 +146,49 @@ function MicDistanceBlock() {
 }
 
 
-export function SettingsPanel({ open }: SettingsPanelProps) {
+export function SettingsPanel({ open, onClose, triggerRef }: SettingsPanelProps) {
   const hasAudioLevel = useSettingsStore((s) => s.audioLevel !== null);
+  const panelRef = useRef<HTMLElement>(null);
+
+  // Outside-click + Escape dismiss. Wired only when open AND onClose is
+  // provided — calling parents that don't care about auto-close stay
+  // backward-compatible. mousedown (not click) catches the dismiss before
+  // any nested element's onClick handler runs, which matches how
+  // popovers/menus generally behave.
+  useEffect(() => {
+    if (!open || !onClose) return;
+    const onPointer = (e: MouseEvent) => {
+      const target = e.target as Node | null;
+      if (!target) return;
+      if (panelRef.current?.contains(target)) return;
+      if (triggerRef?.current?.contains(target)) return;
+      onClose();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('mousedown', onPointer);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onPointer);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open, onClose, triggerRef]);
+
   if (!open) return null;
   return (
-    <section className={styles.panel} data-testid="settings-panel">
+    <section ref={panelRef} className={styles.panel} data-testid="settings-panel">
       <div className={styles.row}>
         <ScenarioPicker />
         <ModeSelector />
-        <LanguageBlock />
-        <MicDistanceBlock />
+        {/* Language + Mic distance share the "audio capture" theme — stack them
+            in one column so the row has 4 slots instead of 5. Generous gap
+            between them (22 px) gives the two sub-blocks visual breathing
+            room without needing a divider line. */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
+          <LanguageBlock />
+          <MicDistanceBlock />
+        </div>
         <HealthRow />
       </div>
       {hasAudioLevel && <AudioLevelMeter />}

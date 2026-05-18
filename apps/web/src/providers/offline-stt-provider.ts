@@ -34,6 +34,14 @@ export class OfflineSTTProvider implements CaptionProvider {
   private reconnectAttempts = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private static readonly MAX_RECONNECT_ATTEMPTS = 5;
+  // Backpressure: count of PCM frames dropped because ws.bufferedAmount
+  // exceeded the threshold. Surfaced as a degraded-audio health event
+  // every 50 drops so the user sees the symptom instead of a silent gap.
+  private wsBackpressureDropCount = 0;
+  // 1 MB ≈ 16 s of 16 kHz mono Float32 — plenty of headroom for a
+  // transient WHL stall (model load, MT pause) without inviting an
+  // unbounded memory leak across a long meeting.
+  private static readonly WS_BACKPRESSURE_THRESHOLD = 1_000_000;
 
   constructor(
     private readonly wsUrl: string,
@@ -175,6 +183,21 @@ export class OfflineSTTProvider implements CaptionProvider {
 
       this.workletNode.port.onmessage = (ev: MessageEvent<ArrayBuffer>) => {
         if (this._status !== 'running' || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+        // Backpressure guard: if the WS send buffer is growing (services/offline
+        // CPU-bound, model loading, MT executor stalled), unbounded `send()`
+        // calls let the browser-side buffer grow forever — long meetings would
+        // OOM the tab. Drop frames above the threshold and surface the symptom.
+        if (this.ws.bufferedAmount > OfflineSTTProvider.WS_BACKPRESSURE_THRESHOLD) {
+          this.wsBackpressureDropCount += 1;
+          if (this.wsBackpressureDropCount % 50 === 0) {
+            this.emitHealth(
+              'audio',
+              'degraded',
+              `Offline service slow — ${this.wsBackpressureDropCount} PCM frames dropped (buffer ${Math.round(this.ws.bufferedAmount / 1024)} KB)`,
+            );
+          }
+          return;
+        }
         this.ws.send(ev.data);
       };
 
@@ -229,6 +252,7 @@ export class OfflineSTTProvider implements CaptionProvider {
       this.reconnectTimer = null;
     }
     this.reconnectAttempts = 0;
+    this.wsBackpressureDropCount = 0;
     this.workletNode?.disconnect();
     this.workletNode?.port.close();
     void this.audioCtx?.close();
