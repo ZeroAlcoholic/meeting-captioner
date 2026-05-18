@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ONLINE_SERVICE_URL } from '../config.js';
 import { settingsStore } from '../settings/use-settings-store.js';
 import { OpenAIRealtimeProvider } from './openai-realtime-provider.js';
+import { MicrophoneAudioProvider } from './microphone-audio-provider.js';
 import { createStoreBoundHandlers } from './coalesce-handlers.js';
 import type { ProviderStatus } from './types.js';
 
@@ -93,15 +94,21 @@ export function useOpenAIRealtime(): UseOpenAIRealtime {
       handlersRef.current?.flushPending();
     }
 
-    const { langPair, includeSourceTranscript } = settingsStore.getState();
+    const { langPair, includeSourceTranscript, micDistance } = settingsStore.getState();
     const handlers = createStoreBoundHandlers();
     handlersRef.current = handlers;
+    // MicrophoneAudioProvider must be created with the same micDistance
+    // value so its getUserMedia AGC matches the noise_reduction profile
+    // we'll send to OpenAI — otherwise the two halves of the audio path
+    // fight each other (see MicrophoneAudioProvider docstring).
+    const mic = new MicrophoneAudioProvider(micDistance);
     const provider = new OpenAIRealtimeProvider(
       SESSION_URL,
       handlers,
       langPair,
-      undefined,
+      mic,
       includeSourceTranscript,
+      micDistance,
     );
     providerRef.current = provider;
     setStatus('running');

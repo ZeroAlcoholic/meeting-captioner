@@ -1,5 +1,5 @@
 import type { AudioLevelEvent, HealthEvent } from '@meeting-audio/contracts';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createSettingsStore, MODE_OPTIONS, SCENARIO_OPTIONS } from './settings-store.js';
 
 const ts = '2026-05-11T10:00:00.000Z';
@@ -209,6 +209,96 @@ describe('settingsStore — includeSourceTranscript', () => {
     store.getState().setIncludeSourceTranscript(false);
     store.getState().reset();
     expect(store.getState().includeSourceTranscript).toBe(true);
+  });
+});
+
+describe('settingsStore — micDistance + persistence', () => {
+  // Use a real-ish localStorage shim per test so different stores don't
+  // leak through the global.
+  let store: ReturnType<typeof createSettingsStore>;
+  const memLs = new Map<string, string>();
+  const realLs = globalThis.localStorage;
+
+  beforeEach(() => {
+    memLs.clear();
+    (globalThis as { localStorage?: Storage }).localStorage = {
+      getItem: (k: string) => memLs.get(k) ?? null,
+      setItem: (k: string, v: string) => void memLs.set(k, v),
+      removeItem: (k: string) => void memLs.delete(k),
+      clear: () => memLs.clear(),
+      key: () => null,
+      length: 0,
+    } as Storage;
+    store = createSettingsStore();
+  });
+
+  afterEach(() => {
+    if (realLs) (globalThis as { localStorage?: Storage }).localStorage = realLs;
+    else delete (globalThis as { localStorage?: Storage }).localStorage;
+  });
+
+  it('defaults micDistance to "close"', () => {
+    expect(store.getState().micDistance).toBe('close');
+  });
+
+  it('setMicDistance updates and persists to localStorage', () => {
+    store.getState().setMicDistance('far');
+    expect(store.getState().micDistance).toBe('far');
+    const persisted = JSON.parse(memLs.get('meeting-audio:settings:v1') ?? '{}');
+    expect(persisted.micDistance).toBe('far');
+  });
+
+  it('persists langPair, includeSourceTranscript, micDistance — but NOT ephemeral state', async () => {
+    const api = store.getState();
+    api.setLangPair('zh-TW→en');
+    api.setIncludeSourceTranscript(false);
+    api.setMicDistance('off');
+    api.startSession();
+    api.applyAudioLevel(level(-30, -10));
+    api.applyHealth(health('audio', 'connected'));
+
+    const persisted = JSON.parse(memLs.get('meeting-audio:settings:v1') ?? '{}');
+    expect(persisted.langPair).toBe('zh-TW→en');
+    expect(persisted.includeSourceTranscript).toBe(false);
+    expect(persisted.micDistance).toBe('off');
+    // Ephemeral fields MUST NOT be persisted — they're session-scoped.
+    expect(persisted.sessionStartAt).toBeUndefined();
+    expect(persisted.activeSessionBilingual).toBeUndefined();
+    expect(persisted.audioLevel).toBeUndefined();
+    expect(persisted.health).toBeUndefined();
+    expect(persisted.translateMinutesAccum).toBeUndefined();
+    expect(persisted.whisperMinutesAccum).toBeUndefined();
+  });
+
+  it('hydrates from localStorage on construction', () => {
+    memLs.set(
+      'meeting-audio:settings:v1',
+      JSON.stringify({
+        v: 1,
+        scenarioId: 'physical',
+        modeId: 'online_full',
+        langPair: 'zh-TW→en',
+        audioSource: 'mic',
+        includeSourceTranscript: false,
+        micDistance: 'far',
+      }),
+    );
+    const fresh = createSettingsStore().getState();
+    expect(fresh.langPair).toBe('zh-TW→en');
+    expect(fresh.includeSourceTranscript).toBe(false);
+    expect(fresh.micDistance).toBe('far');
+    // Ephemeral defaults intact.
+    expect(fresh.sessionStartAt).toBeNull();
+    expect(fresh.translateMinutesAccum).toBe(0);
+  });
+
+  it('ignores stored prefs with a stale version', () => {
+    memLs.set(
+      'meeting-audio:settings:v1',
+      JSON.stringify({ v: 999, langPair: 'zh-TW→en' }),
+    );
+    const fresh = createSettingsStore().getState();
+    expect(fresh.langPair).toBe('en→zh-TW'); // default, not the persisted v999 value
   });
 });
 

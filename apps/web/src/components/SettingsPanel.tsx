@@ -2,9 +2,15 @@ import { AudioLevelMeter } from './AudioLevelMeter.js';
 import { HealthRow } from './HealthRow.js';
 import { ModeSelector } from './ModeSelector.js';
 import { ScenarioPicker } from './ScenarioPicker.js';
-import { LANG_PAIR_OPTIONS, type LangPair } from '../settings/settings-store.js';
+import { LANG_PAIR_OPTIONS, type LangPair, type MicDistance } from '../settings/settings-store.js';
 import { useSettingsStore } from '../settings/use-settings-store.js';
 import styles from './SettingsPanel.module.css';
+
+const MIC_DISTANCE_OPTIONS: Array<{ id: MicDistance; label: string; hint: string }> = [
+  { id: 'close', label: 'Close', hint: 'Desktop / headset mic ≤ 1 m. AGC on + near_field noise reduction.' },
+  { id: 'far',   label: 'Far',   hint: 'Conference room, ceiling mic, far speakers. AGC off + far_field noise reduction.' },
+  { id: 'off',   label: 'Raw',   hint: 'No AGC, no noise reduction. For clean upstream (mixer / DSP).' },
+];
 
 export interface SettingsPanelProps {
   open: boolean;
@@ -86,6 +92,46 @@ function LanguageBlock() {
 }
 
 
+/**
+ * Acoustic environment selector. Pairs browser-side AGC with server-side
+ * noise_reduction profile in lockstep. Mid-session change auto-restarts.
+ */
+function MicDistanceBlock() {
+  const micDistance = useSettingsStore((s) => s.micDistance);
+  const setMicDistance = useSettingsStore((s) => s.setMicDistance);
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <span style={{ fontSize: 11, opacity: 0.6, textTransform: 'uppercase', letterSpacing: 1 }}>
+        Mic distance
+      </span>
+      <div style={{ display: 'flex', gap: 6 }}>
+        {MIC_DISTANCE_OPTIONS.map((opt) => (
+          <button
+            key={opt.id}
+            type="button"
+            data-testid={`mic-distance-${opt.id}`}
+            title={opt.hint}
+            onClick={() => setMicDistance(opt.id)}
+            style={{
+              padding: '4px 10px',
+              borderRadius: 4,
+              border: micDistance === opt.id ? '2px solid #4a9eff' : '1px solid #555',
+              background: micDistance === opt.id ? '#1a3a5c' : 'transparent',
+              color: '#e8e8e8',
+              cursor: 'pointer',
+              fontWeight: micDistance === opt.id ? 700 : 400,
+              fontSize: 13,
+            }}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+
 export function SettingsPanel({ open }: SettingsPanelProps) {
   const hasAudioLevel = useSettingsStore((s) => s.audioLevel !== null);
   if (!open) return null;
@@ -95,6 +141,7 @@ export function SettingsPanel({ open }: SettingsPanelProps) {
         <ScenarioPicker />
         <ModeSelector />
         <LanguageBlock />
+        <MicDistanceBlock />
         <HealthRow />
       </div>
       {hasAudioLevel && <AudioLevelMeter />}

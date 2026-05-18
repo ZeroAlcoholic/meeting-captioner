@@ -34,6 +34,14 @@ const RENEWAL_RETRY_BACKOFF_MS = [
   30 * 60 * 1000,
 ];
 
+// Stale-data detection. If we observe RMS above the silence floor for a
+// stretch AND no DataChannel deltas have arrived in the last threshold,
+// the upstream session is wedged (DC open, no events) — force a renewal.
+// Without this, OpenAI hiccups manifest as a frozen caption area with
+// "Connected" health, with no way for the user to know.
+const STALE_DATA_THRESHOLD_MS = 30_000;
+const STALE_AUDIO_ACTIVE_DB = -40;
+
 function iso(): string {
   return new Date().toISOString();
 }
@@ -71,6 +79,9 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
   private iceRestartTimer: ReturnType<typeof setTimeout> | null = null;
   private renewalRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private renewalRetryAttempt = 0;
+  // Stale-data detection state.
+  private lastDcEventAt = 0;
+  private lastAudioActiveAt = 0;
   private inputAcc = '';
   private outputAcc = '';
   private currentSegmentId = '';
@@ -87,6 +98,12 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
      * so only translation deltas arrive (no `session.input_transcript.delta`).
      */
     private readonly includeSourceTranscript: boolean = true,
+    /**
+     * 'close' | 'far' | 'off' — drives both getUserMedia AGC and the
+     * upstream noise_reduction config (kept in lockstep so the audio
+     * path is internally consistent).
+     */
+    private readonly micDistance: 'close' | 'far' | 'off' = 'close',
   ) {
     this.mic = mic ?? new MicrophoneAudioProvider();
   }
@@ -145,6 +162,7 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
         body: JSON.stringify({
           langPair: this.langPair,
           includeSourceTranscript: this.includeSourceTranscript,
+          micDistance: this.micDistance,
         }),
       });
       if (aborted()) return;
@@ -158,7 +176,23 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       this.renewDelayMs =
         sessionData.session_renewal_recommended_ms ?? DEFAULT_SESSION_RENEW_MS;
 
-      this.pc = new RTCPeerConnection();
+      // Configure ICE servers so corporate / strict-firewall networks can
+      // gather server-reflexive candidates and complete the WebRTC handshake.
+      // Browsers' built-in default works on home/open Wi-Fi but typically
+      // fails on enterprise NAT — the user just sees "ICE connection failed"
+      // with no clue what to do. Google's public STUN is fine for this; the
+      // OpenAI session itself still flows over the negotiated path.
+      this.pc = new RTCPeerConnection({
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+      });
+      // We do NOT want the model's translated voice — caption-only UX. Stop
+      // any incoming audio track immediately so OpenAI knows we won't
+      // consume it and the browser doesn't buffer the PCM stream in memory.
+      this.pc.ontrack = (ev: RTCTrackEvent) => {
+        for (const track of ev.streams[0]?.getTracks() ?? []) {
+          track.stop();
+        }
+      };
       const dc = this.pc.createDataChannel('oai-events');
       dc.onmessage = (ev: MessageEvent<string>) => {
         try {
@@ -197,6 +231,11 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       // moot. Reset the counter so a fresh failure later starts at 5 min,
       // not at whatever the previous failure escalated to.
       this.renewalRetryAttempt = 0;
+
+      // Reset stale-data detector baselines so the 30 s grace period
+      // starts now, not at whatever the previous run left behind.
+      this.lastDcEventAt = Date.now();
+      this.lastAudioActiveAt = 0;
 
       this.startLevelPolling();
       this.scheduleRenewal(this.renewDelayMs);
@@ -358,6 +397,9 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
   }
 
   private handleDCEvent(ev: DCEvent): void {
+    // Any DC event proves the upstream session is alive — feed the
+    // stale-data detector so we don't false-positive while events flow.
+    this.lastDcEventAt = Date.now();
     switch (ev.type) {
       case 'session.created':
       case 'session.updated':
@@ -530,6 +572,28 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
         peakHoldUntil = nowMs + PEAK_HOLD_MS;
       } else {
         peakDb = Math.max(peakDb - PEAK_DECAY_DB_PER_TICK, rmsDb);
+      }
+
+      // Stale-data detection. Track when audio was last "loud" so we can
+      // distinguish "user is silent" (no DC events expected) from "user
+      // is speaking but upstream session is wedged" (force renewal).
+      if (rmsDb > STALE_AUDIO_ACTIVE_DB) {
+        this.lastAudioActiveAt = nowMs;
+      }
+      if (
+        this.lastDcEventAt > 0 &&
+        this.lastAudioActiveAt > this.lastDcEventAt &&
+        nowMs - this.lastDcEventAt > STALE_DATA_THRESHOLD_MS
+      ) {
+        this.emitHealth(
+          'transport',
+          'degraded',
+          'No transcript for 30 s while audio active — auto-renewing session',
+        );
+        // Reset to suppress double-fire while renewSession runs (it will
+        // tear down and re-init, resetting lastDcEventAt on success).
+        this.lastDcEventAt = 0;
+        void this.renewSession();
       }
 
       const ev: AudioLevelEvent = {

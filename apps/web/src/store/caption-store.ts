@@ -103,12 +103,47 @@ function loadPersisted(key: string): {
   }
 }
 
+/**
+ * Persisted-state writer. Optimizations vs the naive "write on every store
+ * change" baseline:
+ *
+ *   1. Skip when nothing the snapshot cares about changed.  partial-delta
+ *      updates only mutate `livePartial` / `liveTranslation`, neither of
+ *      which is persisted — so they should never trigger a write. The
+ *      previous version churned localStorage at the partial-delta rate
+ *      (up to ~20 Hz), and for long meetings the JSON.stringify cost on
+ *      a 3000-segment buffer was ~5-20 ms on the main thread per tick.
+ *
+ *   2. Bound starvation. The debounce keeps resetting while events flow,
+ *      so a speaker who never pauses for 800 ms would never persist. Hard
+ *      cap at PERSIST_MAX_INTERVAL_MS so the user's history is durable
+ *      even mid-monologue.
+ */
 function makeDebouncedSaver(key: string): (state: CaptionState) => void {
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let lastSegmentsRef: CaptionSegment[] | null = null;
+  let lastTranslationsRef: Record<string, CaptionTranslation> | null = null;
+  let lastSessionStartMs: number | null | undefined = undefined; // sentinel "never seen"
+  let lastFlushAt = 0;
+  const PERSIST_MAX_INTERVAL_MS = 5_000;
+
   return (state) => {
-    if (timer !== null) clearTimeout(timer);
-    timer = setTimeout(() => {
+    // Reference-equality early-exit: if neither persisted slice changed,
+    // there is nothing new to write. partial-delta updates flow through
+    // here all day long and they should all return immediately.
+    const segmentsChanged = state.segments !== lastSegmentsRef;
+    const translationsChanged = state.translations !== lastTranslationsRef;
+    const sessionStartChanged = state.sessionStartMs !== lastSessionStartMs;
+    if (!segmentsChanged && !translationsChanged && !sessionStartChanged) {
+      return;
+    }
+    lastSegmentsRef = state.segments;
+    lastTranslationsRef = state.translations;
+    lastSessionStartMs = state.sessionStartMs;
+
+    const doFlush = () => {
       timer = null;
+      lastFlushAt = Date.now();
       try {
         const payload: PersistedState = {
           v: PERSIST_VERSION,
@@ -121,7 +156,19 @@ function makeDebouncedSaver(key: string): (state: CaptionState) => void {
       } catch {
         // QuotaExceeded or unavailable storage — fail silently, in-memory keeps working.
       }
-    }, PERSIST_DEBOUNCE_MS);
+    };
+
+    // Max-interval guard: if it has been a long time since the last
+    // flush, write NOW rather than letting the debounce keep extending.
+    const sinceLastFlush = Date.now() - lastFlushAt;
+    if (lastFlushAt > 0 && sinceLastFlush >= PERSIST_MAX_INTERVAL_MS) {
+      if (timer !== null) clearTimeout(timer);
+      doFlush();
+      return;
+    }
+
+    if (timer !== null) clearTimeout(timer);
+    timer = setTimeout(doFlush, PERSIST_DEBOUNCE_MS);
   };
 }
 

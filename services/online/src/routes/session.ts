@@ -27,6 +27,16 @@ const SessionBodySchema = z
      * only translated text — saves the incremental whisper cost.
      */
     includeSourceTranscript: z.boolean().optional(),
+    /**
+     * Acoustic environment hint forwarded to OpenAI as
+     * `audio.input.noise_reduction.type`:
+     *   'close' → near_field (default, headset/desktop mic).
+     *   'far'   → far_field (conference room, ceiling mic, far-distance).
+     *   'off'   → field omitted entirely (raw signal to the model).
+     * Picked to match what the browser's getUserMedia AGC is also doing
+     * client-side so the audio path is internally consistent.
+     */
+    micDistance: z.enum(['close', 'far', 'off']).optional(),
   })
   .strict();
 
@@ -101,14 +111,22 @@ export async function registerSession(app: FastifyInstance): Promise<void> {
     const langPair = parsed.data.langPair ?? DEFAULT_LANG_PAIR;
     const outputLanguage = LANG_OUTPUT[langPair] ?? 'zh';
     const includeSourceTranscript = parsed.data.includeSourceTranscript ?? true;
+    const micDistance = parsed.data.micDistance ?? 'close';
 
-    // Build the audio.input config conditionally so we don't request the
-    // `gpt-realtime-whisper` source transcription stream when the client
-    // opted into translation-only mode. `noise_reduction` stays in either
-    // mode because it gates how aggressively OpenAI cleans the mic signal.
-    const audioInput: Record<string, unknown> = {
-      noise_reduction: { type: 'near_field' },
-    };
+    // Build audio.input conditionally:
+    //   transcription:   only when bilingual (gpt-realtime-whisper costs extra)
+    //   noise_reduction: 'close' → near_field, 'far' → far_field, 'off' → omit
+    // 'far' matters for conference-room scenarios where the speaker is
+    // 3-5 m away from a table mic — near_field tuning would aggressively
+    // strip what the model thinks is "noise" but is actually the soft
+    // far speaker. 'off' lets users with already-clean signal feed raw audio.
+    const audioInput: Record<string, unknown> = {};
+    if (micDistance === 'close') {
+      audioInput.noise_reduction = { type: 'near_field' };
+    } else if (micDistance === 'far') {
+      audioInput.noise_reduction = { type: 'far_field' };
+    }
+    // micDistance==='off' → no noise_reduction key at all
     if (includeSourceTranscript) {
       audioInput.transcription = { model: 'gpt-realtime-whisper' };
     }

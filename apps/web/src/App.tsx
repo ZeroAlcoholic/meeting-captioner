@@ -17,6 +17,7 @@ export function App() {
   const modeId = useSettingsStore((s) => s.modeId);
   const audioSource = useSettingsStore((s) => s.audioSource);
   const includeSourceTranscript = useSettingsStore((s) => s.includeSourceTranscript);
+  const micDistance = useSettingsStore((s) => s.micDistance);
   const startSession = useSettingsStore((s) => s.startSession);
   const stopSession = useSettingsStore((s) => s.stopSession);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -59,14 +60,21 @@ export function App() {
   // a fresh Stop+Start automatically. The existing reconnecting pill
   // covers the ~1-2 s visual gap.
   const prevIncludeSourceRef = useRef(includeSourceTranscript);
+  const prevMicDistanceRef = useRef(micDistance);
   useEffect(() => {
-    if (prevIncludeSourceRef.current !== includeSourceTranscript) {
-      prevIncludeSourceRef.current = includeSourceTranscript;
-      if (realtime.status === 'running') {
-        void handleStartReal();
-      }
+    const sourceChanged = prevIncludeSourceRef.current !== includeSourceTranscript;
+    const micChanged = prevMicDistanceRef.current !== micDistance;
+    if (sourceChanged) prevIncludeSourceRef.current = includeSourceTranscript;
+    if (micChanged) prevMicDistanceRef.current = micDistance;
+    if ((sourceChanged || micChanged) && realtime.status === 'running') {
+      // Either change requires a fresh /session POST (transcription model
+      // and noise_reduction profile are fixed at session creation) AND a
+      // fresh getUserMedia (AGC is fixed at track creation). Auto-restart
+      // covers both. The reconnecting pill on the caption board surfaces
+      // the brief gap.
+      void handleStartReal();
     }
-  }, [includeSourceTranscript, realtime.status, handleStartReal]);
+  }, [includeSourceTranscript, micDistance, realtime.status, handleStartReal]);
 
   const handleStartOffline = () => {
     fake.stop();
