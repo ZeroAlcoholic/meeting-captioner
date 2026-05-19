@@ -4,6 +4,7 @@ import { SettingsPanel } from './components/SettingsPanel.js';
 import { RealtimePricingPanel } from './components/RealtimePricingPanel.js';
 import { MicLevelBar } from './components/MicLevelBar.js';
 import { StartRealButton } from './components/StartRealButton.js';
+import { ExportMenu } from './components/ExportMenu.js';
 import { useOpenAIRealtime } from './providers/use-openai-realtime.js';
 import { useOfflineSTT } from './providers/use-offline-stt.js';
 import { useFakeReplay } from './providers/use-fake-replay.js';
@@ -169,6 +170,7 @@ export function App() {
               {offline.hasWhisper ? '🖥 Start Offline' : `🖥 Whisper: ${offline.whisperStatus ?? '…'}`}
             </button>
           )}
+          <ExportMenu disabled={isRunning} />
           <button
             type="button"
             onClick={handleStop}

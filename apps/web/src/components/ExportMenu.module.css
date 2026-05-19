@@ -1,0 +1,57 @@
+.wrapper {
+  position: relative;
+  display: inline-block;
+}
+
+.trigger {
+  /* Inherit the default header button look — no extra styling needed. */
+}
+
+.menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 180px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-1, #0f1422);
+  border: 1px solid var(--border-mid, #2a3142);
+  border-radius: 4px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+  padding: 4px 0;
+  z-index: 30;
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 12px;
+  background: transparent;
+  border: none;
+  color: #e8e8e8;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.item:hover {
+  background: rgba(74, 158, 255, 0.15);
+}
+
+.item:focus-visible {
+  outline: 1px solid #4a9eff;
+  outline-offset: -1px;
+}
+
+.itemLabel {
+  font-weight: 500;
+}
+
+.itemHint {
+  font-size: 11px;
+  color: #8a93a3;
+  letter-spacing: 0.02em;
+}
