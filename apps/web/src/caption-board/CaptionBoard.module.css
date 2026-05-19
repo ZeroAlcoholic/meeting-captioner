@@ -109,6 +109,16 @@
   overflow-y: auto;
   min-height: 0;
   padding-top: 0.25rem;
+  /* Reserve the scrollbar gutter even when content fits the viewport. Without
+     this, the first paragraph that triggers overflow shifts every preceding
+     row left by ~6 px, which reads as a jarring "snap" mid-sentence — the
+     thing the user described as 不太順. */
+  scrollbar-gutter: stable;
+  /* Stop wheel/touch momentum from chaining back to the page once history
+     reaches its scroll edge. Page is already height: 100vh so chaining has
+     no visible effect today, but if a future scroll container is added
+     above, this keeps history's scroll feel isolated. */
+  overscroll-behavior: contain;
 }
 /* Bilingual: target on the LEFT (wider) + source on the RIGHT (narrower).
    The component places the primary stream in the first .historyCol regardless

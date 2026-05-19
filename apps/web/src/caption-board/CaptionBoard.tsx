@@ -457,6 +457,44 @@ export function CaptionBoard() {
     return () => document.removeEventListener('fullscreenchange', onFsChange);
   }, []);
 
+  // Wheel delegation: forward wheel events that land OUTSIDE the history
+  // pane (typically over the big live caption area, the empty placeholder,
+  // or the top action chrome) into the history scroll container. Without
+  // this, a user trying to glance at the previous paragraph has to
+  // physically aim the cursor at the narrow history strip — a real source
+  // of "scrolling feels broken" friction on long meetings.
+  //
+  // Events that originate inside the history pane are left untouched so
+  // the browser's native smooth-scroll handles them with its full
+  // momentum / trackpad semantics.
+  useEffect(() => {
+    const board = boardRef.current;
+    if (!board) return;
+    function onWheel(this: void, e: WheelEvent): void {
+      const history = board?.querySelector(
+        '[data-testid="caption-history"]',
+      ) as HTMLElement | null;
+      if (!history) return;
+      if (history.contains(e.target as Node)) return; // native scroll handles it
+      // Translate the wheel deltaMode into pixels. Most mice/trackpads use
+      // pixel mode (0); legacy line (1) and page (2) modes need scaling.
+      let dy = e.deltaY;
+      if (e.deltaMode === 1) dy *= 16;
+      else if (e.deltaMode === 2) dy *= history.clientHeight;
+      // Only consume the event if history actually has room to scroll in
+      // that direction — otherwise let the wheel bubble normally (lets
+      // ancestor scrollers, browser back-gesture, etc. behave naturally).
+      const canScroll =
+        (dy > 0 && history.scrollTop + history.clientHeight < history.scrollHeight) ||
+        (dy < 0 && history.scrollTop > 0);
+      if (!canScroll) return;
+      e.preventDefault();
+      history.scrollBy({ top: dy, behavior: 'auto' });
+    }
+    board.addEventListener('wheel', onWheel, { passive: false });
+    return () => board.removeEventListener('wheel', onWheel);
+  }, []);
+
   return (
     <div
       ref={boardRef}
