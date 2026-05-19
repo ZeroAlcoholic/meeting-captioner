@@ -109,10 +109,18 @@ function LanguageBlock() {
 /**
  * Acoustic environment selector. Pairs browser-side AGC with server-side
  * noise_reduction profile in lockstep. Mid-session change auto-restarts.
+ *
+ * Disabled when audioSource === 'system' — system audio (Teams/Zoom via
+ * getDisplayMedia) is already mixed and free of room noise, so AGC /
+ * noise_reduction would only add artifacts. use-openai-realtime forces
+ * micDistance='off' in that path; greying out the buttons here makes the
+ * UI reflect that fact instead of pretending the setting still applies.
  */
 function MicDistanceBlock() {
   const micDistance = useSettingsStore((s) => s.micDistance);
   const setMicDistance = useSettingsStore((s) => s.setMicDistance);
+  const audioSource = useSettingsStore((s) => s.audioSource);
+  const isSystem = audioSource === 'system';
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
       <span style={{ fontSize: 12, opacity: 0.65, textTransform: 'uppercase', letterSpacing: 1 }}>
@@ -124,7 +132,12 @@ function MicDistanceBlock() {
             key={opt.id}
             type="button"
             data-testid={`mic-distance-${opt.id}`}
-            title={opt.hint}
+            disabled={isSystem}
+            title={
+              isSystem
+                ? '系統音源已預混乾淨，無需 AGC / 雜訊抑制 — 此選項不適用'
+                : opt.hint
+            }
             onClick={() => setMicDistance(opt.id)}
             style={{
               padding: '5px 12px',
@@ -132,15 +145,21 @@ function MicDistanceBlock() {
               border: micDistance === opt.id ? '2px solid #4a9eff' : '1px solid #555',
               background: micDistance === opt.id ? '#1a3a5c' : 'transparent',
               color: '#e8e8e8',
-              cursor: 'pointer',
+              cursor: isSystem ? 'not-allowed' : 'pointer',
               fontWeight: micDistance === opt.id ? 700 : 400,
               fontSize: 14,
+              opacity: isSystem ? 0.4 : 1,
             }}
           >
             {opt.label}
           </button>
         ))}
       </div>
+      {isSystem && (
+        <span style={{ fontSize: 11, opacity: 0.6, marginTop: 2 }}>
+          System audio is pre-mixed — AGC / noise_reduction is forced off.
+        </span>
+      )}
     </div>
   );
 }

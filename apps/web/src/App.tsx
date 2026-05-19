@@ -85,20 +85,27 @@ export function App() {
   // covers the ~1-2 s visual gap.
   const prevIncludeSourceRef = useRef(includeSourceTranscript);
   const prevMicDistanceRef = useRef(micDistance);
+  const prevAudioSourceRef = useRef(audioSource);
   useEffect(() => {
     const sourceChanged = prevIncludeSourceRef.current !== includeSourceTranscript;
     const micChanged = prevMicDistanceRef.current !== micDistance;
+    const audioSourceChanged = prevAudioSourceRef.current !== audioSource;
     if (sourceChanged) prevIncludeSourceRef.current = includeSourceTranscript;
     if (micChanged) prevMicDistanceRef.current = micDistance;
-    if ((sourceChanged || micChanged) && realtime.status === 'running') {
-      // Either change requires a fresh /session POST (transcription model
-      // and noise_reduction profile are fixed at session creation) AND a
-      // fresh getUserMedia (AGC is fixed at track creation). Auto-restart
-      // covers both. The reconnecting pill on the caption board surfaces
-      // the brief gap.
+    if (audioSourceChanged) prevAudioSourceRef.current = audioSource;
+    if ((sourceChanged || micChanged || audioSourceChanged) && realtime.status === 'running') {
+      // Any of these three requires a fresh start:
+      //   - includeSourceTranscript / micDistance → fresh /session POST
+      //     (transcription model + noise_reduction are fixed at session
+      //     creation) AND fresh getUserMedia (AGC is fixed at track
+      //     creation).
+      //   - audioSource → switch between MicrophoneAudioProvider and
+      //     DisplayMediaAudioProvider entirely. The user re-confirms the
+      //     getDisplayMedia picker if they switch to 'system'.
+      // The reconnecting pill on the caption board surfaces the brief gap.
       void handleStartReal();
     }
-  }, [includeSourceTranscript, micDistance, realtime.status, handleStartReal]);
+  }, [includeSourceTranscript, micDistance, audioSource, realtime.status, handleStartReal]);
 
   const handleStartOffline = () => {
     fake.stop();
@@ -148,14 +155,18 @@ export function App() {
              offline.status === 'running' ? 'offline' :
              realtime.status === 'running' ? realtime.status : 'idle'}
           </span>
-          {!IS_ONLINE_ONLY && (
-            <span
-              className="audio-source-chip"
-              title={audioSource === 'system' ? 'System audio (WASAPI)' : 'Microphone'}
-            >
-              {audioSource === 'system' ? '🔊' : '🎤'}
-            </span>
-          )}
+          {/* Audio-source chip is visible in both builds now — the Online
+              path supports system audio via getDisplayMedia, so the
+              indicator matters even in the slim distribution. The chip is
+              an at-a-glance signal so a meeting operator can tell whether
+              the next Start will pop the mic prompt or the screen-share
+              picker without opening Settings. */}
+          <span
+            className="audio-source-chip"
+            title={audioSource === 'system' ? 'System audio (display capture)' : 'Microphone'}
+          >
+            {audioSource === 'system' ? '🔊' : '🎤'}
+          </span>
           {showRealButton && realtime.apiKeyStatus === 'present' && <RealtimePricingPanel />}
           <button
             type="button"

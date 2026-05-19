@@ -3,8 +3,9 @@ import { ONLINE_SERVICE_URL } from '../config.js';
 import { settingsStore } from '../settings/use-settings-store.js';
 import { OpenAIRealtimeProvider } from './openai-realtime-provider.js';
 import { MicrophoneAudioProvider } from './microphone-audio-provider.js';
+import { DisplayMediaAudioProvider } from './display-media-audio-provider.js';
 import { createStoreBoundHandlers } from './coalesce-handlers.js';
-import type { ProviderStatus } from './types.js';
+import type { AudioSource, ProviderStatus } from './types.js';
 
 const SESSION_URL = `${ONLINE_SERVICE_URL}/session`;
 const SESSION_INFO_URL = `${ONLINE_SERVICE_URL}/session/info`;
@@ -106,21 +107,36 @@ export function useOpenAIRealtime(): UseOpenAIRealtime {
     statusUnsubRef.current?.();
     statusUnsubRef.current = null;
 
-    const { langPair, includeSourceTranscript, micDistance } = settingsStore.getState();
+    const { langPair, includeSourceTranscript, micDistance, audioSource } = settingsStore.getState();
     const handlers = createStoreBoundHandlers();
     handlersRef.current = handlers;
-    // MicrophoneAudioProvider must be created with the same micDistance
-    // value so its getUserMedia AGC matches the noise_reduction profile
-    // we'll send to OpenAI — otherwise the two halves of the audio path
-    // fight each other (see MicrophoneAudioProvider docstring).
-    const mic = new MicrophoneAudioProvider(micDistance);
+    // Branch on the user-chosen audio source. 'system' uses getDisplayMedia
+    // for browser tab / system-audio capture (Teams/Zoom in another window);
+    // 'mic' uses getUserMedia for an attached microphone. The OpenAI side of
+    // the audio path doesn't care which one fed it — it just consumes the
+    // MediaStream — so we keep the AudioSource interface symmetric.
+    //
+    // For system audio, micDistance is forced to 'off' so the upstream
+    // noise_reduction profile doesn't fight pre-mixed clean signal. The
+    // SettingsPanel mirrors this by greying out the mic-distance buttons
+    // when audioSource === 'system', so the UI and the actual /session
+    // payload stay in sync.
+    let audio: AudioSource;
+    let effectiveMicDistance: 'close' | 'far' | 'off';
+    if (audioSource === 'system') {
+      audio = new DisplayMediaAudioProvider();
+      effectiveMicDistance = 'off';
+    } else {
+      audio = new MicrophoneAudioProvider(micDistance);
+      effectiveMicDistance = micDistance;
+    }
     const provider = new OpenAIRealtimeProvider(
       SESSION_URL,
       handlers,
       langPair,
-      mic,
+      audio,
       includeSourceTranscript,
-      micDistance,
+      effectiveMicDistance,
     );
     providerRef.current = provider;
     // Subscribe to internal status transitions — keeps React in sync when
