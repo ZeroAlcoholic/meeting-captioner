@@ -19,6 +19,7 @@ export function App() {
   const offline = useOfflineSTT();
   const modeId = useSettingsStore((s) => s.modeId);
   const audioSource = useSettingsStore((s) => s.audioSource);
+  const setAudioSource = useSettingsStore((s) => s.setAudioSource);
   const includeSourceTranscript = useSettingsStore((s) => s.includeSourceTranscript);
   const micDistance = useSettingsStore((s) => s.micDistance);
   const startSession = useSettingsStore((s) => s.startSession);
@@ -43,7 +44,7 @@ export function App() {
     void fake.start();
   };
 
-  const handleStartReal = useCallback(async () => {
+  const handleStartReal = useCallback(async (): Promise<boolean> => {
     fake.stop();
     offline.stop();
     // Always drain any in-flight session into the cost accumulators before
@@ -53,19 +54,18 @@ export function App() {
     // toggle-triggered restart would overwrite sessionStartAt and lose
     // the accumulated minutes from the pre-toggle interval.
     stopSession();
-    // Reset caption store ONLY when there is no active session in flight.
-    // handleStartReal is also called by the mid-session auto-restart
-    // (includeSourceTranscript / micDistance toggle) — that path needs to
-    // preserve segments because the meeting itself is continuing; only the
-    // upstream connection is being recycled. Detection: an "active" session
-    // is one where beginSession() ran and endSession() has not — i.e.,
-    // sessionId !== null && sessionEndedAt === null. In all other cases
-    // (cold start, restored-from-storage, post-Stop restart) the user is
-    // beginning fresh work and the restored chip + stale segments should
-    // be cleared.
-    const cs = captionStore.getState();
-    const sessionActive = cs.sessionId !== null && cs.sessionEndedAt === null;
-    if (!sessionActive) cs.beginSession();
+    // Reset caption store unless this is the auto-restart path triggered
+    // by a mid-session toggle change. The signal "are we currently running
+    // a real session?" must come from in-memory realtime.status, NOT from
+    // persisted captionStore fields — captionStore.sessionId / sessionEndedAt
+    // survive a tab reload, so a cold-reload-then-Start would otherwise
+    // be mistaken for an in-flight restart and skip beginSession(), causing
+    // new transcript events to append onto the previous session's
+    // timestamps. realtime.status === 'running' is true only when the
+    // OpenAI provider is live in *this* tab session, which is exactly the
+    // restart-vs-fresh-start distinction we need.
+    const isAutoRestart = realtime.status === 'running';
+    if (!isAutoRestart) captionStore.getState().beginSession();
     // Start the cost timer ONLY after the realtime provider reaches the
     // 'running' state. If start() fails (mic denied, /session error, SDP
     // exchange refused), it returns false and we never accrue billed time
@@ -73,6 +73,7 @@ export function App() {
     // Codex flagged.
     const ok = await realtime.start();
     if (ok) startSession();
+    return ok;
   }, [fake, offline, realtime, startSession, stopSession]);
 
   // ─── Auto-restart on mid-session source-transcript toggle ─────────────────
@@ -90,6 +91,10 @@ export function App() {
     const sourceChanged = prevIncludeSourceRef.current !== includeSourceTranscript;
     const micChanged = prevMicDistanceRef.current !== micDistance;
     const audioSourceChanged = prevAudioSourceRef.current !== audioSource;
+    // Capture BEFORE updating refs so the failure-revert path below can
+    // restore the user's previous selection rather than reading the
+    // already-updated value.
+    const previousAudioSource = prevAudioSourceRef.current;
     if (sourceChanged) prevIncludeSourceRef.current = includeSourceTranscript;
     if (micChanged) prevMicDistanceRef.current = micDistance;
     if (audioSourceChanged) prevAudioSourceRef.current = audioSource;
@@ -103,9 +108,31 @@ export function App() {
       //     DisplayMediaAudioProvider entirely. The user re-confirms the
       //     getDisplayMedia picker if they switch to 'system'.
       // The reconnecting pill on the caption board surfaces the brief gap.
-      void handleStartReal();
+      void handleStartReal().then((ok) => {
+        // If the auto-restart failed AND the trigger was an audioSource
+        // change, revert the UI selection so the visible chip/state matches
+        // reality. Common case: user flips Mic → System, dismisses Chrome's
+        // share picker → DisplayMediaAudioProvider throws → realtime falls
+        // to idle. Without this, the 🔊 chip would stay shown even though
+        // no system capture is live, and the next Start would re-trigger
+        // the picker without any explanation. The ref was already pointed
+        // at the new value above, so we update both the store and the ref
+        // back to the previous value to prevent this effect from re-firing
+        // when the store change propagates.
+        if (!ok && audioSourceChanged) {
+          prevAudioSourceRef.current = previousAudioSource;
+          setAudioSource(previousAudioSource);
+        }
+      });
     }
-  }, [includeSourceTranscript, micDistance, audioSource, realtime.status, handleStartReal]);
+  }, [
+    includeSourceTranscript,
+    micDistance,
+    audioSource,
+    realtime.status,
+    handleStartReal,
+    setAudioSource,
+  ]);
 
   const handleStartOffline = () => {
     fake.stop();

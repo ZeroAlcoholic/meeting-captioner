@@ -202,10 +202,15 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
     let stream: MediaStream;
     try {
       stream = await this.mic.acquire(this.handlers.onHealth);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Microphone unavailable';
-      // mic.acquire already emitted health.audio.failed; surface the error and stop.
-      this.emitHealth('audio', 'failed', message);
+    } catch {
+      // Provider contract: AudioSource.acquire() MUST emit its own precise
+      // health event before throwing (MicrophoneAudioProvider emits 'failed';
+      // DisplayMediaAudioProvider distinguishes 'failed' from 'no_audio_track'
+      // for the "user picked a window without system audio" case). We
+      // deliberately do NOT re-emit here — the previous emit('failed') was
+      // clobbering DisplayMediaAudioProvider's more specific 'no_audio_track'
+      // state, losing the actionable distinction the UI needs to coach the
+      // user to tick the "Share audio" checkbox.
       this.setStatus('stopped');
       this.cleanup();
       return;
