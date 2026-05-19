@@ -1,0 +1,76 @@
+.wrapper {
+  position: relative;
+  display: inline-block;
+}
+
+.trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: rgba(255, 196, 0, 0.12);
+  border: 1px solid rgba(255, 196, 0, 0.45);
+  border-radius: 12px;
+  color: #ffe9a8;
+  font-size: 12px;
+  cursor: pointer;
+  font-family: inherit;
+  line-height: 1;
+}
+
+.trigger:hover {
+  background: rgba(255, 196, 0, 0.2);
+}
+
+.trigger:focus-visible {
+  outline: 1px solid #ffc400;
+  outline-offset: 2px;
+}
+
+.icon {
+  font-size: 13px;
+}
+
+.menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 220px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-1, #0f1422);
+  border: 1px solid var(--border-mid, #2a3142);
+  border-radius: 4px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+  padding: 4px 0;
+  z-index: 30;
+}
+
+.item {
+  display: block;
+  padding: 6px 12px;
+  background: transparent;
+  border: none;
+  color: #e8e8e8;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.item:hover {
+  background: rgba(74, 158, 255, 0.15);
+}
+
+.item:focus-visible {
+  outline: 1px solid #4a9eff;
+  outline-offset: -1px;
+}
+
+.itemDanger {
+  color: #ffb4b4;
+}
+
+.itemDanger:hover {
+  background: rgba(255, 100, 100, 0.15);
+}

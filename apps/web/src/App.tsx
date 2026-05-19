@@ -5,10 +5,12 @@ import { RealtimePricingPanel } from './components/RealtimePricingPanel.js';
 import { MicLevelBar } from './components/MicLevelBar.js';
 import { StartRealButton } from './components/StartRealButton.js';
 import { ExportMenu } from './components/ExportMenu.js';
+import { RestoredSessionChip } from './components/RestoredSessionChip.js';
 import { useOpenAIRealtime } from './providers/use-openai-realtime.js';
 import { useOfflineSTT } from './providers/use-offline-stt.js';
 import { useFakeReplay } from './providers/use-fake-replay.js';
 import { useSettingsStore } from './settings/use-settings-store.js';
+import { captionStore } from './store/use-caption-store.js';
 import { IS_ONLINE_ONLY } from './deployment.js';
 
 export function App() {
@@ -33,6 +35,11 @@ export function App() {
   const handleStartFake = () => {
     realtime.stop();
     offline.stop();
+    // Reset caption store to a fresh session — without this, fake-replay
+    // events would append into any restored history with timestamps anchored
+    // to the previous sessionStartMs. beginSession() also clears the
+    // restoredFromStorage flag so the 📂 chip dismisses.
+    captionStore.getState().beginSession();
     void fake.start();
   };
 
@@ -46,6 +53,19 @@ export function App() {
     // toggle-triggered restart would overwrite sessionStartAt and lose
     // the accumulated minutes from the pre-toggle interval.
     stopSession();
+    // Reset caption store ONLY when there is no active session in flight.
+    // handleStartReal is also called by the mid-session auto-restart
+    // (includeSourceTranscript / micDistance toggle) — that path needs to
+    // preserve segments because the meeting itself is continuing; only the
+    // upstream connection is being recycled. Detection: an "active" session
+    // is one where beginSession() ran and endSession() has not — i.e.,
+    // sessionId !== null && sessionEndedAt === null. In all other cases
+    // (cold start, restored-from-storage, post-Stop restart) the user is
+    // beginning fresh work and the restored chip + stale segments should
+    // be cleared.
+    const cs = captionStore.getState();
+    const sessionActive = cs.sessionId !== null && cs.sessionEndedAt === null;
+    if (!sessionActive) cs.beginSession();
     // Start the cost timer ONLY after the realtime provider reaches the
     // 'running' state. If start() fails (mic denied, /session error, SDP
     // exchange refused), it returns false and we never accrue billed time
@@ -83,6 +103,7 @@ export function App() {
   const handleStartOffline = () => {
     fake.stop();
     realtime.stop();
+    captionStore.getState().beginSession();
     void offline.start();
   };
 
@@ -90,6 +111,10 @@ export function App() {
     if (fake.status === 'running') fake.stop();
     if (realtime.status === 'running') { realtime.stop(); stopSession(); }
     if (offline.status === 'running') offline.stop();
+    // Mark the session as cleanly ended. Data stays in memory + persisted so
+    // the user can still hit Export after Stop — endSession() is a metadata
+    // flag, not a clear.
+    captionStore.getState().endSession();
   };
 
   // In the online-slim distribution, hybrid/offline modes are filtered out of
@@ -113,6 +138,7 @@ export function App() {
         </div>
         <div className="app-controls">
           <MicLevelBar visible={isRunning} />
+          {!isRunning && <RestoredSessionChip />}
           <span className="app-status" data-status={
             fake.status === 'running' ? 'running' :
             offline.status === 'running' ? 'running' :

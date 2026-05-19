@@ -1,6 +1,32 @@
 import type { TranscriptEvent, TranslationEvent } from '@meeting-audio/contracts';
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { createCaptionStore } from './caption-store.js';
+
+// In-memory localStorage + minimal window shim. Vitest defaults to node env
+// (no DOM); the new session-boundary / migration tests need both a real
+// `localStorage.*` surface AND a defined `window` (caption-store guards its
+// hydration with `typeof window !== 'undefined'`). Older tests pass
+// `persistKey: null` and skip the persistence path entirely.
+function installDomShims(): void {
+  const g = globalThis as { localStorage?: Storage; window?: unknown };
+  if (typeof g.localStorage === 'undefined') {
+    const store = new Map<string, string>();
+    g.localStorage = {
+      getItem: (k) => (store.has(k) ? store.get(k)! : null),
+      setItem: (k, v) => { store.set(k, v); },
+      removeItem: (k) => { store.delete(k); },
+      clear: () => { store.clear(); },
+      key: (i) => Array.from(store.keys())[i] ?? null,
+      get length() { return store.size; },
+    };
+  }
+  if (typeof g.window === 'undefined') {
+    g.window = g; // anything truthy is enough — the guard only checks typeof.
+  }
+}
+
+installDomShims();
+beforeEach(() => { localStorage.clear(); });
 
 const baseTranscript = {
   kind: 'transcript' as const,
@@ -180,6 +206,114 @@ describe('captionStore.clear', () => {
     expect(store.getState().segments).toEqual([]);
     expect(store.getState().translations).toEqual({});
     expect(store.getState().livePartial).toBeNull();
+  });
+});
+
+describe('captionStore session boundary', () => {
+  it('starts with sessionId=null and sessionEndedAt=null', () => {
+    const store = createCaptionStore({ persistKey: null });
+    expect(store.getState().sessionId).toBeNull();
+    expect(store.getState().sessionEndedAt).toBeNull();
+    expect(store.getState().restoredFromStorage).toBe(false);
+  });
+
+  it('beginSession assigns sessionId and clears segments/live/translations/sessionStartMs', () => {
+    const store = createCaptionStore({ persistKey: null });
+    const api = store.getState();
+    api.applyTranscript(transcript({ segmentId: 's1', status: 'final', text: 'a', startMs: 0 }));
+    api.applyTranscript(transcript({ segmentId: 's2', status: 'partial', text: 'b', startMs: 100 }));
+    api.applyTranslation(translation('s1', 'final', '甲'));
+    expect(store.getState().segments).toHaveLength(1);
+    api.beginSession();
+    const post = store.getState();
+    expect(post.segments).toHaveLength(0);
+    expect(post.livePartial).toBeNull();
+    expect(post.liveTranslation).toBeNull();
+    expect(post.translations).toEqual({});
+    expect(post.sessionStartMs).toBeNull();
+    expect(post.sessionId).not.toBeNull();
+    expect(post.sessionEndedAt).toBeNull();
+  });
+
+  it('beginSession dismisses the restoredFromStorage flag', () => {
+    // Simulate hydration via persistKey: write a v3 payload to localStorage,
+    // then construct a fresh store reading from that key.
+    const key = 'meeting-audio:captions:test-boundary-1';
+    localStorage.setItem(
+      key,
+      JSON.stringify({
+        v: 3,
+        segments: [{ segmentId: 's1', provider: 'fake', source: 'fake_replay', mode: 'full_offline', status: 'final', text: 'a', startMs: 0 }],
+        translations: {},
+        sessionStartMs: 0,
+        sessionId: null,
+        sessionEndedAt: null,
+        savedAt: '2026-05-19T00:00:00.000Z',
+      }),
+    );
+    const store = createCaptionStore({ persistKey: key });
+    expect(store.getState().restoredFromStorage).toBe(true);
+    expect(store.getState().segments).toHaveLength(1);
+    store.getState().beginSession();
+    expect(store.getState().restoredFromStorage).toBe(false);
+    localStorage.removeItem(key);
+  });
+
+  it('endSession marks sessionEndedAt without clearing data', () => {
+    const store = createCaptionStore({ persistKey: null });
+    const api = store.getState();
+    api.beginSession();
+    api.applyTranscript(transcript({ segmentId: 's1', status: 'final', text: 'a', startMs: 0 }));
+    api.endSession();
+    const post = store.getState();
+    expect(post.sessionEndedAt).not.toBeNull();
+    expect(post.segments).toHaveLength(1); // data survives
+    expect(post.sessionId).not.toBeNull(); // sessionId stays for export filename
+  });
+
+  it('endSession is a no-op when no session has begun', () => {
+    const store = createCaptionStore({ persistKey: null });
+    store.getState().endSession();
+    expect(store.getState().sessionEndedAt).toBeNull();
+  });
+
+  it('clear resets sessionId + sessionEndedAt + restoredFromStorage', () => {
+    const store = createCaptionStore({ persistKey: null });
+    const api = store.getState();
+    api.beginSession();
+    api.endSession();
+    expect(store.getState().sessionId).not.toBeNull();
+    api.clear();
+    expect(store.getState().sessionId).toBeNull();
+    expect(store.getState().sessionEndedAt).toBeNull();
+    expect(store.getState().restoredFromStorage).toBe(false);
+  });
+});
+
+describe('captionStore persistence migration', () => {
+  it('reads legacy v2 payload from meeting-audio:captions:v2 when v3 is missing', () => {
+    // Write a v2-shaped payload to the legacy key, leave the v3 key empty.
+    localStorage.removeItem('meeting-audio:captions:v3');
+    localStorage.setItem(
+      'meeting-audio:captions:v2',
+      JSON.stringify({
+        v: 2,
+        segments: [{ segmentId: 's1', provider: 'fake', source: 'fake_replay', mode: 'full_offline', status: 'final', text: 'legacy', startMs: 0 }],
+        translations: { s1: { sourceSegmentId: 's1', provider: 'fake', status: 'final', sourceText: 'l', targetText: '舊', sourceLanguage: 'en', targetLanguage: 'zh-Hant', updatedAt: '2026-05-19T00:00:00.000Z' } },
+        sessionStartMs: 0,
+        savedAt: '2026-05-19T00:00:00.000Z',
+      }),
+    );
+    const store = createCaptionStore({});
+    expect(store.getState().segments).toHaveLength(1);
+    expect(store.getState().segments[0]?.text).toBe('legacy');
+    expect(store.getState().translations.s1?.targetText).toBe('舊');
+    expect(store.getState().sessionId).toBeNull();
+    expect(store.getState().sessionEndedAt).toBeNull();
+    expect(store.getState().restoredFromStorage).toBe(true);
+    // Cleanup so subsequent tests start with a fresh slate.
+    localStorage.removeItem('meeting-audio:captions:v2');
+    store.getState().clear();
   });
 });
 

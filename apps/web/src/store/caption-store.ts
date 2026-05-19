@@ -54,8 +54,49 @@ export interface CaptionState {
    * on clear().
    */
   sessionStartMs: number | null;
+  /**
+   * UUID assigned when `beginSession()` is called. Null when no session has
+   * been started in this tab yet (e.g. fresh load showing restored data).
+   * The pair (sessionId, sessionEndedAt) gives downstream consumers a stable
+   * way to distinguish "active session" from "historical record".
+   */
+  sessionId: string | null;
+  /**
+   * Wall-clock ms at which `endSession()` was called. Non-null means the
+   * session is closed; null means either no session ever started OR an
+   * active session is in flight. Persisted, so a graceful Stop survives a
+   * reload as "ended" while a tab-close in the middle of a meeting comes
+   * back as "still open" — useful signal for future analytics, not used by
+   * the current restored-chip UI.
+   */
+  sessionEndedAt: number | null;
+  /**
+   * EPHEMERAL — never persisted. True only at construction when hydration
+   * actually loaded data from storage, and stays true until the user
+   * starts a new session in this tab. Drives the "📂 Restored N segments"
+   * chip without conflating it with the normal stop-then-still-see-data
+   * case (where the user just clicked Stop and obviously knows the data
+   * is theirs).
+   */
+  restoredFromStorage: boolean;
   applyTranscript: (event: TranscriptEvent) => void;
   applyTranslation: (event: TranslationEvent) => void;
+  /**
+   * Begin a fresh session. Clears all in-memory state (segments / live /
+   * translations / sessionStartMs), assigns a new sessionId, resets
+   * sessionEndedAt to null, and clears the restoredFromStorage flag so the
+   * "this is old data" chip dismisses. Called by App.tsx whenever the user
+   * clicks Start (fake/real/offline) — without this, post-Start transcript
+   * events would append into the previous session's history with timestamps
+   * anchored to the old sessionStartMs.
+   */
+  beginSession: () => void;
+  /**
+   * Mark the active session as ended without clearing its data. Called by
+   * App.tsx on Stop. The data remains visible (and persisted) so the user
+   * can still export it after stopping.
+   */
+  endSession: () => void;
   clear: () => void;
 }
 
@@ -73,34 +114,83 @@ export interface CreateCaptionStoreOptions {
 // peaks around 600 KB, well within the 5-10 MB localStorage quota.
 const DEFAULT_MAX_SEGMENTS = 3000;
 const PERSIST_DEBOUNCE_MS = 800;
-const PERSIST_VERSION = 2;
+const PERSIST_VERSION = 3;
+const DEFAULT_PERSIST_KEY = 'meeting-audio:captions:v3';
+// Legacy keys we still attempt to read for backward-compat. The current
+// writer only ever writes to DEFAULT_PERSIST_KEY; once the user re-saves
+// after migration the legacy entry can be deleted.
+const LEGACY_PERSIST_KEYS = ['meeting-audio:captions:v2'] as const;
 
 interface PersistedState {
   v: number;
   segments: CaptionSegment[];
   translations: Record<string, CaptionTranslation>;
   sessionStartMs?: number | null;
+  sessionId?: string | null;
+  sessionEndedAt?: number | null;
   savedAt: string;
 }
 
-function loadPersisted(key: string): {
+interface HydratedSnapshot {
   segments: CaptionSegment[];
   translations: Record<string, CaptionTranslation>;
   sessionStartMs: number | null;
-} | null {
+  sessionId: string | null;
+  sessionEndedAt: number | null;
+}
+
+function decodePersisted(raw: string): HydratedSnapshot | null {
   try {
-    const raw = localStorage.getItem(key);
-    if (!raw) return null;
     const parsed = JSON.parse(raw) as PersistedState;
-    if (parsed.v !== PERSIST_VERSION) return null;
+    // v2 ⇢ v3: missing sessionId / sessionEndedAt default to null. The
+    // restoredFromStorage flag (set by the caller) is what makes the chip
+    // appear, so v2 data lands in the same "you have restored captions"
+    // UX as v3 data that was persisted without a clean Stop.
+    if (parsed.v !== 2 && parsed.v !== PERSIST_VERSION) return null;
     return {
       segments: parsed.segments ?? [],
       translations: parsed.translations ?? {},
       sessionStartMs: parsed.sessionStartMs ?? null,
+      sessionId: parsed.sessionId ?? null,
+      sessionEndedAt: parsed.sessionEndedAt ?? null,
     };
   } catch {
     return null;
   }
+}
+
+function loadPersisted(key: string): HydratedSnapshot | null {
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw) {
+      const decoded = decodePersisted(raw);
+      if (decoded) return decoded;
+    }
+    // Try legacy keys (only when reading the current default key — caller-
+    // supplied custom keys don't get the migration fallback, since they're
+    // typically test-only).
+    if (key === DEFAULT_PERSIST_KEY) {
+      for (const legacy of LEGACY_PERSIST_KEYS) {
+        const legacyRaw = localStorage.getItem(legacy);
+        if (!legacyRaw) continue;
+        const decoded = decodePersisted(legacyRaw);
+        if (decoded) return decoded;
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function makeSessionId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  // Fallback for ancient runtimes / jsdom edge cases. Not cryptographically
+  // strong, but sessionId only needs to be unique within this tab's
+  // lifetime + persist round-trip.
+  return `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 /**
@@ -124,6 +214,8 @@ function makeDebouncedSaver(key: string): (state: CaptionState) => void {
   let lastSegmentsRef: CaptionSegment[] | null = null;
   let lastTranslationsRef: Record<string, CaptionTranslation> | null = null;
   let lastSessionStartMs: number | null | undefined = undefined; // sentinel "never seen"
+  let lastSessionId: string | null | undefined = undefined;
+  let lastSessionEndedAt: number | null | undefined = undefined;
   let lastFlushAt = 0;
   const PERSIST_MAX_INTERVAL_MS = 5_000;
 
@@ -134,12 +226,22 @@ function makeDebouncedSaver(key: string): (state: CaptionState) => void {
     const segmentsChanged = state.segments !== lastSegmentsRef;
     const translationsChanged = state.translations !== lastTranslationsRef;
     const sessionStartChanged = state.sessionStartMs !== lastSessionStartMs;
-    if (!segmentsChanged && !translationsChanged && !sessionStartChanged) {
+    const sessionIdChanged = state.sessionId !== lastSessionId;
+    const sessionEndedAtChanged = state.sessionEndedAt !== lastSessionEndedAt;
+    if (
+      !segmentsChanged &&
+      !translationsChanged &&
+      !sessionStartChanged &&
+      !sessionIdChanged &&
+      !sessionEndedAtChanged
+    ) {
       return;
     }
     lastSegmentsRef = state.segments;
     lastTranslationsRef = state.translations;
     lastSessionStartMs = state.sessionStartMs;
+    lastSessionId = state.sessionId;
+    lastSessionEndedAt = state.sessionEndedAt;
 
     const doFlush = () => {
       timer = null;
@@ -150,6 +252,8 @@ function makeDebouncedSaver(key: string): (state: CaptionState) => void {
           segments: state.segments,
           translations: state.translations,
           sessionStartMs: state.sessionStartMs,
+          sessionId: state.sessionId,
+          sessionEndedAt: state.sessionEndedAt,
           savedAt: new Date().toISOString(),
         };
         localStorage.setItem(key, JSON.stringify(payload));
@@ -234,13 +338,17 @@ export type CaptionStore = StoreApi<CaptionState>;
 
 export function createCaptionStore(options: CreateCaptionStoreOptions = {}): CaptionStore {
   const maxSegments = options.maxSegments ?? DEFAULT_MAX_SEGMENTS;
-  const persistKey = options.persistKey === null ? null : options.persistKey ?? 'meeting-audio:captions:v2';
+  const persistKey = options.persistKey === null ? null : options.persistKey ?? DEFAULT_PERSIST_KEY;
 
   // Hydrate from localStorage on construction so a page reload preserves the meeting.
   const hydrated =
     persistKey && typeof window !== 'undefined' && typeof localStorage !== 'undefined'
       ? loadPersisted(persistKey)
       : null;
+  // restoredFromStorage flips true only when the hydration actually carried
+  // segments — an empty/missing persist payload should not surface the
+  // restored chip on first run.
+  const restoredFromStorage = (hydrated?.segments?.length ?? 0) > 0;
 
   const store = createStore<CaptionState>((set) => ({
     maxSegments,
@@ -249,6 +357,9 @@ export function createCaptionStore(options: CreateCaptionStoreOptions = {}): Cap
     liveTranslation: null,
     translations: hydrated?.translations ?? {},
     sessionStartMs: hydrated?.sessionStartMs ?? null,
+    sessionId: hydrated?.sessionId ?? null,
+    sessionEndedAt: hydrated?.sessionEndedAt ?? null,
+    restoredFromStorage,
 
     applyTranscript: (event) =>
       set((state) => {
@@ -362,6 +473,28 @@ export function createCaptionStore(options: CreateCaptionStoreOptions = {}): Cap
         };
       }),
 
+    beginSession: () =>
+      set({
+        segments: [],
+        livePartial: null,
+        liveTranslation: null,
+        translations: {},
+        sessionStartMs: null,
+        sessionId: makeSessionId(),
+        sessionEndedAt: null,
+        restoredFromStorage: false,
+      }),
+
+    endSession: () =>
+      set((state) => {
+        // Only mark when we actually have a session in flight. If beginSession
+        // was never called (e.g. user clicks Stop without ever clicking Start
+        // — shouldn't happen via UI but defensively safe) the timestamp would
+        // be misleading, so guard against it.
+        if (state.sessionId === null) return {};
+        return { sessionEndedAt: Date.now() };
+      }),
+
     clear: () => {
       set({
         segments: [],
@@ -369,9 +502,19 @@ export function createCaptionStore(options: CreateCaptionStoreOptions = {}): Cap
         liveTranslation: null,
         translations: {},
         sessionStartMs: null,
+        sessionId: null,
+        sessionEndedAt: null,
+        restoredFromStorage: false,
       });
       if (persistKey && typeof localStorage !== 'undefined') {
-        try { localStorage.removeItem(persistKey); } catch { /* noop */ }
+        try {
+          localStorage.removeItem(persistKey);
+          // Also evict legacy keys so the next mount doesn't resurrect them
+          // via the v2-fallback path inside loadPersisted().
+          for (const legacy of LEGACY_PERSIST_KEYS) {
+            localStorage.removeItem(legacy);
+          }
+        } catch { /* noop */ }
       }
     },
   }));
