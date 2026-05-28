@@ -197,6 +197,22 @@ body {
   background: rgba(244, 163, 163, 0.2);
 }
 
+/* ─── System-audio hint bar ──────────────────────────────────────────────────── */
+.app-hint {
+  background: rgba(34, 120, 160, 0.08);
+  border: 1px solid rgba(34, 120, 160, 0.35);
+  color: #7ecfef;
+  padding: 0.5rem 1rem;
+  border-radius: 0.3rem;
+  font-family: var(--font-ui);
+  font-size: 0.8125rem;
+}
+
+.app-hint strong {
+  color: #b3e5f7;
+  font-weight: 600;
+}
+
 /* ─── Mic level ──────────────────────────────────────────────────────────────── */
 .mic-level {
   display: flex;
