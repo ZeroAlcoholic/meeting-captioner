@@ -75,8 +75,8 @@ const ALL_SCENARIO_OPTIONS: ScenarioOption[] = [
     id: 'online_meeting_box',
     label: 'Online Meeting Caption Box',
     labelZh: '線上會議旁聽',
-    description: 'Browser tab audio or Windows loopback. Microphone off by default.',
-    descriptionZh: '瀏覽器分頁音訊或 Windows 系統音效。預設關閉麥克風。',
+    description: 'Capture Teams / Zoom / Meet audio via screen share — no extra software needed.',
+    descriptionZh: '透過螢幕分享擷取 Teams / Zoom / Meet 音訊，無需額外安裝。',
     enabled: true,
   },
   {

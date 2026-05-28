@@ -7,6 +7,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { config } from './config.js';
 import { registerHealthz } from './routes/healthz.js';
 import { registerSession } from './routes/session.js';
+import { registerTranslate } from './routes/translate.js';
 
 // pino-pretty is great for dev console output but causes trouble in the
 // bundled slim release (pino loads it via a worker thread that resolves
@@ -47,6 +48,7 @@ export async function buildApp(): Promise<FastifyInstance> {
 
   await registerHealthz(app);
   await registerSession(app);
+  await registerTranslate(app);
 
   // Slim-distribution mode: when WEB_DIST_PATH is set, serve apps/web/dist as
   // static files so the entire stack runs from one process on one port.
@@ -72,7 +74,7 @@ export async function buildApp(): Promise<FastifyInstance> {
           return reply.code(404).send({ error: 'Not found' });
         }
         const urlPath = req.url.split('?', 1)[0] ?? req.url;
-        if (urlPath.startsWith('/session') || urlPath.startsWith('/healthz')) {
+        if (urlPath.startsWith('/session') || urlPath.startsWith('/healthz') || urlPath.startsWith('/translate')) {
           return reply.code(404).send({ error: 'Not found' });
         }
         const lastSegment = urlPath.split('/').pop() ?? '';

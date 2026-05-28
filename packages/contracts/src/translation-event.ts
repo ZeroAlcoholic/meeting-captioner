@@ -18,6 +18,7 @@ export const TranslationEvent = z.object({
   sourceLanguage: LanguageTag,
   targetLanguage: LanguageTag,
   updatedAt: Iso8601,
+  confidence: z.number().min(0).max(1).optional(),
 });
 
 export type TranslationEvent = z.infer<typeof TranslationEvent>;

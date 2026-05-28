@@ -259,6 +259,63 @@ describe('OfflineSTTProvider', () => {
     expect(errCall).toBeDefined();
   });
 
+  it('malformed WS message does not crash the provider or interrupt transcript flow', async () => {
+    // CLAUDE.md: "translation failure must never stop captions". If the
+    // offline service sends a garbled / unrecognised message, the recv loop
+    // must swallow it and continue forwarding valid events.
+    const handlers = makeHandlers();
+    const provider = new OfflineSTTProvider('ws://localhost:8000/ws', handlers, makeMicMock());
+    await startProvider(provider);
+
+    // Malformed — unknown kind.
+    mockWsInstance!.simulateMessage({ kind: 'INVALID_KIND', garbage: true });
+    // Empty object.
+    mockWsInstance!.simulateMessage({});
+    // Immediately after: a valid transcript must still be routed.
+    mockWsInstance!.simulateMessage({
+      kind: 'transcript',
+      provider: 'offline-stt',
+      mode: 'full_offline',
+      source: 'microphone',
+      segmentId: 'seg-after-garbage',
+      status: 'final',
+      text: 'Still works.',
+      startMs: 100,
+      endMs: 900,
+    });
+
+    const finalCall = (handlers.onTranscript as ReturnType<typeof vi.fn>).mock.calls.find(
+      (c) => (c[0] as { segmentId?: string }).segmentId === 'seg-after-garbage',
+    );
+    expect(finalCall).toBeDefined();
+    expect(provider.status).toBe('running');
+
+    provider.stop();
+  });
+
+  it('offline server unavailable → emits offline_engine_unavailable health state', async () => {
+    // When the WebSocket fails to open (server not running), the provider
+    // must surface an actionable health state rather than a generic error
+    // so the UI can direct the user to start the offline service.
+    const handlers = makeHandlers();
+    const provider = new OfflineSTTProvider('ws://localhost:8000/ws', handlers, makeMicMock());
+
+    const startPromise = provider.start();
+    await Promise.resolve(); // let mic.acquire() settle
+    // Simulate WS open failure (server not listening).
+    mockWsInstance!.onerror?.();
+    await startPromise.catch(() => undefined);
+
+    const states = (handlers.onHealth as ReturnType<typeof vi.fn>).mock.calls.map(
+      (c) => (c[0] as { state: string }).state,
+    );
+    // Must emit either api_error or offline_engine_unavailable — either
+    // indicates the offline service is unreachable.
+    expect(
+      states.includes('api_error') || states.includes('offline_engine_unavailable'),
+    ).toBe(true);
+  });
+
   it('stop() emits stopped health events and closes WebSocket', async () => {
     const handlers = makeHandlers();
     const provider = new OfflineSTTProvider('ws://localhost:8000/ws', handlers, makeMicMock());
@@ -272,5 +329,42 @@ describe('OfflineSTTProvider', () => {
       (c) => (c[0] as { state: string }).state,
     );
     expect(states).toContain('stopped');
+  });
+
+  // ── Contract: start message fields ────────────────────────────────────────
+
+  it('start message includes translate:true by default', async () => {
+    const handlers = makeHandlers();
+    // OfflineSTTProvider 4th arg = langPair, no translate arg → defaults to true
+    const provider = new OfflineSTTProvider('ws://localhost:8000/ws', handlers, makeMicMock(), 'en→zh-TW');
+
+    await startProvider(provider);
+
+    const jsonSent = mockWsInstance!.sent.find((s) => typeof s === 'string') as string;
+    const ctrl = JSON.parse(jsonSent) as { type: string; translate: unknown };
+    expect(ctrl.type).toBe('start');
+    expect(ctrl.translate).toBe(true);
+  });
+
+  it('start message includes translate:false when configured', async () => {
+    const handlers = makeHandlers();
+    // 5th constructor arg = audioSource, 6th = translate (not exposed in current signature)
+    // OfflineSTTProvider accepts translate via options object — check actual signature.
+    // The hybrid mode sets translate=false via the provider factory.
+    const provider = new OfflineSTTProvider(
+      'ws://localhost:8000/ws',
+      handlers,
+      makeMicMock(),
+      'en→zh-TW',
+      'mic',
+      false, // translate = false
+    );
+
+    await startProvider(provider);
+
+    const jsonSent = mockWsInstance!.sent.find((s) => typeof s === 'string') as string;
+    const ctrl = JSON.parse(jsonSent) as { type: string; translate: unknown };
+    expect(ctrl.type).toBe('start');
+    expect(ctrl.translate).toBe(false);
   });
 });

@@ -193,6 +193,21 @@ describe('captionStore.applyTranslation', () => {
     expect(store.getState().liveTranslation).toBeNull();
     expect(store.getState().translations['s1']?.targetText).toBe('草稿');
   });
+
+  it('stores confidence from a translation event with confidence field', () => {
+    const store = createCaptionStore({ persistKey: null });
+    store.getState().applyTranslation({
+      ...translation('s1', 'final', '保費'),
+      confidence: 0.82,
+    });
+    expect(store.getState().translations['s1']?.confidence).toBeCloseTo(0.82);
+  });
+
+  it('stores undefined confidence when translation event has no confidence field', () => {
+    const store = createCaptionStore({ persistKey: null });
+    store.getState().applyTranslation(translation('s1', 'final', '保費'));
+    expect(store.getState().translations['s1']?.confidence).toBeUndefined();
+  });
 });
 
 describe('captionStore.clear', () => {
@@ -314,6 +329,111 @@ describe('captionStore persistence migration', () => {
     // Cleanup so subsequent tests start with a fresh slate.
     localStorage.removeItem('meeting-audio:captions:v2');
     store.getState().clear();
+  });
+});
+
+describe('captionStore: provider switch without transcript loss', () => {
+  it('segments survive a provider restart that does NOT call beginSession (audio-source switch path)', () => {
+    // CLAUDE.md: "Mode switching must preserve existing transcript history
+    // unless the user explicitly clears it." The App.tsx auto-restart path
+    // (audio source / toggle change mid-session) skips beginSession() so the
+    // existing history is preserved — this test guards that contract at the
+    // store level.
+    const store = createCaptionStore({ persistKey: null });
+    store.getState().beginSession();
+    store.getState().applyTranscript(
+      transcript({ segmentId: 's1', status: 'final', text: 'before switch', startMs: 0 }),
+    );
+    // Provider restarts without calling beginSession() — new provider feeds
+    // events into the same store instance.
+    store.getState().applyTranscript(
+      transcript({ segmentId: 's2', status: 'final', text: 'after switch', startMs: 1000 }),
+    );
+    const segs = store.getState().segments;
+    expect(segs).toHaveLength(2);
+    expect(segs[0]?.text).toBe('before switch');
+    expect(segs[1]?.text).toBe('after switch');
+  });
+
+  it('beginSession clears history (explicit new session — not a provider restart)', () => {
+    const store = createCaptionStore({ persistKey: null });
+    store.getState().applyTranscript(
+      transcript({ segmentId: 's1', status: 'final', text: 'old session', startMs: 0 }),
+    );
+    store.getState().beginSession();
+    expect(store.getState().segments).toHaveLength(0);
+  });
+});
+
+describe('captionStore: translation failure isolation', () => {
+  it('orphan translation (no matching segment) does not throw or corrupt transcript history', () => {
+    // CLAUDE.md: "translation failure must never stop captions". If a
+    // translation event arrives for a segmentId that doesn't exist in the
+    // store (e.g., the segment was already pruned or the event is stale),
+    // the call must be a no-op for the caption history.
+    const store = createCaptionStore({ persistKey: null });
+    store.getState().applyTranscript(
+      transcript({ segmentId: 's1', status: 'final', text: 'caption intact', startMs: 0 }),
+    );
+    expect(() => {
+      store.getState().applyTranslation(translation('nonexistent-seg', 'final', ''));
+    }).not.toThrow();
+    expect(store.getState().segments).toHaveLength(1);
+    expect(store.getState().segments[0]?.text).toBe('caption intact');
+  });
+
+  it('empty-text translation does not corrupt the liveTranslation slot', () => {
+    const store = createCaptionStore({ persistKey: null });
+    store.getState().applyTranscript(
+      transcript({ segmentId: 's1', status: 'partial', text: 'live', startMs: 0 }),
+    );
+    store.getState().applyTranslation(translation('s1', 'draft', ''));
+    // liveTranslation should be set (even empty text is a valid draft)
+    expect(store.getState().liveTranslation).not.toBeNull();
+    // Transcript is still in livePartial, not corrupted.
+    expect(store.getState().livePartial?.text).toBe('live');
+  });
+});
+
+describe('captionStore: long-running memory stability', () => {
+  it('segment count stays bounded under sustained load', () => {
+    // Guard: over a 90-minute meeting the ring buffer must never grow
+    // past maxSegments regardless of how many events arrive. 500 segments
+    // is well above the 3000-segment default but we test with a small cap
+    // to keep the test fast and the intent clear.
+    const maxSegments = 100;
+    const store = createCaptionStore({ maxSegments, persistKey: null });
+    const burst = 500;
+    for (let i = 0; i < burst; i++) {
+      store.getState().applyTranscript(
+        transcript({ segmentId: `s${i}`, status: 'final', text: `w${i}`, startMs: i * 100 }),
+      );
+    }
+    const segs = store.getState().segments;
+    expect(segs.length).toBe(maxSegments);
+    // The retained window must be the NEWEST maxSegments, not the oldest.
+    expect(segs[0]?.segmentId).toBe(`s${burst - maxSegments}`);
+    expect(segs[segs.length - 1]?.segmentId).toBe(`s${burst - 1}`);
+  });
+
+  it('translation map is pruned in sync with the segment ring buffer (no orphan entries)', () => {
+    // If translations[] grows without bound alongside segments[], it becomes
+    // a separate memory leak. Guard that pruning removes the translation entry
+    // when its segment is evicted from the ring buffer.
+    const maxSegments = 3;
+    const store = createCaptionStore({ maxSegments, persistKey: null });
+    for (let i = 0; i < 5; i++) {
+      store.getState().applyTranscript(
+        transcript({ segmentId: `s${i}`, status: 'final', text: `t${i}`, startMs: i * 100 }),
+      );
+      store.getState().applyTranslation(translation(`s${i}`, 'final', `譯${i}`));
+    }
+    // s0 and s1 were evicted from segments[].
+    expect(store.getState().segments).toHaveLength(3);
+    expect(store.getState().translations['s0']).toBeUndefined();
+    expect(store.getState().translations['s1']).toBeUndefined();
+    // s4 (newest) must still be accessible.
+    expect(store.getState().translations['s4']?.targetText).toBe('譯4');
   });
 });
 

@@ -22,6 +22,7 @@ export interface CaptionTranslation {
   sourceLanguage: string;
   targetLanguage: string;
   updatedAt: string;
+  confidence?: number;
 }
 
 export interface CaptionState {
@@ -292,7 +293,7 @@ function eventToSegment(event: TranscriptEvent): CaptionSegment {
 }
 
 function eventToTranslation(event: TranslationEvent): CaptionTranslation {
-  return {
+  const t: CaptionTranslation = {
     sourceSegmentId: event.sourceSegmentId,
     provider: event.provider,
     status: event.status,
@@ -302,6 +303,8 @@ function eventToTranslation(event: TranslationEvent): CaptionTranslation {
     targetLanguage: event.targetLanguage,
     updatedAt: event.updatedAt,
   };
+  if (event.confidence !== undefined) t.confidence = event.confidence;
+  return t;
 }
 
 /**
@@ -428,11 +431,11 @@ export function createCaptionStore(options: CreateCaptionStoreOptions = {}): Cap
 
         // Prune translations whose source segments dropped out of the buffer.
         // Long-running sessions hit the maxSegments cap; dropped segments
-        // leave their translations behind. The old "<" comparison missed the
-        // common case where both are 500 but a segment was just dropped —
-        // so we now prune whenever the cap is at-or-above maxSegments.
+        // leave their translations behind. Check against the OLD buffer length
+        // (state.segments) so we only run when the buffer was already full —
+        // avoiding an unnecessary O(n) pass when we're merely filling up.
         const tCount = Object.keys(translations).length;
-        if (tCount > segments.length || segments.length >= state.maxSegments) {
+        if (tCount > segments.length || state.segments.length >= state.maxSegments) {
           const liveIds = new Set(segments.map((s) => s.segmentId));
           const next: Record<string, CaptionTranslation> = {};
           for (const id of liveIds) {

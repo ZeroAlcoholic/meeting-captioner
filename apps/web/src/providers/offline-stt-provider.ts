@@ -60,6 +60,7 @@ export class OfflineSTTProvider implements CaptionProvider {
     mic?: AudioSource,
     private readonly langPair: string = 'en→zh-TW',
     private readonly audioSource: 'mic' | 'system' = 'mic',
+    private readonly translate: boolean = true,
   ) {
     this.mic = mic ?? new MicrophoneAudioProvider();
   }
@@ -110,7 +111,7 @@ export class OfflineSTTProvider implements CaptionProvider {
       }, 15000);
 
       ws.onopen = () => {
-        ws.send(JSON.stringify({ type: 'start', langPair: this.langPair, source: this.audioSource }));
+        ws.send(JSON.stringify({ type: 'start', langPair: this.langPair, source: this.audioSource, translate: this.translate }));
         clearTimeout(timeout);
         this.reconnectAttempts = 0;
         resolve();

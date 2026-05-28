@@ -8,6 +8,7 @@ import { ExportMenu } from './components/ExportMenu.js';
 import { RestoredSessionChip } from './components/RestoredSessionChip.js';
 import { useOpenAIRealtime } from './providers/use-openai-realtime.js';
 import { useOfflineSTT } from './providers/use-offline-stt.js';
+import { useHybridMode } from './providers/use-hybrid-mode.js';
 import { useFakeReplay } from './providers/use-fake-replay.js';
 import { useSettingsStore } from './settings/use-settings-store.js';
 import { captionStore } from './store/use-caption-store.js';
@@ -17,6 +18,7 @@ export function App() {
   const fake = useFakeReplay();
   const realtime = useOpenAIRealtime();
   const offline = useOfflineSTT();
+  const hybrid = useHybridMode();
   const modeId = useSettingsStore((s) => s.modeId);
   const audioSource = useSettingsStore((s) => s.audioSource);
   const setAudioSource = useSettingsStore((s) => s.setAudioSource);
@@ -30,12 +32,13 @@ export function App() {
   const settingsToggleRef = useRef<HTMLButtonElement>(null);
 
   const isRunning =
-    fake.status === 'running' || realtime.status === 'running' || offline.status === 'running';
-  const activeError = fake.error ?? realtime.error ?? offline.error;
+    fake.status === 'running' || realtime.status === 'running' || offline.status === 'running' || hybrid.status === 'running';
+  const activeError = fake.error ?? realtime.error ?? offline.error ?? hybrid.error;
 
   const handleStartFake = () => {
     realtime.stop();
     offline.stop();
+    hybrid.stop();
     // Reset caption store to a fresh session — without this, fake-replay
     // events would append into any restored history with timestamps anchored
     // to the previous sessionStartMs. beginSession() also clears the
@@ -47,6 +50,7 @@ export function App() {
   const handleStartReal = useCallback(async (): Promise<boolean> => {
     fake.stop();
     offline.stop();
+    hybrid.stop();
     // Always drain any in-flight session into the cost accumulators before
     // starting anew. stopSession() is idempotent (no-op when sessionStartAt
     // is null), so this is safe for both the cold-start and the auto-
@@ -74,7 +78,7 @@ export function App() {
     const ok = await realtime.start();
     if (ok) startSession();
     return ok;
-  }, [fake, offline, realtime, startSession, stopSession]);
+  }, [fake, offline, hybrid, realtime, startSession, stopSession]);
 
   // ─── Auto-restart on mid-session source-transcript toggle ─────────────────
   // The upstream OpenAI session config is fixed at /session creation, so a
@@ -137,14 +141,24 @@ export function App() {
   const handleStartOffline = () => {
     fake.stop();
     realtime.stop();
+    hybrid.stop();
     captionStore.getState().beginSession();
     void offline.start();
+  };
+
+  const handleStartHybrid = () => {
+    fake.stop();
+    realtime.stop();
+    offline.stop();
+    captionStore.getState().beginSession();
+    void hybrid.start();
   };
 
   const handleStop = () => {
     if (fake.status === 'running') fake.stop();
     if (realtime.status === 'running') { realtime.stop(); stopSession(); }
     if (offline.status === 'running') offline.stop();
+    if (hybrid.status === 'running') hybrid.stop();
     // Mark the session as cleanly ended. Data stays in memory + persisted so
     // the user can still hit Export after Stop — endSession() is a metadata
     // flag, not a clear.
@@ -159,8 +173,13 @@ export function App() {
   const showOfflineButton = !IS_ONLINE_ONLY && modeId === 'full_offline';
 
   const offlineButtonDisabled = !offline.hasWhisper || isRunning;
+  const whisperLabel = (s: string | null) => {
+    if (s === null) return 'checking…';
+    if (s === 'model_loading') return 'loading model…';
+    return s;
+  };
   const offlineButtonTitle = !offline.hasWhisper
-    ? `WhisperLive: ${offline.whisperStatus ?? 'checking…'}`
+    ? `WhisperLive: ${whisperLabel(offline.whisperStatus)}`
     : undefined;
 
   return (
@@ -176,10 +195,12 @@ export function App() {
           <span className="app-status" data-status={
             fake.status === 'running' ? 'running' :
             offline.status === 'running' ? 'running' :
+            hybrid.status === 'running' ? 'running' :
             realtime.status === 'running' ? 'running' : 'idle'
           }>
             {fake.status === 'running' ? 'fake' :
              offline.status === 'running' ? 'offline' :
+             hybrid.status === 'running' ? 'hybrid' :
              realtime.status === 'running' ? realtime.status : 'idle'}
           </span>
           {/* Audio-source chip is visible in both builds now — the Online
@@ -216,11 +237,14 @@ export function App() {
           {showHybridButton && (
             <button
               type="button"
-              disabled
-              title="Hybrid Privacy — local STT + online translation, coming in P4"
+              onClick={handleStartHybrid}
+              disabled={!hybrid.hasWhisper || isRunning}
+              title={!hybrid.hasWhisper
+                ? `WhisperLive: ${whisperLabel(hybrid.whisperStatus)}`
+                : 'Hybrid Privacy — local STT + online translation'}
               data-testid="start-hybrid"
             >
-              🔀 Hybrid (P4)
+              {hybrid.hasWhisper ? '🔀 Start Hybrid' : `🔀 Whisper: ${whisperLabel(hybrid.whisperStatus)}`}
             </button>
           )}
           {showOfflineButton && (
@@ -231,7 +255,7 @@ export function App() {
               title={offlineButtonTitle}
               data-testid="start-offline"
             >
-              {offline.hasWhisper ? '🖥 Start Offline' : `🖥 Whisper: ${offline.whisperStatus ?? '…'}`}
+              {offline.hasWhisper ? '🖥 Start Offline' : `🖥 Whisper: ${whisperLabel(offline.whisperStatus)}`}
             </button>
           )}
           <ExportMenu disabled={isRunning} />
@@ -277,6 +301,12 @@ export function App() {
               Retry
             </button>
           )}
+        </div>
+      )}
+
+      {audioSource === 'system' && !isRunning && !activeError && (
+        <div className="app-hint" role="note" data-testid="system-audio-hint">
+          🔊 Share dialog tip: select <strong>Entire Screen</strong> → tick <strong>Share system audio</strong> → click Share
         </div>
       )}
 
