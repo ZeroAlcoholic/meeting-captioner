@@ -109,6 +109,18 @@ export function useOpenAIRealtime(): UseOpenAIRealtime {
 
     const { langPair, includeSourceTranscript, micDistance, audioSource } = settingsStore.getState();
     const handlers = createStoreBoundHandlers();
+    // Intercept health failure events so audio-layer errors (mic permission
+    // denied, device disconnect) and transport errors surface in the React
+    // error banner. Without this, provider.start() returns false silently
+    // when the mic is denied — the user sees the Start button revert with
+    // no explanation. setError(null) at the top of start() clears on retry.
+    const origOnHealth = handlers.onHealth;
+    handlers.onHealth = (ev) => {
+      origOnHealth(ev);
+      if (ev.state === 'failed' && ev.message) setError(ev.message);
+      if (ev.state === 'api_error' && ev.message) setError(ev.message);
+      if (ev.state === 'no_audio_track' && ev.message) setError(ev.message);
+    };
     handlersRef.current = handlers;
     // Branch on the user-chosen audio source. 'system' uses getDisplayMedia
     // for browser tab / system-audio capture (Teams/Zoom in another window);

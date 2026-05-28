@@ -791,6 +791,83 @@ describe('OpenAIRealtimeProvider', () => {
     expect(provider.status).toBe('stopped');
   });
 
+  it('stale-data detector fires renewSession after 30s DC silence with 100+ audio-active samples', async () => {
+    // Regression guard: a live OpenAI session can wedge silently — the peer
+    // connection stays 'connected' but no DataChannel events arrive for
+    // minutes. The stale detector catches this by counting cumulative
+    // audio-active level-poll ticks (100 × 100ms = ~10s of speech evidence)
+    // since the last DC event, and fires a renewal when BOTH conditions hold:
+    //   dcGap > 30s  AND  audioActiveSamplesSinceDc >= 100
+    // The fake analyser returns 0.05 amplitude ≈ -26 dB, above the 'close'
+    // threshold of -40 dB, so every 100ms tick counts as audio-active.
+    vi.useFakeTimers();
+    const fetchMock = vi.fn()
+      // Initial bring-up: /session OK + SDP OK
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ client_secret: { value: 'tok' } }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(new Response('mock-answer-sdp', { status: 200 }))
+      // Stale-triggered renewSession → /session fails (we only need evidence it was called)
+      .mockResolvedValue(new Response('gone', { status: 503 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { handlers, healthEvents } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+    await provider.start();
+    expect(provider.status).toBe('running');
+
+    // No DC events from this point — wedged session simulation.
+    // After 35s: dcGap=35s (>30s) AND audioActiveSamplesSinceDc≈350 (≥100).
+    await vi.advanceTimersByTimeAsync(35_000);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const degraded = healthEvents.find(
+      (e) =>
+        e.component === 'transport' &&
+        e.state === 'degraded' &&
+        e.message?.includes('Wedged'),
+    );
+    expect(degraded).toBeDefined();
+    expect(degraded?.message).toMatch(/no DC events while audio active/);
+    // Renewal fetch must have been attempted (3rd fetch = renewal /session call).
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+
+    provider.stop();
+  });
+
+  it('stale-data detector resets on each DC event — no false positive while events flow', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ client_secret: { value: 'tok' } }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(new Response('mock-answer-sdp', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { handlers, healthEvents } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+    await provider.start();
+
+    // Advance 29s — just below the 30s DC silence threshold.
+    await vi.advanceTimersByTimeAsync(29_000);
+    // Fire a DC event to reset both lastDcEventAt and audioActiveSamplesSinceDc.
+    fireDCMessage(JSON.stringify({ type: 'session.input_transcript.delta', delta: 'hello' }));
+    // Advance another 29s — detector clock restarts from the DC event; no fire.
+    await vi.advanceTimersByTimeAsync(29_000);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const degraded = healthEvents.find(
+      (e) => e.component === 'transport' && e.state === 'degraded',
+    );
+    expect(degraded).toBeUndefined();
+    // Only initial bring-up fetches — no stale-triggered renewal.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    provider.stop();
+  });
+
   it('audio level polling emits AudioLevelEvents at ~100ms intervals', async () => {
     vi.useFakeTimers();
     mockFetch();
@@ -804,6 +881,123 @@ describe('OpenAIRealtimeProvider', () => {
     expect(audioLevels[0]!.source).toBe('microphone');
     expect(typeof audioLevels[0]!.rmsDb).toBe('number');
     expect(typeof audioLevels[0]!.peakDb).toBe('number');
+
+    provider.stop();
+  });
+
+  // ── B2: Token expiration pre-check ────────────────────────────────────────
+
+  it('token with < 60s remaining → skips SDP, goes to renewSession immediately', async () => {
+    // Guard: if the /session broker returns a token that is already near
+    // expiry (clock drift, cached response, or early-expiry policy), the
+    // provider must NOT attempt the SDP exchange — that would succeed only
+    // to have the datachannel die within the minute. Instead it must renew.
+    const nearlyExpired = Math.floor(Date.now() / 1000) + 30; // 30 s from now
+    vi.stubGlobal(
+      'fetch',
+      vi.fn()
+        // Initial /session — token expires in 30 s (< 60 s threshold)
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({ client_secret: { value: 'tok', expires_at: nearlyExpired } }),
+            { status: 200 },
+          ),
+        )
+        // Renewal /session attempt — fail so the test stays bounded
+        .mockResolvedValue(new Response('rate limited', { status: 429 })),
+    );
+    const { handlers, healthEvents } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+
+    // start() should not throw; it silently escalates to renewSession
+    await provider.start().catch(() => undefined);
+
+    // Must emit 'reconnecting' for the expiry-triggered renewal.
+    // transport:connected must NOT appear (SDP was never attempted).
+    // audio:connected from mic acquisition is still expected and OK.
+    expect(healthEvents.some((e) => e.state === 'reconnecting')).toBe(true);
+    expect(
+      healthEvents.some((e) => e.component === 'transport' && e.state === 'connected'),
+    ).toBe(false);
+
+    provider.stop();
+  });
+
+  it('token with > 60s remaining → proceeds with SDP exchange normally', async () => {
+    const validToken = Math.floor(Date.now() / 1000) + 3600; // 1 h from now
+    vi.stubGlobal(
+      'fetch',
+      vi.fn()
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({ client_secret: { value: 'tok', expires_at: validToken } }),
+            { status: 200 },
+          ),
+        )
+        .mockResolvedValueOnce(new Response('mock-answer-sdp', { status: 200 })),
+    );
+    const { handlers, healthEvents } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+
+    await provider.start();
+
+    expect(healthEvents.some((e) => e.state === 'connected')).toBe(true);
+    provider.stop();
+  });
+
+  // ── B4: silence_detected ──────────────────────────────────────────────────
+
+  it('silence_detected emitted after 30s of sub-threshold audio; connected emitted when speech resumes', async () => {
+    // The fake analyser returns amplitude 0.05 ≈ -26 dB, which is ABOVE the
+    // 'close' mic threshold of -40 dB. To simulate silence we swap it to a
+    // near-zero amplitude so no tick counts as audio-active.
+    vi.useFakeTimers();
+
+    const silentBuf = new Float32Array(2048).fill(0.0001); // ~-80 dB: silent
+    const activeBuf = new Float32Array(2048).fill(0.05);   // ~-26 dB: active
+    let currentBuf = activeBuf;
+
+    const silentAnalyser = {
+      fftSize: 2048,
+      getFloatTimeDomainData: (out: Float32Array) => out.set(currentBuf),
+    } as unknown as AnalyserNode;
+    vi.stubGlobal('AudioContext', makeFakeAudioContext(silentAnalyser));
+
+    mockFetch();
+    const { handlers, healthEvents } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+    await provider.start();
+
+    // t=0: audio is active, register lastAudioActiveAt
+    await vi.advanceTimersByTimeAsync(200);
+
+    // Switch to silence
+    currentBuf = silentBuf;
+
+    // Advance 30.1s — silence_detected should fire (30_000ms is the threshold,
+    // need strictly more than that since the condition is >)
+    await vi.advanceTimersByTimeAsync(30_100);
+
+    const silenceEvents = healthEvents.filter(
+      (e) => e.component === 'audio' && e.state === 'silence_detected',
+    );
+    expect(silenceEvents).toHaveLength(1);
+
+    // Resume speaking — connected should fire
+    currentBuf = activeBuf;
+    await vi.advanceTimersByTimeAsync(200);
+
+    const resumeEvents = healthEvents.filter(
+      (e) => e.component === 'audio' && e.state === 'connected',
+    );
+    // At least one connected after silence_detected
+    const resumeIdx = healthEvents.findLastIndex((e) => e.state === 'connected');
+    const silenceIdx = healthEvents.findLastIndex((e) => e.state === 'silence_detected');
+    expect(resumeIdx).toBeGreaterThan(silenceIdx);
+
+    // silence_detected must not fire again while speaking
+    const silenceCount = healthEvents.filter((e) => e.state === 'silence_detected').length;
+    expect(silenceCount).toBe(1);
 
     provider.stop();
   });

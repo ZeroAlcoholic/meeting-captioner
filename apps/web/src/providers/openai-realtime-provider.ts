@@ -82,7 +82,7 @@ const LANG_PAIR_META: Record<string, { src: string; tgt: string }> = {
 const DEFAULT_META = { src: 'en', tgt: 'zh-TW' };
 
 interface SessionResponse {
-  client_secret: { value: string };
+  client_secret: { value: string; expires_at?: number };
   session_renewal_recommended_ms?: number;
 }
 
@@ -124,6 +124,11 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
   // that reset on every >1 s pause and consequently never fired during
   // real meeting speech (which has natural micro-pauses every few seconds).
   private audioActiveSamplesSinceDc = 0;
+  // Silence-detection state. Emits 'silence_detected' after the user has
+  // been quiet for SILENCE_DETECT_MS; emits 'connected' when speech resumes.
+  // Guards with silenceEmitted so we only emit once per silence window, not
+  // on every 100 ms tick while the user is still quiet.
+  private silenceEmitted = false;
   // Diagnostic counters — surfaced via periodic console dump so silent
   // WebRTC wedges leave forensic evidence in DevTools.
   private dcEventCount = 0;
@@ -246,6 +251,21 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       this.renewDelayMs =
         sessionData.session_renewal_recommended_ms ?? DEFAULT_SESSION_RENEW_MS;
 
+      // Guard against an already-expired or imminently-expiring token.
+      // expires_at is Unix seconds; if less than 60 s remain, skip SDP
+      // and go straight to renewSession() which will fetch a fresh token.
+      // This handles clock drift and the edge case where a cached /session
+      // response is replayed after the tab sleeps through the 25-min mark.
+      if (client_secret.expires_at !== undefined) {
+        const remainingMs = client_secret.expires_at * 1000 - Date.now();
+        if (remainingMs < 60_000) {
+          this.emitHealth('transport', 'reconnecting', 'Session token near expiry — refreshing before connect');
+          this.setStatus('idle');
+          void this.renewSession();
+          return;
+        }
+      }
+
       // Configure ICE servers so corporate / strict-firewall networks can
       // gather server-reflexive candidates and complete the WebRTC handshake.
       // Browsers' built-in default works on home/open Wi-Fi but typically
@@ -267,8 +287,8 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       dc.onmessage = (ev: MessageEvent<string>) => {
         try {
           this.handleDCEvent(JSON.parse(ev.data) as DCEvent);
-        } catch {
-          // malformed event — ignore
+        } catch (err) {
+          console.warn('[openai-rt] DC event error:', err, 'raw:', ev.data.slice(0, 200));
         }
       };
       stream.getTracks().forEach((t) => this.pc!.addTrack(t, stream));
@@ -307,6 +327,7 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       this.lastDcEventAt = Date.now();
       this.lastAudioActiveAt = 0;
       this.audioActiveSamplesSinceDc = 0;
+      this.silenceEmitted = false;
 
       this.startLevelPolling();
       this.scheduleRenewal(this.renewDelayMs);
@@ -684,7 +705,7 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
   private newSegment(): void {
     this.inputAcc = '';
     this.outputAcc = '';
-    this.currentSegmentId = `seg-${Date.now()}`;
+    this.currentSegmentId = crypto.randomUUID();
     this.startMs = Date.now();
   }
 
@@ -720,7 +741,28 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       if (rmsDb > audioActiveDb) {
         this.lastAudioActiveAt = nowMs;
         this.audioActiveSamplesSinceDc += 1;
+        // Speech resumed after silence — recover the health state.
+        if (this.silenceEmitted) {
+          this.silenceEmitted = false;
+          this.emitHealth('audio', 'connected');
+        }
       }
+
+      // Silence detection: user has not spoken for SILENCE_DETECT_MS.
+      // Only fire once per silence window (silenceEmitted gate) and only
+      // after we have observed at least one active audio sample since the
+      // session started (lastAudioActiveAt > 0) — so we don't alarm on the
+      // brief quiet window between mic grant and the user's first word.
+      const SILENCE_DETECT_MS = 30_000;
+      if (
+        !this.silenceEmitted &&
+        this.lastAudioActiveAt > 0 &&
+        nowMs - this.lastAudioActiveAt > SILENCE_DETECT_MS
+      ) {
+        this.silenceEmitted = true;
+        this.emitHealth('audio', 'silence_detected');
+      }
+
       // Fire when: DC has been silent past the threshold AND we have at least
       // ~10 s of cumulative audio activity since that silence began (100
       // samples × 100 ms tick = 10 s). The cumulative-evidence check is what
