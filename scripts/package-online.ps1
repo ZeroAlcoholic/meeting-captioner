@@ -9,8 +9,7 @@
 #   ├── web/                          (apps/web built with VITE_DEPLOYMENT_MODE=online)
 #   ├── start.bat                     (Windows launcher; verifies Node 22+)
 #   ├── start.sh                      (Linux/macOS launcher)
-#   ├── .env.example                  (template — user copies to .env)
-#   └── README.md                     (3-step setup)
+#   └── README.md                     (3-step setup; system env vars only — no .env)
 #
 # Requires: pnpm 9+, Node 22+. Does NOT touch services/offline or any model files.
 

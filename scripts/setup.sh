@@ -88,13 +88,14 @@ if ! have uv; then
 fi
 have uv && color_ok "uv $(uv --version)"
 
-# --- .env ---
-step 'Configuring .env'
-if [[ ! -f .env ]]; then
-  cp .env.example .env
-  color_ok '.env created from .env.example (edit to add OPENAI_API_KEY for P2+)'
+# --- Environment variables (strict system-env-only policy) ---
+step 'Checking environment variables'
+if [[ -n "${OPENAI_API_KEY:-}" ]]; then
+  color_ok "OPENAI_API_KEY is set (${#OPENAI_API_KEY} chars) — required for Online mode"
 else
-  color_ok '.env already exists (left untouched)'
+  color_warn 'OPENAI_API_KEY not set. Required for Online mode. To persist:'
+  color_warn '  echo '"'"'export OPENAI_API_KEY="sk-proj-..."'"'"' >> ~/.bashrc   # or ~/.zshrc'
+  color_warn 'See README "Environment Variables" for the full list.'
 fi
 
 # --- pnpm install ---

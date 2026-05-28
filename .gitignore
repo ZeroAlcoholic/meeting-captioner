@@ -25,10 +25,11 @@ venv/
 .mypy_cache/
 
 # --- Environment / Secrets ---
+# Strict policy: NO .env files of any kind. All env vars must come from the
+# user's system environment (setx on Windows, export on Linux/macOS).
+# See README "Environment Variables" section.
 .env
-.env.local
-.env.*.local
-!.env.example
+.env.*
 
 # --- ML Models / Audio Data ---
 models/

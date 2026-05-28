@@ -41,6 +41,6 @@ the content here — link to it.
 ## Operational Reminders for Agents
 
 - Always run `scripts/doctor` after setup changes; it will report mismatched versions or stale lockfiles.
-- Default ports: web `5173`, online `8787`, offline `8000`. Override via `.env`.
-- Never commit `.env`. Use `.env.example` as the schema.
+- Default ports: web `5173`, online `8787`, offline `8000`. Override via system env vars (e.g., `ONLINE_PORT`).
+- Strict policy: NO `.env` files. All env vars (incl. `OPENAI_API_KEY`) come from the user's system environment. Guard test in `services/online/src/server.test.ts` blocks dotenv regression. See README "Environment Variables".
 - The fake transcript replay path (`apps/web/src/dev/fake-transcript.json` + `FakeReplayProvider`) is the canonical regression harness for the caption path. Keep it working.

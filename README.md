@@ -70,6 +70,50 @@ tests/e2e/             # Playwright cross-app tests
 
 ---
 
+## Environment Variables
+
+**Strict policy: NO `.env` files.** All env vars are read from the user's system environment only. There is a guard test (`services/online/src/server.test.ts`) that fails the build if `dotenv` is re-introduced.
+
+Set these in your shell profile (`~/.bashrc`, `~/.zshrc`, `~/.profile`) or via Windows `setx`:
+
+### Online service (`services/online`)
+| Variable | Required | Default | Purpose |
+|---|---|---|---|
+| `OPENAI_API_KEY` | yes (for Online mode) | — | Server-side OpenAI key. Never sent to the browser. |
+| `ONLINE_PORT` | no | `8787` | Fastify bind port. |
+| `ONLINE_CORS_ORIGIN` | no | `http://localhost:5173` | CORS allow-list (single origin). |
+| `OPENAI_TIMEOUT_MS` | no | `10000` | Hard ceiling on upstream `client_secrets` call. |
+| `SESSION_RATE_LIMIT_PER_MIN` | no | `30` | Token-bucket cap on `POST /session` per remote IP. |
+| `SESSION_RENEW_MS` | no | `1500000` | Browser session lifetime before renewal (25 min). |
+
+### Offline service (`services/offline`)
+| Variable | Required | Default | Purpose |
+|---|---|---|---|
+| `OFFLINE_PORT` | no | `8000` | FastAPI bind port. |
+| `OFFLINE_CORS_ORIGIN` | no | `http://localhost:5173,http://localhost:5174` | CORS allow-list (comma-separated). |
+| `WHL_MODEL` | no | (see `run_whl.py`) | WhisperLiveKit model selector. |
+| `OMP_NUM_THREADS` | no | `8` | Thread count for OpenMP/MKL (set before importing faster-whisper). |
+
+### Web app (`apps/web`, build-time only — `VITE_` prefix)
+| Variable | Required | Default | Purpose |
+|---|---|---|---|
+| `VITE_ONLINE_BASE_URL` | no | `http://localhost:8787` | Online service URL the browser hits. |
+| `VITE_OFFLINE_BASE_URL` | no | `http://localhost:8000` | Offline service URL. |
+| `VITE_DEPLOYMENT_MODE` | no | `dev` | `online` to tree-shake offline path out of the bundle. |
+
+### Setting `OPENAI_API_KEY`
+```bash
+# Linux / macOS — persist in shell profile
+echo 'export OPENAI_API_KEY="sk-proj-..."' >> ~/.bashrc   # or ~/.zshrc
+```
+```powershell
+# Windows — persist across sessions
+setx OPENAI_API_KEY "sk-proj-..."
+# (open a new terminal for the change to take effect)
+```
+
+---
+
 ## Security & Privacy
 
 - OpenAI API keys are **server-side only** — never sent to the browser.

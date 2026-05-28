@@ -83,15 +83,16 @@ if (-not (Test-Command 'uv')) {
   Write-Ok "uv $(uv --version)"
 }
 
-# --- .env ---
-Write-Step 'Configuring .env'
-$envPath = Join-Path $repoRoot '.env'
-$envExample = Join-Path $repoRoot '.env.example'
-if (-not (Test-Path $envPath)) {
-  Copy-Item $envExample $envPath
-  Write-Ok '.env created from .env.example (edit to add OPENAI_API_KEY for P2+)'
+# --- Environment variables (strict system-env-only policy) ---
+Write-Step 'Checking environment variables'
+$apiKey = [Environment]::GetEnvironmentVariable('OPENAI_API_KEY', 'User')
+if (-not $apiKey) { $apiKey = $env:OPENAI_API_KEY }
+if ($apiKey) {
+  Write-Ok "OPENAI_API_KEY is set ($($apiKey.Length) chars) - required for Online mode"
 } else {
-  Write-Ok '.env already exists (left untouched)'
+  Write-Warn2 'OPENAI_API_KEY not set. Required for Online mode. To persist:'
+  Write-Warn2 '  setx OPENAI_API_KEY "sk-proj-..."   (open a NEW terminal afterwards)'
+  Write-Warn2 'See README "Environment Variables" for the full list.'
 }
 
 # --- pnpm install ---
