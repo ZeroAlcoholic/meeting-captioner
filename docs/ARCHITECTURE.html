@@ -1,0 +1,999 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>Meeting Audio · System Architecture · Deliverable 2026-05-19</title>
+<style>
+  /* ────────────────────────────────────────────────────────────────────
+     Bell Labs Technical Memorandum × Bauhaus precision
+     Single-file, no external assets, A4 landscape print-ready
+  ──────────────────────────────────────────────────────────────────── */
+
+  :root {
+    --paper:        #f4ede0;
+    --paper-shade:  #ebe1cd;
+    --ink:          #1a2030;
+    --ink-soft:     #3a4458;
+    --ink-faint:    #6b7180;
+    --rust:         #a14a2a;
+    --rust-deep:    #7a3620;
+    --ok:           #2d6a4f;
+    --ok-soft:      rgba(45, 106, 79, 0.10);
+    --warn:         #b07f00;
+    --warn-soft:    rgba(176, 127, 0, 0.10);
+    --crit:         #8b2c2c;
+    --crit-soft:    rgba(139, 44, 44, 0.08);
+    --grid:         rgba(26, 32, 48, 0.055);
+
+    --font-display: 'Hoefler Text', 'Iowan Old Style', 'Palatino Linotype', Palatino,
+                    'Cambria', Georgia, 'Times New Roman', serif;
+    --font-body:    'Charter', 'Constantia', 'Cambria', Georgia, 'Times New Roman', serif;
+    --font-mono:    'Cascadia Code', 'Cascadia Mono', 'JetBrains Mono', 'SF Mono',
+                    Consolas, 'Lucida Console', 'DejaVu Sans Mono', monospace;
+  }
+
+  @page {
+    size: A4 landscape;
+    margin: 0;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #c8bea7;
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: 11px;
+    line-height: 1.55;
+    font-feature-settings: 'kern', 'liga', 'onum';
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  body { padding: 28px 14px 40px; }
+
+  .page {
+    width: 297mm;
+    height: 210mm;
+    margin: 0 auto 22px;
+    background: var(--paper);
+    background-image:
+      linear-gradient(var(--grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size: 4mm 4mm, 4mm 4mm;
+    background-position: 0 0;
+    padding: 11mm 13mm 9mm;
+    position: relative;
+    box-shadow:
+      0 1px 0 rgba(0,0,0,0.04),
+      0 12px 28px rgba(0,0,0,0.18),
+      inset 0 0 0 1px rgba(26, 32, 48, 0.10),
+      inset 0 0 80px rgba(180, 150, 100, 0.10);
+    overflow: hidden;
+    page-break-after: always;
+    display: flex;
+    flex-direction: column;
+  }
+  .page:last-of-type { page-break-after: auto; }
+
+  /* corner registration marks (engineering drawing tradition) */
+  .page::before, .page::after {
+    content: '';
+    position: absolute;
+    width: 4mm; height: 4mm;
+    border: 0.6px solid var(--ink-soft);
+    pointer-events: none;
+  }
+  .page::before { top: 5mm; left: 5mm; border-right: none; border-bottom: none; }
+  .page::after  { bottom: 5mm; right: 5mm; border-left: none; border-top: none; }
+
+  /* ── Header ──────────────────────────────────────────────────────── */
+  .doc-head {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: flex-start;
+    border-bottom: 1.5px solid var(--ink);
+    padding-bottom: 4.5mm;
+    margin-bottom: 5mm;
+    position: relative;
+    z-index: 2;
+  }
+  .crest {
+    font-family: var(--font-mono);
+    font-size: 8.5px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin-bottom: 5px;
+  }
+  .crest::before {
+    content: '◆ ';
+    color: var(--rust);
+  }
+  h1.title {
+    font-family: var(--font-display);
+    font-size: 30px;
+    font-weight: 400;
+    margin: 0;
+    letter-spacing: -0.012em;
+    line-height: 1.05;
+    color: var(--ink);
+  }
+  h1.title em {
+    font-style: italic;
+    color: var(--rust-deep);
+    font-weight: 400;
+  }
+  .sub {
+    font-family: var(--font-display);
+    font-style: italic;
+    font-size: 13px;
+    color: var(--ink-soft);
+    margin-top: 4px;
+    max-width: 180mm;
+  }
+  .meta {
+    font-family: var(--font-mono);
+    font-size: 8.5px;
+    color: var(--ink-soft);
+    text-align: right;
+    line-height: 1.75;
+    letter-spacing: 0.04em;
+  }
+  .meta b { color: var(--rust); font-weight: 600; }
+
+  /* Hand-stamped seal */
+  .stamp {
+    position: absolute;
+    top: 0;
+    right: -3mm;
+    width: 26mm;
+    height: 26mm;
+    border-radius: 50%;
+    border: 1.4px solid var(--rust);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    font-family: var(--font-mono);
+    font-size: 7px;
+    color: var(--rust);
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    line-height: 1.5;
+    transform: rotate(-7deg);
+    opacity: 0.78;
+    z-index: 3;
+  }
+  .stamp::before {
+    content: '';
+    position: absolute;
+    inset: 1.5mm;
+    border: 0.5px solid var(--rust);
+    border-radius: 50%;
+    opacity: 0.65;
+  }
+  .stamp span { display: block; font-weight: 700; }
+
+  /* ── Sections ────────────────────────────────────────────────────── */
+  .sec { margin-bottom: 5mm; }
+  .sec-head {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    border-bottom: 0.5px solid var(--ink-faint);
+    padding-bottom: 2mm;
+    margin-bottom: 3mm;
+  }
+  .sec-num {
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    color: var(--rust);
+    letter-spacing: 0.18em;
+    font-weight: 600;
+  }
+  .sec-title {
+    font-family: var(--font-display);
+    font-size: 17px;
+    font-weight: 400;
+    font-style: italic;
+    margin: 0;
+    color: var(--ink);
+  }
+  .sec-kicker {
+    font-family: var(--font-mono);
+    font-size: 8.5px;
+    color: var(--ink-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    margin-left: auto;
+  }
+
+  /* ── Tier band ───────────────────────────────────────────────────── */
+  .tier {
+    border: 1.2px solid var(--ink);
+    background: rgba(255,255,255,0.45);
+    padding: 4mm 5mm 4.5mm;
+    position: relative;
+    margin-bottom: 3.5mm;
+  }
+  .tier.wip-tier { background: rgba(255, 247, 225, 0.55); }
+
+  .tier-tag {
+    position: absolute;
+    top: -10px;
+    left: 7mm;
+    background: var(--paper);
+    padding: 0 8px;
+    font-family: var(--font-mono);
+    font-size: 9px;
+    letter-spacing: 0.18em;
+    color: var(--ink);
+    text-transform: uppercase;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .tier-tag .num {
+    display: inline-flex;
+    width: 16px;
+    height: 16px;
+    border: 1px solid var(--ink);
+    border-radius: 50%;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--font-display);
+    font-size: 11px;
+    font-weight: 400;
+    background: var(--paper);
+  }
+  .tier-status {
+    position: absolute;
+    top: -10px;
+    right: 7mm;
+    background: var(--paper);
+    padding: 0 6px;
+  }
+
+  /* ── Status pills ────────────────────────────────────────────────── */
+  .pill {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 8.5px;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    padding: 2px 8px;
+    border: 0.6px solid currentColor;
+    background: var(--paper);
+    font-weight: 600;
+    vertical-align: middle;
+  }
+  .pill.ok    { color: var(--ok);    background: var(--ok-soft); }
+  .pill.warn  { color: var(--warn);  background: var(--warn-soft); }
+  .pill.crit  { color: var(--crit);  background: var(--crit-soft); }
+  .pill.info  { color: var(--ink-soft); }
+
+  /* ── Component card ──────────────────────────────────────────────── */
+  .comp {
+    border: 0.8px solid var(--ink-soft);
+    background: rgba(255,255,255,0.55);
+    padding: 2.8mm 3.4mm;
+    position: relative;
+    font-size: 10px;
+    line-height: 1.5;
+  }
+  .comp.wip { border-style: dashed; background: rgba(255, 244, 218, 0.5); }
+  .comp.wip::after,
+  .comp.not-started::after {
+    position: absolute;
+    top: -8px; right: 6px;
+    background: var(--paper);
+    font-family: var(--font-mono);
+    font-size: 7.5px;
+    padding: 0 5px;
+    letter-spacing: 0.18em;
+    font-weight: 700;
+  }
+  .comp.wip::after { content: 'WIP'; color: var(--warn); }
+  .comp.not-started {
+    border-style: dotted;
+    background: rgba(240, 232, 215, 0.45);
+    opacity: 0.85;
+  }
+  .comp.not-started::after { content: '未開工'; color: var(--crit); font-family: var(--font-body); font-style: italic; }
+  .comp.accent { border-color: var(--rust); }
+
+  .comp h4 {
+    font-family: var(--font-display);
+    font-size: 12.5px;
+    font-weight: 600;
+    margin: 0 0 1px;
+    font-style: italic;
+    color: var(--ink);
+  }
+  .comp h4 code {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-style: normal;
+    color: var(--rust-deep);
+    font-weight: 500;
+  }
+  .comp .role {
+    font-family: var(--font-mono);
+    font-size: 8.5px;
+    color: var(--ink-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    margin-bottom: 4px;
+  }
+  .comp ul {
+    margin: 3px 0 0;
+    padding-left: 12px;
+    font-size: 9.8px;
+    line-height: 1.55;
+    list-style: none;
+  }
+  .comp ul li {
+    position: relative;
+    padding-left: 8px;
+  }
+  .comp ul li::before {
+    content: '◇';
+    position: absolute;
+    left: -4px;
+    color: var(--rust);
+    font-size: 7px;
+    top: 4px;
+  }
+  .comp ul li b { color: var(--ink); font-weight: 600; }
+  .comp ul li code,
+  .comp p code,
+  pre.event code {
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    color: var(--rust-deep);
+    background: rgba(161, 74, 42, 0.08);
+    padding: 0 3px;
+    border-radius: 1px;
+  }
+
+  /* ── Flow arrow between tiers ────────────────────────────────────── */
+  .flow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--font-mono);
+    font-size: 8.5px;
+    letter-spacing: 0.16em;
+    color: var(--ink-soft);
+    text-transform: uppercase;
+    padding: 1mm 0 2mm;
+    gap: 10px;
+  }
+  .flow .line { flex: 1; height: 0.6px; background: var(--ink-soft); }
+  .flow .tip {
+    width: 0; height: 0;
+    border-left: 7px solid var(--ink-soft);
+    border-top: 4px solid transparent;
+    border-bottom: 4px solid transparent;
+  }
+  .flow .label { white-space: nowrap; }
+
+  /* ── Callout ─────────────────────────────────────────────────────── */
+  .callout {
+    border-left: 2.5px solid var(--rust);
+    padding: 2.5mm 3.5mm;
+    background: rgba(161, 74, 42, 0.055);
+    margin: 2.5mm 0;
+    font-size: 10px;
+    line-height: 1.6;
+  }
+  .callout .label {
+    display: block;
+    font-family: var(--font-mono);
+    font-size: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.2em;
+    color: var(--rust-deep);
+    margin-bottom: 2px;
+    font-weight: 700;
+  }
+  .callout b { color: var(--ink); font-weight: 600; }
+
+  /* ── Event-contract code block ───────────────────────────────────── */
+  pre.event {
+    font-family: var(--font-mono);
+    font-size: 9.2px;
+    background: rgba(255,255,255,0.55);
+    border-left: 2.5px solid var(--rust);
+    padding: 3mm 4mm 3.5mm;
+    margin: 0;
+    white-space: pre;
+    line-height: 1.7;
+    color: var(--ink);
+    overflow-x: auto;
+  }
+  pre.event .k { color: var(--rust-deep); }
+  pre.event .c { color: var(--ink-faint); font-style: italic; }
+
+  /* ── Table ───────────────────────────────────────────────────────── */
+  table.matrix {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 10px;
+  }
+  table.matrix th,
+  table.matrix td {
+    text-align: left;
+    border-bottom: 0.5px solid var(--ink-faint);
+    padding: 4.5px 8px;
+    vertical-align: top;
+  }
+  table.matrix th {
+    font-family: var(--font-mono);
+    font-size: 8.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    color: var(--ink-soft);
+    border-bottom: 1px solid var(--ink);
+    font-weight: 600;
+  }
+  table.matrix td.notes {
+    color: var(--ink-soft);
+    font-style: italic;
+  }
+  table.matrix tr:last-child td { border-bottom: none; }
+
+  /* ── Grids ───────────────────────────────────────────────────────── */
+  .grid-2 { display: grid; grid-template-columns: 1.05fr 1fr; gap: 4.5mm; }
+  .grid-2-even { display: grid; grid-template-columns: 1fr 1fr; gap: 4.5mm; }
+  .grid-3 { display: grid; grid-template-columns: 1.4fr 1fr 1fr; gap: 4mm; }
+
+  /* ── Footer band ─────────────────────────────────────────────────── */
+  .footer {
+    border-top: 0.8px solid var(--ink);
+    padding-top: 2.8mm;
+    margin-top: auto;
+    font-family: var(--font-mono);
+    font-size: 8px;
+    color: var(--ink-faint);
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 10mm;
+    line-height: 1.7;
+    letter-spacing: 0.04em;
+  }
+  .footer code {
+    color: var(--rust);
+    background: rgba(161, 74, 42, 0.07);
+    padding: 0 3px;
+  }
+  .footer .sig {
+    font-family: var(--font-display);
+    font-style: italic;
+    font-size: 11px;
+    color: var(--ink-soft);
+  }
+  .pagenum {
+    font-family: var(--font-mono);
+    font-size: 8px;
+    color: var(--ink-soft);
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+  }
+  .pagenum b { color: var(--rust); font-weight: 700; }
+
+  /* ── Legend ──────────────────────────────────────────────────────── */
+  .legend {
+    display: flex; gap: 12px; flex-wrap: wrap;
+    font-family: var(--font-mono); font-size: 8px;
+    color: var(--ink-soft); letter-spacing: 0.06em;
+    justify-content: flex-end;
+  }
+  .legend .item { display: flex; align-items: center; gap: 5px; }
+  .legend .swatch {
+    width: 10px; height: 10px; border: 0.6px solid var(--ink); display: inline-block;
+  }
+  .legend .swatch.ok   { background: var(--ok); }
+  .legend .swatch.warn { background: var(--warn); border-style: dashed; }
+  .legend .swatch.crit { background: var(--paper); border-style: dotted; }
+
+  /* ── Print ───────────────────────────────────────────────────────── */
+  @media print {
+    body { background: white; padding: 0; }
+    .page {
+      box-shadow: none;
+      margin: 0;
+      page-break-after: always;
+      width: 297mm;
+      height: 210mm;
+    }
+  }
+
+  /* ── Small utilities ─────────────────────────────────────────────── */
+  .h3 {
+    font-family: var(--font-display);
+    font-style: italic;
+    font-size: 13px;
+    margin: 0 0 2.5mm;
+    color: var(--ink);
+    font-weight: 600;
+  }
+  .h3 .micro {
+    font-family: var(--font-mono);
+    font-size: 8px;
+    font-style: normal;
+    color: var(--ink-faint);
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    margin-left: 6px;
+    font-weight: 400;
+  }
+  .stack > * + * { margin-top: 2.8mm; }
+</style>
+</head>
+<body>
+
+<!-- ════════════════════════════════════════════════════════════════════
+     PAGE 01 · OVERVIEW · THREE-TIER SYSTEM
+════════════════════════════════════════════════════════════════════ -->
+<section class="page">
+  <header class="doc-head">
+    <div>
+      <div class="crest">Document · Deliverable · Internal Engineering</div>
+      <h1 class="title">Meeting <em>Audio</em> — System Architecture</h1>
+      <div class="sub">Meeting-grade live caption · translation · semi-realtime summary — three-tier reference deliverable</div>
+    </div>
+    <div class="meta">
+      DOC-ID&nbsp;&nbsp;<b>MA-ARCH-2026-05</b><br>
+      VERSION&nbsp;<b>P3.10 + reliability</b><br>
+      DATE&nbsp;&nbsp;&nbsp;&nbsp;<b>2026 · 05 · 19</b><br>
+      LEAD&nbsp;&nbsp;&nbsp;&nbsp;<b>ZeroAlcoholic</b><br>
+      HEAD&nbsp;&nbsp;&nbsp;&nbsp;<b>master @ 32514e8</b>
+    </div>
+    <div class="stamp"><div><span>For</span>Stakeholder<br>Review</div></div>
+  </header>
+
+  <section class="sec">
+    <div class="sec-head">
+      <span class="sec-num">§ 01</span>
+      <h2 class="sec-title">Three-Tier System Overview</h2>
+      <span class="sec-kicker">CLAUDE.md · §Architecture</span>
+    </div>
+
+    <!-- TIER 1 -->
+    <div class="tier">
+      <span class="tier-tag"><span class="num">1</span>Interface &amp; Routing Layer</span>
+      <span class="tier-status"><span class="pill ok">Production · Ready</span></span>
+      <div class="grid-2" style="margin-top: 1.5mm;">
+        <div class="comp">
+          <h4>apps/web <code>· Vite + React 18</code></h4>
+          <div class="role">interface · routing · scenario-driven UX</div>
+          <ul>
+            <li>ScenarioPicker → ModeSelector → SettingsPanel → StartRealButton</li>
+            <li><b>CaptionBoard</b> — full-screen, projector-readable, largest type</li>
+            <li>HealthRow (vertical 3-dot list) · MicLevelBar · RealtimePricingPanel</li>
+            <li>Settings auto-closes on outside-click + <code>Esc</code> — keeps captions visible</li>
+          </ul>
+        </div>
+        <div class="comp">
+          <h4>State Stores <code>· Zustand 5</code></h4>
+          <div class="role">in-memory only · no persistence by policy</div>
+          <ul>
+            <li><b>captionStore</b> — <code>segments[]</code> · <code>livePartial</code> · <code>liveTranslation</code> · <code>translations[]</code></li>
+            <li><b>settingsStore</b> — scenarioId · modeId · langPair · micDistance · audioSource</li>
+            <li>50 ms coalesce for partial deltas → ~20 Hz UI updates</li>
+          </ul>
+        </div>
+      </div>
+      <div class="callout" style="margin-bottom: 0; margin-top: 3mm;">
+        <span class="label">Provider Abstraction Boundary</span>
+        UI consumes <b>normalized events only</b>. <code>coalesce-handlers.ts</code> throttles partials with segmentId-match pending clear; final events drain pending immediately. No UI code touches OpenAI / WHL / Argos event shapes.
+      </div>
+    </div>
+
+    <div class="flow">
+      <span class="line"></span>
+      <span class="label">TranscriptEvent &nbsp;·&nbsp; TranslationEvent &nbsp;·&nbsp; HealthEvent &nbsp;·&nbsp; AudioLevelEvent</span>
+      <span class="tip"></span>
+    </div>
+
+    <div class="grid-2-even">
+      <!-- TIER 2 -->
+      <div class="tier">
+        <span class="tier-tag"><span class="num">2</span>Online Realtime</span>
+        <span class="tier-status"><span class="pill ok">Production · Ready</span></span>
+        <div class="comp accent" style="margin-top: 1.5mm;">
+          <h4>OpenAI Realtime path</h4>
+          <div class="role">WebRTC · DataChannel oai-events</div>
+          <ul>
+            <li>browser ⇄ <b>services/online</b> (Fastify, <code>127.0.0.1:8787</code>)</li>
+            <li><code>POST /session</code> mints ephemeral key — key never leaves Node</li>
+            <li>Models <code>gpt-realtime-translate</code> / <code>gpt-realtime-whisper</code></li>
+            <li><code>OPENAI_API_KEY</code> from system env <b>only</b> (P3.10 STRICT — guard test)</li>
+          </ul>
+        </div>
+        <div class="callout" style="margin-bottom: 0;">
+          <span class="label">Reliability hardening · committed 2026-05-19</span>
+          12 s force-promote · per-mic stale detector · renewal backoff [30 s · 1 m · 3 m · 5 m · 10 m] · ICE/PC failed → <code>renewSession()</code> · onStatus listeners keep UI in sync · diag dump every 10 s
+        </div>
+      </div>
+
+      <!-- TIER 3 -->
+      <div class="tier wip-tier">
+        <span class="tier-tag"><span class="num">3</span>Offline Local</span>
+        <span class="tier-status"><span class="pill warn">未完成 · WIP</span></span>
+        <div class="comp wip" style="margin-top: 1.5mm;">
+          <h4>Local STT + MT path</h4>
+          <div class="role">FastAPI · WhisperLiveKit · CTranslate2</div>
+          <ul>
+            <li>browser ⇄ <b>services/offline</b> (<code>127.0.0.1:8000</code> WS <code>/ws</code>)</li>
+            <li>WHL subprocess <code>:9090</code> · internal only · VAD min_silence 500 ms</li>
+            <li>Versioned slice stabilizer (v1 / -v2 / -v3) — force-promote @ 12 s</li>
+            <li>WS backpressure 1 MB · 100 consecutive drops → force reconnect</li>
+            <li>CTranslate2 <code>opus-mt-en-zh</code> — <b>guarded no-op</b> until model downloaded</li>
+            <li>WASAPI loopback (<code>capture/wasapi_loopback.py</code>) — <b>stub only</b></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="footer">
+    <div>
+      © meeting_audio · internal engineering deliverable · do not distribute<br>
+      Verification: <b style="color:var(--ok);">177 tests green</b> &nbsp;·&nbsp; 129 web Vitest + 48 offline pytest<br>
+      Recent: <code>f2c0e36</code> reliability hardening &nbsp;·&nbsp; <code>32514e8</code> Codex review pass
+    </div>
+    <div style="text-align:right;">
+      <span class="pagenum">PAGE <b>01</b> / 04 · Overview</span><br>
+      <span class="sig">— Z.A.</span>
+    </div>
+  </div>
+</section>
+
+
+<!-- ════════════════════════════════════════════════════════════════════
+     PAGE 02 · ONLINE REALTIME DETAIL
+════════════════════════════════════════════════════════════════════ -->
+<section class="page">
+  <header class="doc-head">
+    <div>
+      <div class="crest">Document · § 02 · Online Realtime Layer · Detail</div>
+      <h1 class="title" style="font-size: 24px;">② Online Realtime — <em>Production Path</em></h1>
+      <div class="sub">browser ⇄ Fastify ⇄ OpenAI Realtime API · WebRTC media + DataChannel events</div>
+    </div>
+    <div class="meta">
+      STATE&nbsp;&nbsp;<b style="color:var(--ok);">PRODUCTION READY</b><br>
+      OWNER&nbsp;<b>services/online + apps/web/providers</b><br>
+      SOAK&nbsp;&nbsp;<b>~1 h manual · automated TBD</b>
+    </div>
+  </header>
+
+  <div class="grid-2">
+
+    <!-- LEFT COLUMN: browser-side -->
+    <div class="stack">
+      <h3 class="h3">Browser-side <span class="micro">apps/web/src/providers</span></h3>
+
+      <div class="comp">
+        <h4>MicrophoneAudioProvider <code>· microphone-audio-provider.ts</code></h4>
+        <div class="role">getUserMedia · AGC profile</div>
+        <ul>
+          <li>micDistance ↔ AGC ↔ <code>noise_reduction</code> lockstep (Close / Far / Off)</li>
+          <li>RMS sampled ~20 Hz → AudioLevelEvent</li>
+        </ul>
+      </div>
+
+      <div class="comp accent">
+        <h4>OpenAIRealtimeProvider <code>· openai-realtime-provider.ts</code></h4>
+        <div class="role">WebRTC client · event router · self-healing</div>
+        <ul>
+          <li>RTCPeerConnection · DataChannel <code>oai-events</code></li>
+          <li>SDP offer/answer via <code>POST /session</code></li>
+          <li>Listens for <code>session.input_transcript.completed</code> /
+            <code>output_transcript.completed</code> + delta variants</li>
+          <li>Persistent renewal-retry timer survives <code>stopped</code> state</li>
+          <li><code>onStatus(fn)</code> subscription API — UI re-frames internal <code>stopped</code> as <code>idle</code></li>
+        </ul>
+      </div>
+
+      <div class="callout">
+        <span class="label">Reliability hardening · 2026-05-19</span>
+        <b>MAX_SEGMENT_DURATION_MS = 12 000</b> — promotes stuck partials to final.<br>
+        <b>Stale detector</b> — <code>audioActiveSamplesSinceDc ≥ 100</code> + per-mic dB floor (-40 / -48 / -52) avoids natural-pause false triggers.<br>
+        <b>Renewal backoff</b> [30 s · 1 m · 3 m · 5 m · 10 m cap] tuned for live meetings.<br>
+        <b>ICE / PC failed</b> → auto <code>renewSession()</code>; never silent stop.<br>
+        <b>Diag dump</b> every 10 s → <code>console.info('[openai-rt diag]', …)</code> with sample-counter, dc-event-count, pc/ice state.
+      </div>
+    </div>
+
+    <!-- RIGHT COLUMN: server + upstream -->
+    <div class="stack">
+      <h3 class="h3">Server-side <span class="micro">services/online · Fastify 5 · Node 20+</span></h3>
+
+      <div class="comp">
+        <h4>Bind 127.0.0.1:8787 <code>· loopback only</code></h4>
+        <div class="role">routes/session.ts · routes/healthz.ts</div>
+        <ul>
+          <li><code>POST /session</code> — mint ephemeral OpenAI Realtime session key</li>
+          <li><code>GET /session/info</code> — <code>{ hasApiKey }</code> for UI polling</li>
+          <li><code>GET /healthz</code> — apiKey + openai_reachability + uptime_sec</li>
+          <li><code>@fastify/static</code> serves <code>apps/web</code> dist (online-only build)</li>
+          <li><code>@fastify/cors</code> · <code>@fastify/compress</code></li>
+        </ul>
+      </div>
+
+      <div class="callout">
+        <span class="label">P3.10 STRICT env policy</span>
+        <code>OPENAI_API_KEY</code> read from the <b>system environment only</b>. No <code>dotenv</code>, no <code>.env</code> fallback. Guard test prevents regression. Key never reaches browser bundles.
+      </div>
+
+      <div class="comp accent">
+        <h4>OpenAI Realtime API <code>· upstream</code></h4>
+        <div class="role">HTTPS · WebRTC media + DC events</div>
+        <ul>
+          <li><code>gpt-realtime-translate</code> &nbsp;·&nbsp; $0.034 / min</li>
+          <li><code>gpt-realtime-whisper</code> &nbsp;·&nbsp; $0.017 / min</li>
+          <li>Per-mode pricing accumulators surfaced in RealtimePricingPanel</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">
+    <div>
+      Wedge-class failure modes covered &nbsp;·&nbsp; continuous-speech freeze · speaker-change wedge · ICE failure · session timeout · <code>/session</code> 5xx · mic denied · upstream DNS-down
+    </div>
+    <div style="text-align:right;">
+      <span class="pagenum">PAGE <b>02</b> / 04 · Online Detail</span>
+    </div>
+  </div>
+</section>
+
+
+<!-- ════════════════════════════════════════════════════════════════════
+     PAGE 03 · OFFLINE LOCAL DETAIL — WIP
+════════════════════════════════════════════════════════════════════ -->
+<section class="page">
+  <header class="doc-head">
+    <div>
+      <div class="crest">Document · § 03 · Offline Local Layer · Detail (未完成)</div>
+      <h1 class="title" style="font-size: 24px;">③ Offline Local — <em style="color:var(--warn);">未完成 / WIP</em></h1>
+      <div class="sub">browser ⇄ FastAPI ⇄ WhisperLiveKit ⇄ CTranslate2 · zero-cloud caption path</div>
+    </div>
+    <div class="meta">
+      STATE&nbsp;&nbsp;<b style="color:var(--warn);">BETA · NOT SHIPPING</b><br>
+      OWNER&nbsp;<b>services/offline</b><br>
+      GATED&nbsp;<b>P4 backlog</b>
+    </div>
+  </header>
+
+  <div class="grid-2">
+    <div class="stack">
+      <h3 class="h3">Browser-side <span class="micro">apps/web/src/providers</span></h3>
+
+      <div class="comp wip">
+        <h4>OfflineSTTProvider <code>· offline-stt-provider.ts</code></h4>
+        <div class="role">WebSocket client · PCM16 uplink</div>
+        <ul>
+          <li>WS <code>ws://127.0.0.1:8000/ws</code> — PCM16 frames upstream</li>
+          <li><b>Backpressure</b>: bufferedAmount &gt; 1 MB ⇒ drop frames</li>
+          <li><b>Escalation</b>: 100 consecutive drops ⇒ <code>ws.close()</code> force reconnect</li>
+          <li><code>/healthz</code> poll with exp backoff [3 · 6 · 12 · 30 · 60 s cap]</li>
+        </ul>
+      </div>
+
+      <div class="callout">
+        <span class="label">Online-only deliverable (slim build)</span>
+        <code>VITE_DEPLOYMENT_MODE=online</code> swaps OfflineSTTProvider for an empty stub at build time. Offline mode appears <b>greyed but visible</b> in the UI so users see the product scope rather than a hidden capability.
+      </div>
+
+      <div class="comp not-started">
+        <h4>Hybrid mode wiring</h4>
+        <div class="role">local STT → cloud MT path</div>
+        <ul>
+          <li>Mode + scenario exist; provider plumbing not yet built</li>
+          <li>Depends on offline-stt stabilizing first</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="stack">
+      <h3 class="h3">Server-side <span class="micro">services/offline · FastAPI · Python 3.11+</span></h3>
+
+      <div class="comp wip">
+        <h4>FastAPI <code>· bind 127.0.0.1:8000</code></h4>
+        <div class="role">app/main.py · session orchestrator</div>
+        <ul>
+          <li><code>GET /healthz</code></li>
+          <li><code>WS /ws</code> — drives WHL session + stabilizer + translator</li>
+        </ul>
+      </div>
+
+      <div class="comp wip">
+        <h4>app/pipeline/</h4>
+        <div class="role">stt → stabilize → translate → normalize</div>
+        <ul>
+          <li><b>asr.py</b> — WhisperLiveKit client session</li>
+          <li><b>stabilizer.py</b> — <b>versioned slice model</b> (-v2 / -v3) · 12 s force-promote · WHL revision-shrink = accepted loss (no rewrites)</li>
+          <li><b>postprocess.py</b> — Traditional-Chinese normalization</li>
+          <li><b>translation.py</b> — CTranslate2 opus-mt-en-zh · <span class="pill warn" style="font-size:7px; padding:1px 5px;">guarded no-op</span></li>
+          <li><b>events.py</b> — normalize → TranscriptEvent / TranslationEvent</li>
+        </ul>
+      </div>
+
+      <div class="comp not-started">
+        <h4>app/capture/wasapi_loopback.py</h4>
+        <div class="role">Windows system-audio capture · PyAudioWPatch</div>
+        <ul>
+          <li>Blocks Teams / Zoom caption scenario entirely</li>
+          <li>Implementation deferred to P4</li>
+        </ul>
+      </div>
+
+      <div class="comp accent">
+        <h4>WhisperLiveKit <code>· :9090</code></h4>
+        <div class="role">subprocess · internal only</div>
+        <ul>
+          <li>Streaming faster-whisper · VAD <code>min_silence_duration_ms = 500</code></li>
+          <li>Emits <code>{start, end, text, completed}</code> segments</li>
+          <li>Browser never sees :9090 — services/offline is the boundary</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="callout" style="margin-top: 3mm;">
+    <span class="label">P4 backlog · required before offline ships</span>
+    ① Install <code>ctranslate2</code> + download <code>opus-mt-en-zh-ct2</code> model · activate translator.&nbsp;&nbsp;
+    ② Wire <code>wasapi_loopback.py</code> for Teams / Zoom system-audio capture.&nbsp;&nbsp;
+    ③ End-to-end Playwright offline-mode tests.&nbsp;&nbsp;
+    ④ Long-meeting soak (≥ 90 min continuous speech) on offline path.&nbsp;&nbsp;
+    ⑤ Argos Translate fallback evaluation per CLAUDE.md.
+  </div>
+
+  <div class="footer">
+    <div>
+      Online-only deliverable ships <b>without</b> this layer · <code>scripts/package-online.{sh,ps1}</code> produces a self-contained ~0.78 MB zip
+    </div>
+    <div style="text-align:right;">
+      <span class="pagenum">PAGE <b>03</b> / 04 · Offline Detail (WIP)</span>
+    </div>
+  </div>
+</section>
+
+
+<!-- ════════════════════════════════════════════════════════════════════
+     PAGE 04 · CONTRACTS · FAILURE · DISTRIBUTION · STATUS
+════════════════════════════════════════════════════════════════════ -->
+<section class="page">
+  <header class="doc-head">
+    <div>
+      <div class="crest">Document · § 04 · Contracts · Failure · Distribution · Status</div>
+      <h1 class="title" style="font-size: 22px;">Contracts, Failure Isolation &amp; <em>Deliverables</em></h1>
+      <div class="sub">Normalized event shapes · failure-isolation map · distribution variants · subsystem status matrix</div>
+    </div>
+    <div class="meta">
+      LEGEND<br>
+      <div class="legend" style="margin-top:3px;">
+        <div class="item"><span class="swatch ok"></span>READY</div>
+        <div class="item"><span class="swatch warn"></span>WIP</div>
+        <div class="item"><span class="swatch crit"></span>未開工</div>
+      </div>
+    </div>
+  </header>
+
+  <section class="sec" style="margin-bottom: 4mm;">
+    <div class="sec-head">
+      <span class="sec-num">§ 04.1</span>
+      <h2 class="sec-title">Event Contracts</h2>
+      <span class="sec-kicker">provider-agnostic · stable internal interface</span>
+    </div>
+<pre class="event"><span class="k">TranscriptEvent</span>   { provider, mode, source, segmentId,
+                    status: <span class="k">partial</span> | <span class="k">revised</span> | <span class="k">final</span>,
+                    text, startMs, endMs?, confidence?, revisionOf? }
+
+<span class="k">TranslationEvent</span>  { provider, mode, sourceSegmentId,
+                    status: <span class="k">draft</span> | <span class="k">refined</span> | <span class="k">final</span>,
+                    sourceText, targetText, sourceLanguage, targetLanguage, updatedAt }
+
+<span class="k">HealthEvent</span>       { component: transport | audio | stt | mt | summary,
+                    state: idle | connecting | … | degraded | failed, msg }
+
+<span class="k">AudioLevelEvent</span>   { rmsDb, source }   <span class="c">// ~20 Hz · drives MicLevelBar</span></pre>
+  </section>
+
+  <div class="grid-2-even" style="margin-bottom: 4mm;">
+    <section class="sec" style="margin: 0;">
+      <div class="sec-head">
+        <span class="sec-num">§ 04.2</span>
+        <h2 class="sec-title">Failure-Isolation Map</h2>
+      </div>
+      <table class="matrix">
+        <thead>
+          <tr><th style="width: 38%;">Failure</th><th>System Response</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Audio capture fails</td><td>HealthEvent(audio, failed) · captions stop · button → idle</td></tr>
+          <tr><td>Translation fails</td><td>HealthEvent(mt, failed) · source transcript kept visible</td></tr>
+          <tr><td>OpenAI 5xx</td><td>Persistent retry [30 s · 1 m · 3 m · 5 m · 10 m]</td></tr>
+          <tr><td>ICE / PC failed</td><td>auto renewSession() — never silent stop</td></tr>
+          <tr><td>WS sustained backpressure</td><td>force reconnect after 100 consecutive drops</td></tr>
+          <tr><td>WHL stuck segment</td><td>stabilizer force-promotes at 12 s · -v2 continuation</td></tr>
+          <tr><td>Summary fails (future)</td><td>captions unaffected — soft realtime by design</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="sec" style="margin: 0;">
+      <div class="sec-head">
+        <span class="sec-num">§ 04.3</span>
+        <h2 class="sec-title">Distribution Variants</h2>
+      </div>
+      <div class="comp" style="margin-bottom: 3mm;">
+        <h4>start-dev.bat &nbsp;<span class="pill info" style="font-size:7px; padding:1px 5px;">FULL DEV</span></h4>
+        <ul>
+          <li><code>pnpm exec vite</code> · web on <code>:5173</code></li>
+          <li><code>pnpm --filter online dev</code> · Fastify on <code>:8787</code></li>
+          <li><code>uvicorn offline.main:app</code> · FastAPI on <code>:8000</code></li>
+          <li>WHL child process on <code>:9090</code></li>
+        </ul>
+      </div>
+      <div class="comp accent">
+        <h4>start-online-dev.bat &nbsp;<span class="pill ok" style="font-size:7px; padding:1px 5px;">SLIM ONLINE</span></h4>
+        <ul>
+          <li><code>VITE_DEPLOYMENT_MODE=online</code> → <code>IS_ONLINE_ONLY=true</code></li>
+          <li>Offline provider aliased to stub at build time (tree-shaken)</li>
+          <li>Fastify serves dist/ + APIs on <code>:8787</code> only</li>
+          <li><code>scripts/package-online.*</code> → esbuild single-file CJS · ~0.78 MB zip</li>
+        </ul>
+      </div>
+    </section>
+  </div>
+
+  <section class="sec">
+    <div class="sec-head">
+      <span class="sec-num">§ 04.4</span>
+      <h2 class="sec-title">Subsystem Status Matrix</h2>
+      <span class="sec-kicker">as of 2026-05-19</span>
+    </div>
+    <table class="matrix">
+      <thead>
+        <tr>
+          <th style="width: 32%;">Subsystem</th>
+          <th style="width: 13%;">Status</th>
+          <th>Notes</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>Online Full (OpenAI Realtime)</td><td><span class="pill ok">Ready</span></td><td class="notes">Silent-failure hardening + Codex review pass committed today</td></tr>
+        <tr><td>Online-only slim build</td><td><span class="pill ok">Ready</span></td><td class="notes">0.78 MB zip · loopback bind · strict env policy</td></tr>
+        <tr><td>Offline STT (WHL + stabilizer)</td><td><span class="pill warn">Beta</span></td><td class="notes">Versioned slice model verified; long-meeting soak not yet run</td></tr>
+        <tr><td>Offline MT (CTranslate2)</td><td><span class="pill warn">WIP</span></td><td class="notes">Code in place but guarded no-op — model download required</td></tr>
+        <tr><td>WASAPI loopback (system audio capture)</td><td><span class="pill crit">未開工</span></td><td class="notes">Stub only — blocks Teams / Zoom caption scenario</td></tr>
+        <tr><td>Hybrid Mode (local STT + cloud MT)</td><td><span class="pill crit">未開工</span></td><td class="notes">Depends on offline-stt stabilizing first</td></tr>
+        <tr><td>Summary pipeline (draft / refined / stable)</td><td><span class="pill crit">未開工</span></td><td class="notes">Spec in CLAUDE.md · implementation not started</td></tr>
+        <tr><td>Electron packaging</td><td><span class="pill crit">未開工</span></td><td class="notes">Gated on local web MVP stability</td></tr>
+        <tr><td>Long-session soak / memory-bounds tests</td><td><span class="pill warn">Partial</span></td><td class="notes">Unit tests green; end-to-end soak not yet run</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <div class="footer">
+    <div>
+      Verification: <b style="color:var(--ok);">177 tests green</b> · 129 web Vitest + 48 offline pytest<br>
+      Recent commits: <code>f2c0e36</code> reliability hardening · <code>32514e8</code> Codex review pass · <code>35f80f0</code> A+B+C+D+E robustness pass
+    </div>
+    <div style="text-align:right;">
+      <span class="pagenum">PAGE <b>04</b> / 04 · Contracts &amp; Status</span><br>
+      <span class="sig">— end of deliverable —</span>
+    </div>
+  </div>
+</section>
+
+</body>
+</html>

@@ -96,6 +96,10 @@ class SegmentStabilizer:
             slc["first_seen"] = now  # next slice's deadline starts now
             seg_id = self._segment_id(start_key, next_version)
             end_ms = math.floor(float(seg["end"]) * 1000)
+            # avg_logprob is a negative log-probability; exp() maps to (0, 1].
+            # Clamp to [0, 1] in case of numerical edge cases.
+            avg_lp = seg.get("avg_logprob")
+            confidence = max(0.0, min(1.0, math.exp(avg_lp))) if avg_lp is not None else None
             transcript_events.append(
                 transcript_event(
                     segment_id=seg_id,
@@ -103,9 +107,10 @@ class SegmentStabilizer:
                     text=unemitted,
                     start_ms=start_key,
                     end_ms=end_ms,
+                    confidence=confidence,
                 )
             )
-            to_translate.append({"segment_id": seg_id, "text": unemitted})
+            to_translate.append({"segment_id": seg_id, "text": unemitted, "confidence": confidence})
 
         # Emit one partial for the latest not-yet-completed segment. If we've
         # already promoted slice(s) for this start_key, show ONLY the delta as

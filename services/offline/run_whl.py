@@ -51,6 +51,12 @@ _REPO_MAP = {
     "distil-large-v3":   "Systran/faster-distil-whisper-large-v3",
     "large-v3-turbo":    "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
     "turbo":             "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+    # MediaTek Research Breeze ASR 25 — fine-tuned from Whisper-large-v2,
+    # optimised for Taiwanese Mandarin and Mandarin-English code-switching.
+    # Two community CTranslate2 conversions available; primary is SoybeanMilk.
+    # Requires ~4 GB VRAM. Use: WHL_MODEL=breeze-asr-25 ./start.bat
+    "breeze-asr-25":     "SoybeanMilk/faster-whisper-Breeze-ASR-25",
+    "breeze-asr-25-ct2": "phate334/Breeze-ASR-25-ct2",
 }
 
 repo_id = _REPO_MAP.get(MODEL, MODEL)

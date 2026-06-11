@@ -14,6 +14,7 @@ def transcript_event(
     text: str,
     start_ms: int,
     end_ms: int | None = None,
+    confidence: float | None = None,
 ) -> dict:
     e: dict = {
         "kind": "transcript",
@@ -27,6 +28,8 @@ def transcript_event(
     }
     if end_ms is not None:
         e["endMs"] = end_ms
+    if confidence is not None:
+        e["confidence"] = round(confidence, 4)
     return e
 
 
@@ -38,8 +41,9 @@ def translation_event(
     target_text: str,
     source_language: str,
     target_language: str,
+    source_confidence: float | None = None,
 ) -> dict:
-    return {
+    e: dict = {
         "kind": "translation",
         "provider": "offline-mt",
         "mode": "full_offline",
@@ -51,6 +55,9 @@ def translation_event(
         "targetLanguage": target_language,
         "updatedAt": _iso(),
     }
+    if source_confidence is not None:
+        e["confidence"] = round(source_confidence, 4)
+    return e
 
 
 def health_event(

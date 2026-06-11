@@ -47,6 +47,35 @@ out-of-pocket	自費	保險
 claims adjuster	理賠專員	保險
 combined ratio	綜合成本率	保險
 
+# ── Insurance product & regulatory terms ─────────────────────────────────────
+group insurance	團體保險	保險
+individual insurance	個人保險	保險
+insurance agent	保險業務員	保險
+insurance broker	保險經紀人	保險
+policy anniversary	保單週年日	保險
+maturity benefit	滿期金	保險
+death benefit	身故保險金	保險
+disability benefit	失能給付	保險
+hospitalization benefit	住院給付	保險
+surgical benefit	手術給付	保險
+outpatient benefit	門診給付	保險
+waiting period	等待期	保險
+incontestability	不可抗辯條款	保險
+automatic premium loan	自動墊繳保費	保險
+policy loan	保單借款	保險
+face amount	保額	保險
+sum insured	保險金額	保險
+claim settlement	理賠結案	保險
+claim submission	理賠申請	保險
+medical underwriting	體況核保	保險
+financial underwriting	財務核保	保險
+insurance commission	保險佣金	保險
+solvency ratio	清償能力比率	保險
+reserve	準備金	保險
+insurance regulation	保險法規	保險
+financial supervisory commission	金融監督管理委員會	保險
+insurance bureau	保險局	保險
+
 # ── Business meeting terms ────────────────────────────────────────────────────
 agenda	議程	會議
 minutes	會議記錄	會議
@@ -67,3 +96,19 @@ market share	市場占有率	會議
 budget	預算	會議
 ROI	投資報酬率	會議
 KPI	關鍵績效指標	會議
+OKR	目標與關鍵結果	會議
+quarterly review	季度檢討	會議
+annual report	年度報告	會議
+board meeting	董事會議	會議
+task force	專案小組	會議
+escalation	升級處理	會議
+bottleneck	瓶頸	會議
+bandwidth	工作量能	會議
+roadmap	產品藍圖	會議
+sprint	衝刺週期	會議
+backlog	待辦清單	會議
+sign-off	最終核准	會議
+consensus	共識	會議
+pain point	痛點	會議
+synergy	綜效	會議
+benchmark	基準指標	會議

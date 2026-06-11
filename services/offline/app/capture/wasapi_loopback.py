@@ -113,6 +113,25 @@ async def stream_to_session(session: "ASRSession", stop_event: asyncio.Event) ->
             TARGET_RATE,
         )
 
+        drop_count = [0]  # mutated only from the event loop thread
+
+        def _try_enqueue(pcm_bytes: bytes) -> None:
+            """Runs on the event loop thread — safe to mutate asyncio.Queue and drop_count."""
+            try:
+                queue.put_nowait(pcm_bytes)
+            except asyncio.QueueFull:
+                drop_count[0] += 1
+                if drop_count[0] % 100 == 0:
+                    loop.create_task(
+                        session.push_event(
+                            health_event(
+                                component="audio",
+                                state="degraded",
+                                message=f"WASAPI queue full: {drop_count[0]} frames dropped",
+                            )
+                        )
+                    )
+
         def _callback(
             in_data: bytes, frame_count: int, time_info: dict, status: int
         ) -> tuple[None, int]:
@@ -122,9 +141,9 @@ async def stream_to_session(session: "ASRSession", stop_event: asyncio.Event) ->
             if src_rate != TARGET_RATE:
                 pcm = _resample(pcm, src_rate, TARGET_RATE)
             try:
-                loop.call_soon_threadsafe(queue.put_nowait, pcm.tobytes())
-            except Exception:
-                pass  # queue full → drop frame, keep running
+                loop.call_soon_threadsafe(_try_enqueue, pcm.tobytes())
+            except RuntimeError:
+                pass  # event loop closed during teardown
             return (None, pyaudio.paContinue)
 
         stream = pa.open(

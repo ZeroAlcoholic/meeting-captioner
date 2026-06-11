@@ -129,6 +129,7 @@ async def translate(
     text: str,
     source_language: str = "en",
     target_language: str = "zh-TW",
+    source_confidence: float | None = None,
 ) -> dict | None:
     """Translate one finalized segment asynchronously. Returns TranslationEvent or None."""
     direction = "en" if source_language == "en" else "zh"
@@ -165,6 +166,7 @@ async def translate(
             target_text=polished,
             source_language=source_language,
             target_language=target_language,
+            source_confidence=source_confidence,
         )
     except asyncio.TimeoutError:
         logger.error("Translation timed out (>%.1fs) for segment %s", _TRANSLATE_TIMEOUT_S, segment_id)

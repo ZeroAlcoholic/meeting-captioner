@@ -1,0 +1,7 @@
+{
+  "_README": "Ground truth transcriptions for ASR model comparison. Add .wav files to this directory. File names must match keys here. Run: python scripts/compare_models.py",
+  "zh_tw_01.wav": "要保人必須簽署所有保單文件，並於七個工作天內完成繳費。",
+  "zh_tw_02.wav": "本次會議討論第三季財報與風險管理策略。",
+  "code_switch_01.wav": "我們的ROI要exceed預期的target，所以需要optimize整個pipeline。",
+  "code_switch_02.wav": "這個feature的deadline是下週五，請大家update自己的task status。"
+}

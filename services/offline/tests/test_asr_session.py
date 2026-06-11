@@ -98,6 +98,87 @@ async def test_do_translate_passes_long_enough_zh_segment():
     assert call_kwargs["target_language"] == "en"
 
 
+# ── translate_enabled flag ────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_translate_disabled_skips_mt_entirely():
+    """When translate_enabled=False, _do_translate must never be called.
+
+    hybrid_privacy mode sends translate=false in the WS start message so the
+    offline service does STT only. The browser handles MT via the online service.
+    """
+    session = ASRSession(lang_pair="en→zh-TW", translate_enabled=False)
+    mock = AsyncMock(return_value=None)
+    with patch("app.pipeline.asr.mt.translate", mock):
+        await session._do_translate(_make_seg("Hello world, how are you?"))
+        await session._do_translate(_make_seg("The policyholder must sign the form."))
+    mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_translate_enabled_true_still_calls_mt():
+    """translate_enabled=True (default) must still call mt.translate normally."""
+    session = ASRSession(lang_pair="en→zh-TW", translate_enabled=True)
+    mock = AsyncMock(return_value=None)
+    with patch("app.pipeline.asr.mt.translate", mock):
+        await session._do_translate(_make_seg("Hello world, how are you?"))
+    mock.assert_called_once()
+
+
+# ── on_model_ready callback ───────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_on_model_ready_callback_fires_on_server_ready() -> None:
+    """on_model_ready must be called exactly once when SERVER_READY arrives.
+
+    This callback is how main.py learns the model is loaded without polling.
+    The session must NOT fire it for other message types.
+    """
+    import asyncio
+    from unittest.mock import MagicMock, patch
+
+    callback = MagicMock()
+    session = ASRSession(lang_pair="en→zh-TW", on_model_ready=callback)
+
+    # Fake WebSocket that yields two messages then ends iteration.
+    # _recv_loop does `async for raw in ws:` — StopAsyncIteration terminates it.
+    class _FakeWS:
+        _msgs = [
+            '{"message": "SERVER_READY"}',
+            '{"message": "WAIT"}',  # should NOT trigger callback again
+        ]
+        _idx = 0
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self) -> str:
+            if self._idx >= len(self._msgs):
+                raise StopAsyncIteration
+            msg = self._msgs[self._idx]
+            self._idx += 1
+            return msg
+
+    recv_task = asyncio.create_task(session._recv_loop(_FakeWS()))  # type: ignore[arg-type]
+    await asyncio.wait_for(recv_task, timeout=2.0)
+
+    callback.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_on_model_ready_callback_not_required() -> None:
+    """ASRSession must work normally when no callback is passed."""
+    session = ASRSession(lang_pair="en→zh-TW")  # on_model_ready defaults to None
+    assert session._on_model_ready is None
+    # Callback-less session accepts _do_translate without error.
+    mock = AsyncMock(return_value=None)
+    with patch("app.pipeline.asr.mt.translate", mock):
+        await session._do_translate(_make_seg("Hello world"))
+    mock.assert_called_once()
+
+
 # ── direction routing ─────────────────────────────────────────────────────────
 
 
@@ -121,3 +202,29 @@ async def test_do_translate_zh_en_routes_correctly():
     call_kwargs = mock.call_args.kwargs
     assert call_kwargs["source_language"] == "zh"
     assert call_kwargs["target_language"] == "en"
+
+
+# ── confidence propagation ────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_do_translate_passes_confidence_to_mt():
+    """source_confidence from WHL avg_logprob must reach mt.translate."""
+    seg = {"segment_id": "seg-1", "text": "Hello world, how are you?", "confidence": 0.82}
+    session = ASRSession(lang_pair="en→zh-TW")
+    mock = AsyncMock(return_value=None)
+    with patch("app.pipeline.asr.mt.translate", mock):
+        await session._do_translate(seg)
+    call_kwargs = mock.call_args.kwargs
+    assert call_kwargs["source_confidence"] == pytest.approx(0.82)
+
+
+@pytest.mark.asyncio
+async def test_do_translate_passes_none_confidence_when_absent():
+    """When seg has no confidence key, source_confidence=None reaches mt.translate."""
+    session = ASRSession(lang_pair="en→zh-TW")
+    mock = AsyncMock(return_value=None)
+    with patch("app.pipeline.asr.mt.translate", mock):
+        await session._do_translate(_make_seg("Hello world, how are you?"))
+    call_kwargs = mock.call_args.kwargs
+    assert call_kwargs["source_confidence"] is None

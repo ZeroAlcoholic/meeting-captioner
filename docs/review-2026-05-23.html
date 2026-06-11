@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Meeting Audio 強健性審核報告 2026-05-23 — Brief</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+/* ══════════════════════════════════════
+   DESIGN TOKENS
+══════════════════════════════════════ */
+:root{
+  --bg:#060d07; --sf:#0c1a0e; --sf2:#0f2113;
+  --bd:#1f3a25; --bd2:#2a5333;
+  --tx:#e8f5ea; --tm:#9fbfa6; --td:#6b8a72;
+  --gl:#4ade80;
+  --aml:#fbbf24;
+  --cyl:#22d3ee;
+  --pul:#a78bfa;
+  --rl:#f87171;
+  --bg-g:#0a1f10; --bg-a:#1a1408; --bg-c:#08141a; --bg-p:#120e1f; --bg-r:#1a0b0b;
+}
+
+/* ══════════════════════════════════════
+   RESET + BASE
+══════════════════════════════════════ */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+html,body{height:100%;}
+body{
+  background:var(--bg); color:var(--tx);
+  font-family:'Noto Sans TC','IBM Plex Sans','Helvetica Neue',sans-serif;
+  font-size:18px; line-height:1.55; letter-spacing:0.005em;
+  font-variant-numeric:tabular-nums;
+  overflow:hidden;
+  -webkit-font-smoothing:antialiased; -moz-osx-font-smoothing:grayscale;
+  background-image:
+    radial-gradient(ellipse at top, rgba(74,222,128,0.04), transparent 60%),
+    radial-gradient(ellipse at bottom right, rgba(34,211,238,0.025), transparent 50%);
+}
+
+/* ══════════════════════════════════════
+   DECK CHASSIS
+══════════════════════════════════════ */
+#deck{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;}
+.slide{
+  position:absolute;inset:0;width:100vw;height:100vh;
+  padding:44px 76px 60px;
+  opacity:0;pointer-events:none;
+  transition:opacity 250ms ease;
+  overflow:hidden;
+  display:flex;flex-direction:column;justify-content:space-between;
+}
+.slide.active{opacity:1;pointer-events:auto;}
+.slide > .shead ~ *,
+.slide > .btitle ~ *{flex:1 1 auto;min-height:0;}
+.slide:not(#s1) > .flex-col{justify-content:space-between;}
+#s1{justify-content:center;}
+#s1 > *{flex:0 0 auto;}
+
+/* Entrance reveal */
+.slide.active > .shead,
+.slide.active > .btitle{animation:reveal-up 480ms cubic-bezier(0.16,1,0.3,1) both;}
+.slide.active > .shead + *,
+.slide.active > .btitle + *{animation:reveal-up 540ms cubic-bezier(0.16,1,0.3,1) 120ms both;}
+.slide.active > .shead + * + *,
+.slide.active > .btitle + * + *{animation:reveal-up 540ms cubic-bezier(0.16,1,0.3,1) 200ms both;}
+.slide.active > .shead + * + * + *,
+.slide.active > .btitle + * + * + *{animation:reveal-up 540ms cubic-bezier(0.16,1,0.3,1) 280ms both;}
+@keyframes reveal-up{
+  from{opacity:0;transform:translateY(12px);}
+  to{opacity:1;transform:translateY(0);}
+}
+@media print {
+  .slide.active > *{animation:none !important;opacity:1 !important;transform:none !important;}
+}
+
+/* Progress + nav */
+#bar{position:fixed;top:0;left:0;height:3px;
+  background:linear-gradient(90deg,var(--gl),var(--cyl));z-index:100;
+  transition:width 250ms ease;box-shadow:0 0 12px rgba(74,222,128,0.4);}
+#nav{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);
+  display:flex;align-items:center;gap:18px;padding:8px 16px;
+  background:rgba(15,33,19,0.85);backdrop-filter:blur(8px);
+  border:1px solid var(--bd);border-radius:24px;z-index:100;
+  font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--tm);}
+#nav button{width:30px;height:30px;background:transparent;
+  border:1px solid var(--bd2);border-radius:50%;color:var(--tx);
+  cursor:pointer;font-size:14px;transition:all 120ms;
+  display:flex;align-items:center;justify-content:center;}
+#nav button:hover{background:var(--gl);color:var(--bg);border-color:var(--gl);}
+#counter{min-width:48px;text-align:center;letter-spacing:0.05em;}
+
+/* ══════════════════════════════════════
+   SLIDE HEAD
+══════════════════════════════════════ */
+.shead{margin-bottom:22px;padding-bottom:14px;border-bottom:1px solid var(--bd);flex:0 0 auto;}
+.scat{font-family:'IBM Plex Mono',monospace;font-size:12.5px;font-weight:500;
+  letter-spacing:0.18em;text-transform:uppercase;color:var(--gl);margin-bottom:10px;}
+.shead h2{font-size:40px;font-weight:700;line-height:1.2;letter-spacing:-0.015em;color:var(--tx);margin-bottom:10px;}
+.shead .sub{font-size:17px;color:var(--tm);font-weight:400;line-height:1.5;}
+
+/* ══════════════════════════════════════
+   PRIMITIVES
+══════════════════════════════════════ */
+h3{font-size:22px;font-weight:600;color:var(--tx);margin-bottom:9px;letter-spacing:-0.005em;line-height:1.3;}
+p{color:var(--tx);font-size:18px;line-height:1.5;}
+strong{color:var(--tx);font-weight:600;}
+em{color:var(--cyl);font-style:normal;}
+a{color:var(--cyl);text-decoration:none;border-bottom:1px solid transparent;transition:border-color 120ms;}
+a:hover{border-bottom-color:var(--cyl);}
+
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:22px;}
+.g3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:18px;}
+.flex-col{display:flex;flex-direction:column;gap:10px;}
+
+/* Card system */
+.card{
+  background:var(--sf);border:1px solid var(--bd);border-radius:10px;
+  padding:16px 20px;position:relative;
+  transition:transform 200ms ease,box-shadow 200ms ease,border-color 200ms ease;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,0.02);
+}
+.card:hover{transform:translateY(-1px);border-color:var(--bd2);}
+.card.tint-g{background:var(--bg-g);border-color:rgba(74,222,128,0.4);box-shadow:inset 0 1px 0 rgba(74,222,128,0.08),0 0 0 1px rgba(74,222,128,0.05);}
+.card.tint-a{background:var(--bg-a);border-color:rgba(251,191,36,0.4);box-shadow:inset 0 1px 0 rgba(251,191,36,0.08),0 0 0 1px rgba(251,191,36,0.05);}
+.card.tint-c{background:var(--bg-c);border-color:rgba(34,211,238,0.4);box-shadow:inset 0 1px 0 rgba(34,211,238,0.08),0 0 0 1px rgba(34,211,238,0.05);}
+.card.tint-r{background:var(--bg-r);border-color:rgba(248,113,113,0.4);box-shadow:inset 0 1px 0 rgba(248,113,113,0.08),0 0 0 1px rgba(248,113,113,0.05);}
+.card.tint-g:hover{box-shadow:inset 0 1px 0 rgba(74,222,128,0.12),0 4px 18px rgba(74,222,128,0.12);}
+.card.tint-a:hover{box-shadow:inset 0 1px 0 rgba(251,191,36,0.12),0 4px 18px rgba(251,191,36,0.12);}
+.card.tint-c:hover{box-shadow:inset 0 1px 0 rgba(34,211,238,0.12),0 4px 18px rgba(34,211,238,0.12);}
+.card.tint-r:hover{box-shadow:inset 0 1px 0 rgba(248,113,113,0.12),0 4px 18px rgba(248,113,113,0.12);}
+.card .ct{font-family:'IBM Plex Mono',monospace;font-size:13.5px;
+  letter-spacing:0.1em;text-transform:uppercase;margin-bottom:8px;color:var(--gl);}
+
+/* Tables */
+.tw{margin-bottom:12px;}
+table{width:100%;border-collapse:collapse;font-size:17.5px;}
+th{text-align:left;padding:11px 14px;background:var(--sf2);color:var(--tm);
+  font-weight:600;font-family:'IBM Plex Mono',monospace;font-size:13.5px;
+  letter-spacing:0.08em;text-transform:uppercase;border-bottom:1px solid var(--bd2);}
+td{padding:10px 14px;border-bottom:1px solid var(--bd);color:var(--tx);vertical-align:top;line-height:1.45;}
+tr.hi td{background:rgba(74,222,128,0.04);}
+tr:last-child td{border-bottom:none;}
+
+/* Badges */
+.b{display:inline-block;font-family:'IBM Plex Mono',monospace;
+  font-size:12.5px;font-weight:600;letter-spacing:0.06em;
+  padding:3px 10px;border-radius:4px;text-transform:uppercase;}
+.bg{background:rgba(74,222,128,0.15);color:var(--gl);border:1px solid rgba(74,222,128,0.3);}
+.ba{background:rgba(251,191,36,0.15);color:var(--aml);border:1px solid rgba(251,191,36,0.3);}
+.bc{background:rgba(34,211,238,0.15);color:var(--cyl);border:1px solid rgba(34,211,238,0.3);}
+.bp{background:rgba(167,139,250,0.15);color:var(--pul);border:1px solid rgba(167,139,250,0.3);}
+
+/* Info box */
+.ib{padding:14px 20px;border-radius:8px;border-left:3px solid var(--gl);
+  background:var(--bg-g);font-size:17.5px;color:var(--tx);line-height:1.5;}
+.ib.iba{border-left-color:var(--aml);background:var(--bg-a);}
+.ib.ibc{border-left-color:var(--cyl);background:var(--bg-c);}
+
+/* References (dense) */
+.ref1{display:grid;grid-template-columns:26px 1fr;gap:10px;padding:6px 0;
+  border-bottom:1px dashed var(--bd);}
+.ref1:last-child{border-bottom:none;}
+.rn{width:24px;height:24px;border:1px solid var(--gl);color:var(--gl);
+  border-radius:50%;display:flex;align-items:center;justify-content:center;
+  font-family:'IBM Plex Mono',monospace;font-size:11.5px;font-weight:600;}
+.rt{font-size:16px;font-weight:600;color:var(--tx);line-height:1.4;}
+.rsrc{font-size:14.5px;color:var(--tm);margin-top:3px;line-height:1.4;}
+.rl2{font-size:13px;color:var(--cyl);font-family:'IBM Plex Mono',monospace;}
+.rcat{font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;
+  letter-spacing:0.12em;text-transform:uppercase;color:var(--gl);
+  margin-top:11px;margin-bottom:6px;}
+
+/* ══════════════════════════════════════
+   COVER (S1)
+══════════════════════════════════════ */
+#s1{position:relative;overflow:hidden;}
+#s1::before{
+  content:'';position:absolute;top:-160px;right:-160px;
+  width:560px;height:560px;
+  background:radial-gradient(circle, rgba(74,222,128,0.07), transparent 65%);
+  pointer-events:none;
+}
+#s1::after{
+  content:'';position:absolute;bottom:-140px;left:-140px;
+  width:440px;height:440px;
+  background:radial-gradient(circle, rgba(34,211,238,0.045), transparent 65%);
+  pointer-events:none;
+}
+.btitle{position:relative;margin-bottom:28px;}
+.btitle .ornament{width:48px;height:2px;background:var(--gl);margin-bottom:20px;box-shadow:0 0 10px rgba(74,222,128,0.5);}
+.btitle .eyebrow{
+  font-family:'IBM Plex Mono',monospace;font-size:13px;
+  letter-spacing:0.22em;text-transform:uppercase;color:var(--gl);
+  margin-bottom:20px;display:flex;align-items:center;gap:12px;
+}
+.btitle .eyebrow .dot{width:6px;height:6px;border-radius:50%;background:var(--gl);box-shadow:0 0 8px var(--gl);animation:pulse 2.4s ease-in-out infinite;}
+@keyframes pulse{0%,100%{opacity:0.6;}50%{opacity:1;}}
+.btitle h1{font-size:60px;font-weight:700;line-height:1.1;letter-spacing:-0.022em;color:var(--tx);margin-bottom:18px;}
+.btitle h1 .accent{color:var(--gl);font-weight:700;}
+.btitle .lede{font-size:20px;color:var(--tm);line-height:1.5;max-width:1100px;font-weight:400;}
+
+/* ══════════════════════════════════════
+   MINI-PIPELINE (S2)
+══════════════════════════════════════ */
+.mpipe{display:grid;grid-template-columns:1fr 24px 1fr 24px 1fr;align-items:stretch;gap:0;margin-bottom:16px;}
+.mpstage{position:relative;padding:14px 16px;border-radius:10px;background:var(--sf);border:1px solid var(--bd);display:flex;flex-direction:column;min-height:104px;}
+.mpstage .stagenum{position:absolute;top:-11px;left:14px;width:24px;height:24px;border-radius:50%;background:var(--bg);border:1.5px solid currentColor;display:flex;align-items:center;justify-content:center;font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:600;}
+.mpstage .mptitle{font-family:'IBM Plex Mono',monospace;font-size:13.5px;letter-spacing:0.1em;text-transform:uppercase;margin-bottom:7px;font-weight:600;}
+.mpstage .mpdesc{font-size:16px;color:var(--tm);line-height:1.5;}
+.mpstage.pc{border-color:var(--cyl);color:var(--cyl);background:var(--bg-c);}
+.mpstage.pg{border-color:var(--gl);color:var(--gl);background:var(--bg-g);}
+.mpstage.pp{border-color:var(--pul);color:var(--pul);background:var(--bg-p);}
+.mpstage .mpdesc,.mpstage strong{color:var(--tx);}
+.mparrow{display:flex;align-items:center;justify-content:center;color:var(--bd2);position:relative;}
+.mparrow::before{content:'';position:absolute;left:0;right:0;top:50%;height:1px;background:linear-gradient(90deg,transparent,var(--bd2) 30%,var(--bd2) 70%,transparent);}
+.mparrow::after{content:'▶';position:relative;z-index:1;background:var(--bg);padding:0 4px;color:var(--gl);font-size:11px;}
+
+/* ══════════════════════════════════════
+   PRINT / PDF CONTRACT
+══════════════════════════════════════ */
+@page { size: A4 landscape; margin: 0; }
+@media print {
+  html, body { height: auto !important; overflow: visible !important; }
+  #deck { position: static !important; height: auto !important; display: block !important; }
+  .slide {
+    position: relative !important; inset: auto !important;
+    display: flex !important; flex-direction: column !important;
+    justify-content: space-between !important;
+    opacity: 1 !important; pointer-events: all !important;
+    width: 100% !important; height: 100vh !important;
+    overflow: hidden !important;
+    page-break-after: always; break-after: page; page-break-inside: avoid;
+    transition: none !important;
+  }
+  #s1 { justify-content: center !important; }
+  .slide:last-of-type { page-break-after: auto; break-after: auto; }
+  .slide > *, .slide *::before, .slide *::after {
+    animation: none !important; transition: none !important;
+    opacity: 1 !important; transform: none !important;
+  }
+  #nav, #bar { display: none !important; }
+}
+
+/* ══════════════════════════════════════
+   PER-SLIDE DENSITY OVERRIDES
+══════════════════════════════════════ */
+#s4{padding-bottom:44px;}
+#s4 .shead{margin-bottom:14px;padding-bottom:10px;}
+#s4 .ref1{padding:5px 0;}
+#s4 .rcat{margin-top:10px;margin-bottom:5px;font-size:12.5px;}
+#s4 .rt{font-size:14.5px;line-height:1.35;}
+#s4 .rsrc{font-size:13.5px;line-height:1.4;margin-top:2px;}
+#s4 .rl2{font-size:12.5px;}
+#s4 .rn{width:24px;height:24px;font-size:12px;}
+#s4 .ref1{grid-template-columns:26px 1fr;gap:10px;}
+#s3 table td{padding:8px 12px;}
+#s3 table th{padding:9px 12px;}
+</style>
+</head>
+<body>
+
+<div id="bar" style="width:0%"></div>
+
+<div id="deck">
+
+<!-- ═══════════════════════════════════════════════
+     SLIDE 1 · COVER + THESIS
+     ═══════════════════════════════════════════════ -->
+<section class="slide active" id="s1">
+  <div class="btitle">
+    <div class="ornament"></div>
+    <div class="eyebrow"><span class="dot"></span>技術強健性審核 · MEETING-AUDIO · 2026-05-23</div>
+    <h1>系統測試全數通過，<span class="accent">8項可靠性缺口</span>有明確修復路徑</h1>
+    <div class="lede">針對 meeting-audio 全棧實時音訊翻譯系統之獨立審核。Python 48/48、TypeScript 35+/35+ 測試均通過。字幕路徑隔離正確，ICE 重啟 → 工作階段更新 → 退避重試三層自我修復已達生產等級。識別 4 項中等風險、4 項低風險問題，及 7 類缺漏測試類別。</div>
+  </div>
+  <div class="g3">
+    <div class="card tint-r">
+      <div class="ct" style="color:var(--rl)">已識別問題</div>
+      <p>4 項中等風險（PCM Worklet GC、WASAPI 可視性、Provider 零測試、CORS 硬編碼）+ 4 項低風險 + 7 類缺漏測試覆蓋</p>
+    </div>
+    <div class="card tint-g">
+      <div class="ct">系統優勢</div>
+      <p>字幕路徑與翻譯、摘要真正隔離；Stale-data 偵測器與多層自我修復機制設計完善，可承受長時間會議</p>
+    </div>
+    <div class="card tint-c">
+      <div class="ct" style="color:var(--cyl)">修復行動</div>
+      <p>前 4 項立即修復（環形緩衝區、健康事件、假性失敗、UUID）工作量合計不超過 2 個工作天</p>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     SLIDE 2 · HERO · 三層架構與自我修復機制
+     ═══════════════════════════════════════════════ -->
+<section class="slide" id="s2">
+  <div class="shead">
+    <div class="scat">架構審核 · 三層設計</div>
+    <h2>正規化事件契約隔離字幕路徑，線上與離線並列為一等公民</h2>
+    <div class="sub">2 條主路徑 · 4 類正規化事件 · 3 層自我修復機制 · 3000 段環形緩衝</div>
+  </div>
+  <div class="mpipe">
+    <div class="mpstage pc">
+      <span class="stagenum">1</span>
+      <div class="mptitle">音訊擷取層</div>
+      <div class="mpdesc"><strong>Mic</strong> getUserMedia + <strong>System</strong> getDisplayMedia + <strong>WASAPI</strong> PyAudioWPatch loopback；PCM Worklet @ 16 kHz</div>
+    </div>
+    <div class="mparrow"></div>
+    <div class="mpstage pg">
+      <span class="stagenum">2</span>
+      <div class="mptitle">實時處理層</div>
+      <div class="mpdesc"><strong>線上</strong>：gpt-realtime-translate WebRTC DataChannel<br><strong>離線</strong>：WHL → SegmentStabilizer → CTranslate2 MT</div>
+    </div>
+    <div class="mparrow"></div>
+    <div class="mpstage pp">
+      <span class="stagenum">3</span>
+      <div class="mptitle">字幕渲染層</div>
+      <div class="mpdesc">CaptionStore（3000 段上限）→ LiveCaption + HistoryStream；50 ms Coalesce 節流保護 React 渲染</div>
+    </div>
+  </div>
+  <div class="g2">
+    <div class="card tint-a">
+      <div class="ct" style="color:var(--aml)">自我修復策略（線上路徑）</div>
+      <p>ICE 重啟（3×，3s / 6s / 12s）→ 工作階段更新（25 min） → 退避重試（30s→1m→3m→5m→10m 永久）；Stale-data 偵測（累積 100 樣本觸發）</p>
+    </div>
+    <div class="card tint-c">
+      <div class="ct" style="color:var(--cyl)">事件隔離保障</div>
+      <p>TranscriptEvent / TranslationEvent / HealthEvent 正規化契約；翻譯、摘要、持久化任一失敗均不中斷字幕路徑</p>
+    </div>
+  </div>
+  <div class="ib">
+    <strong>審核結論：</strong>架構邊界清晰，字幕路徑已達非協商隔離要求。問題均在實作細節層面，不影響核心設計。
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     SLIDE 3 · 問題矩陣 · 修復優先序
+     ═══════════════════════════════════════════════ -->
+<section class="slide" id="s3">
+  <div class="shead">
+    <div class="scat">問題矩陣 · 修復優先序</div>
+    <h2>前 4 項直接影響音訊品質與可觀察性，後 4 項強化測試覆蓋</h2>
+    <div class="sub">按影響／工作量比排序 · 前 4 項合計工作量 ≤ 2 日 · 精確定位至檔案行號</div>
+  </div>
+  <div class="tw">
+    <table>
+      <thead><tr><th>問題</th><th>位置</th><th>症狀</th><th>工作量</th><th>優先序</th></tr></thead>
+      <tbody>
+        <tr class="hi"><td>PCM Worklet 高頻記憶體分配</td><td style="font-family:'IBM Plex Mono',monospace;font-size:13px">pcm-worklet.js:18</td><td>音訊執行緒 GC 跳頓</td><td>1 日（環形緩衝）</td><td><span class="b bg">MVP 必備</span></td></tr>
+        <tr class="hi"><td>WASAPI 丟幀零診斷可視性</td><td style="font-family:'IBM Plex Mono',monospace;font-size:13px">wasapi_loopback.py</td><td>系統音訊靜默遺失</td><td>2 小時</td><td><span class="b bg">MVP 必備</span></td></tr>
+        <tr class="hi"><td>DisplayMedia Stop 後假性失敗</td><td style="font-family:'IBM Plex Mono',monospace;font-size:13px">display-media-provider.ts</td><td>誤報錯誤橫幅</td><td>1 行程式</td><td><span class="b bg">MVP 必備</span></td></tr>
+        <tr class="hi"><td>Segment ID 毫秒時間戳衝突</td><td style="font-family:'IBM Plex Mono',monospace;font-size:13px">openai-rt-provider.ts:687</td><td>字幕列偶發覆蓋</td><td>5 字元</td><td><span class="b bg">MVP 必備</span></td></tr>
+        <tr><td>Offline CORS 硬編碼埠號</td><td style="font-family:'IBM Plex Mono',monospace;font-size:13px">offline/main.py:89</td><td>非標準埠靜默斷線</td><td>1 小時</td><td><span class="b bc">Phase 1</span></td></tr>
+        <tr><td>OpenAI Provider 零單元測試</td><td style="font-family:'IBM Plex Mono',monospace;font-size:13px">openai-rt-provider.ts</td><td>最複雜元件回歸不可見</td><td>3 日</td><td><span class="b bc">Phase 1</span></td></tr>
+        <tr><td>WHL 探測混淆 TCP 與模型就緒</td><td style="font-family:'IBM Plex Mono',monospace;font-size:13px">main.py:_probe_whl_once</td><td>healthz 誤報 ready</td><td>0.5 日</td><td><span class="b ba">Phase 2</span></td></tr>
+        <tr><td>7 類缺漏測試覆蓋（CLAUDE.md）</td><td style="font-family:'IBM Plex Mono',monospace;font-size:13px">多檔</td><td>CLAUDE.md 要求未達</td><td>5 日</td><td><span class="b ba">Phase 2</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="ib ibc">
+    <strong>缺漏測試類別（7 類）：</strong>Provider 切換不遺失字幕 · 音源中斷處理 · 靜音偵測警告 · Online API 失敗 · 模型載入失敗 · 翻譯失敗隔離 · 長時間記憶體穩定性
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     SLIDE 4 · REFERENCES
+     ═══════════════════════════════════════════════ -->
+<section class="slide" id="s4">
+  <div class="shead">
+    <div class="scat">審核佐證 · 技術依賴</div>
+    <h2>問題均有精確程式碼定位，技術依賴均為開源授權清晰項目</h2>
+    <div class="sub">4 項審查元件 · 2 項 W3C 標準 · 2 項外部服務依賴</div>
+  </div>
+  <div class="g2">
+    <div>
+      <div class="rcat">前端審查元件</div>
+      <div class="ref1"><div class="rn">1</div><div><div class="rt">OpenAIRealtimeProvider — meeting-audio (內部 · 2026)</div><div class="rsrc">WebRTC 工作階段管理、ICE 重啟、Stale-data 偵測、Segment 雙定時器；最高複雜度元件，零單元測試為 M 級風險</div><a class="rl2" href="#">apps/web/src/providers/openai-realtime-provider.ts</a></div></div>
+      <div class="ref1"><div class="rn">2</div><div><div class="rt">PcmWorkletProcessor — meeting-audio (內部 · 2026)</div><div class="rsrc">AudioWorklet PCM 封包器；高頻 Float32Array 分配為 GC 跳頓根因</div><a class="rl2" href="#">apps/web/public/pcm-worklet.js</a></div></div>
+      <div class="ref1"><div class="rn">3</div><div><div class="rt">CaptionStore + CoalesceHandlers — meeting-audio (內部 · 2026)</div><div class="rsrc">Zustand 環形緩衝（3000 段）+ 50 ms 節流；架構正確，測試覆蓋充分</div><a class="rl2" href="#">apps/web/src/store/ + providers/</a></div></div>
+      <div class="rcat">後端審查元件</div>
+      <div class="ref1"><div class="rn">4</div><div><div class="rt">ASRSession + SegmentStabilizer — meeting-audio (內部 · 2026)</div><div class="rsrc">WHL 連接管理、強制升格邏輯（12s 截止）、翻譯任務並發上限（10）；測試充分</div><a class="rl2" href="#">services/offline/app/pipeline/</a></div></div>
+      <div class="ref1"><div class="rn">5</div><div><div class="rt">WasapiLoopback — meeting-audio (內部 · 2026)</div><div class="rsrc">PyAudioWPatch 封裝；PyAudio callback 靜默丟幀為 M 級可視性風險</div><a class="rl2" href="#">services/offline/app/capture/wasapi_loopback.py</a></div></div>
+    </div>
+    <div>
+      <div class="rcat">W3C 標準</div>
+      <div class="ref1"><div class="rn">6</div><div><div class="rt">Web Audio API — W3C Recommendation (2021 · WHATWG)</div><div class="rsrc">AudioWorkletProcessor.process() 音訊執行緒行為規範；GC 分配對音訊執行緒影響之理論基礎</div><a class="rl2" href="https://www.w3.org/TR/webaudio/">w3.org/TR/webaudio</a></div></div>
+      <div class="ref1"><div class="rn">7</div><div><div class="rt">WebRTC RTCPeerConnection — W3C Recommendation (2023 · WHATWG)</div><div class="rsrc">ICE 狀態機、restartIce() 行為、connectionState 語意；OpenAI Provider ICE 重啟策略依據</div><a class="rl2" href="https://www.w3.org/TR/webrtc/">w3.org/TR/webrtc</a></div></div>
+      <div class="rcat">外部服務依賴</div>
+      <div class="ref1"><div class="rn">8</div><div><div class="rt">WhisperLiveKit — Collabora (Apache 2.0 · 2024)</div><div class="rsrc">即時串流 STT 後端；離線路徑核心依賴，TCP 探測與模型就緒狀態差異為 L 級風險</div><a class="rl2" href="https://github.com/collabora/WhisperLiveKit">github.com/collabora/WhisperLiveKit</a></div></div>
+      <div class="ref1"><div class="rn">9</div><div><div class="rt">CTranslate2 — OpenNMT (MIT · 2024)</div><div class="rsrc">CPU 推理引擎，單執行緒 executor 設計；5s 超時保護防止 CT2 死鎖卡住 recv_loop</div><a class="rl2" href="https://github.com/OpenNMT/CTranslate2">github.com/OpenNMT/CTranslate2</a></div></div>
+      <div class="ref1"><div class="rn">10</div><div><div class="rt">PyAudioWPatch — s0d3s (MIT · 2023)</div><div class="rsrc">Windows WASAPI Loopback 擷取；callback 執行緒丟幀無計數器，需加入健康事件回報</div><a class="rl2" href="https://github.com/s0d3s/PyAudioWPatch">github.com/s0d3s/PyAudioWPatch</a></div></div>
+    </div>
+  </div>
+</section>
+
+</div>
+
+<nav id="nav">
+  <button id="prev" aria-label="Previous">&larr;</button>
+  <span id="counter">1 / 4</span>
+  <button id="next" aria-label="Next">&rarr;</button>
+</nav>
+
+<script>
+(function(){
+  const slides = Array.from(document.querySelectorAll('.slide'));
+  const counter = document.getElementById('counter');
+  const bar = document.getElementById('bar');
+  let idx = 0;
+  function show(n){
+    idx = Math.max(0, Math.min(slides.length - 1, n));
+    slides.forEach((s, i) => {
+      const active = i === idx;
+      s.classList.toggle('active', active);
+      if (active) {
+        Array.from(s.children).forEach(child => {
+          child.style.animationName = 'none';
+          void child.offsetWidth;
+          child.style.animationName = '';
+        });
+      }
+    });
+    counter.textContent = (idx + 1) + ' / ' + slides.length;
+    bar.style.width = ((idx + 1) / slides.length * 100) + '%';
+  }
+  document.getElementById('prev').onclick = () => show(idx - 1);
+  document.getElementById('next').onclick = () => show(idx + 1);
+  document.addEventListener('keydown', e => {
+    if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') { e.preventDefault(); show(idx + 1); }
+    else if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); show(idx - 1); }
+    else if (e.key === 'Home') { e.preventDefault(); show(0); }
+    else if (e.key === 'End') { e.preventDefault(); show(slides.length - 1); }
+  });
+  show(0);
+})();
+</script>
+</body>
+</html>

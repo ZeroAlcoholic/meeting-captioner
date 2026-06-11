@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import uuid
+from collections.abc import Callable
 
 import websockets
 
@@ -61,12 +62,19 @@ LANG_PAIR_TO_STT: dict[str, str] = {
 class ASRSession:
     """Manages one browser client session: WHL connection + segment stabilization."""
 
-    def __init__(self, lang_pair: str = "en→zh-TW") -> None:
+    def __init__(
+        self,
+        lang_pair: str = "en→zh-TW",
+        on_model_ready: "Callable[[], None] | None" = None,
+        translate_enabled: bool = True,
+    ) -> None:
         self._language = LANG_PAIR_TO_STT.get(lang_pair, "en")
+        self._translate_enabled = translate_enabled
         self._uid = f"browser-{uuid.uuid4().hex[:8]}"
         # Stabilizer prefixes segment ids with this session uid so Stop+Start cycles
         # produce non-colliding ids in the browser captionStore.
         self._stabilizer = SegmentStabilizer(uid=self._uid)
+        self._on_model_ready = on_model_ready
         self._ready = asyncio.Event()
         self._closed = False
         # Audio forwarded from browser → WHL; large buffer covers model-loading delay (~30s)
@@ -198,6 +206,8 @@ class ASRSession:
 
             if msg.get("message") == "SERVER_READY":
                 self._ready.set()
+                if self._on_model_ready:
+                    self._on_model_ready()
                 await self._put(health_event(component="transport", state="connected"))
                 continue
 
@@ -229,7 +239,13 @@ class ASRSession:
                     task.add_done_callback(self._pending_translates.discard)
 
     async def _do_translate(self, seg: dict) -> None:
-        """Fire-and-forget translation task — runs outside recv_loop."""
+        """Fire-and-forget translation task — runs outside recv_loop.
+
+        No-op when translate_enabled=False (hybrid_privacy mode: browser
+        handles MT via the online service instead of local CT2).
+        """
+        if not self._translate_enabled:
+            return
         text = seg["text"].strip()
         if self._language == "zh":
             # Chinese has no whitespace word separators — count CJK characters instead.
@@ -244,6 +260,7 @@ class ASRSession:
                 text=text,
                 source_language=self._language,
                 target_language="zh-TW" if self._language == "en" else "en",
+                source_confidence=seg.get("confidence"),
             )
             if translation_ev is not None:
                 await self._put(translation_ev)
