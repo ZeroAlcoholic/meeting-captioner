@@ -24,6 +24,21 @@ const ConfigSchema = z.object({
   ONLINE_HOST: z.string().default('127.0.0.1'),
   ONLINE_CORS_ORIGIN: z.string().default('http://localhost:5173'),
   OPENAI_API_KEY: z.string().optional(),
+  /**
+   * Google Gemini Developer API key (AI Studio). When set, the server can mint
+   * short-lived ephemeral tokens for the browser to open a Gemini Live API
+   * WebSocket directly (the raw key never reaches the browser). This enables
+   * Gemini as a second online realtime backend selectable in the UI.
+   */
+  GEMINI_API_KEY: z.string().optional(),
+  /**
+   * Gemini Live model id. Defaults to the dedicated live-translation model
+   * (Gemini 3 Pro based, released 2026-06-09): continuous streaming, purpose-
+   * built translation via translationConfig, Traditional-Chinese output.
+   * Override via env (e.g. gemini-2.5-flash-native-audio-latest for the
+   * system-instruction path). The `models/` prefix is added by the token route.
+   */
+  GEMINI_LIVE_MODEL: z.string().default('gemini-3.5-live-translate-preview'),
   // Hard cap on the upstream OpenAI client_secrets fetch. Above this we 504 the caller
   // rather than letting the browser hang on a stalled WebRTC bring-up.
   OPENAI_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
@@ -55,5 +70,14 @@ console.log(
     keyLen > 0
       ? `set in system env (${keyLen} chars)`
       : 'MISSING — set OPENAI_API_KEY in your user/system env, then restart'
+  }`,
+);
+const geminiKeyLen = config.GEMINI_API_KEY?.length ?? 0;
+// eslint-disable-next-line no-console
+console.log(
+  `[config] GEMINI_API_KEY: ${
+    geminiKeyLen > 0
+      ? `set in system env (${geminiKeyLen} chars) — Gemini backend available, model=${config.GEMINI_LIVE_MODEL}`
+      : 'not set — Gemini backend disabled'
   }`,
 );

@@ -30,13 +30,14 @@ const SessionBodySchema = z
     /**
      * Acoustic environment hint forwarded to OpenAI as
      * `audio.input.noise_reduction.type`:
-     *   'close' → near_field (default, headset/desktop mic).
-     *   'far'   → far_field (conference room, ceiling mic, far-distance).
-     *   'off'   → field omitted entirely (raw signal to the model).
+     *   'meeting' → far_field (multi-speaker room on one mic — default in UI).
+     *   'close'   → near_field (headset/desktop mic, single speaker).
+     *   'far'     → far_field (conference room, ceiling mic, far-distance).
+     *   'off'     → field omitted entirely (raw signal to the model).
      * Picked to match what the browser's getUserMedia AGC is also doing
      * client-side so the audio path is internally consistent.
      */
-    micDistance: z.enum(['close', 'far', 'off']).optional(),
+    micDistance: z.enum(['meeting', 'close', 'far', 'off']).optional(),
   })
   .strict();
 
@@ -81,11 +82,21 @@ export function _resetRateLimitForTests(): void {
 }
 
 export async function registerSession(app: FastifyInstance): Promise<void> {
-  app.get('/session/info', async () => ({
-    hasApiKey: Boolean(config.OPENAI_API_KEY),
-    sessionRenewalRecommendedMs: config.SESSION_RENEW_MS,
-    supportedLangPairs: Object.keys(LANG_OUTPUT),
-  }));
+  app.get('/session/info', async () => {
+    // Which online realtime backends this server can actually broker, based on
+    // which credentials are present. The UI uses this to enable/grey-out the
+    // backend selector so the user never picks an unconfigured provider.
+    const availableProviders: string[] = [];
+    if (config.OPENAI_API_KEY) availableProviders.push('openai');
+    if (config.GEMINI_API_KEY) availableProviders.push('gemini');
+    return {
+      hasApiKey: Boolean(config.OPENAI_API_KEY),
+      hasGeminiKey: Boolean(config.GEMINI_API_KEY),
+      availableProviders,
+      sessionRenewalRecommendedMs: config.SESSION_RENEW_MS,
+      supportedLangPairs: Object.keys(LANG_OUTPUT),
+    };
+  });
 
   app.post('/session', async (req: FastifyRequest, reply: FastifyReply) => {
     if (!config.OPENAI_API_KEY) {
@@ -123,7 +134,11 @@ export async function registerSession(app: FastifyInstance): Promise<void> {
     const audioInput: Record<string, unknown> = {};
     if (micDistance === 'close') {
       audioInput.noise_reduction = { type: 'near_field' };
-    } else if (micDistance === 'far') {
+    } else if (micDistance === 'far' || micDistance === 'meeting') {
+      // 'meeting' = multi-speaker room: far_field is OpenAI's tuned profile
+      // for reverberant spaces with speakers at varying distances, so it
+      // keeps a switched-to speaker recognisable where near_field would gate
+      // them as noise.
       audioInput.noise_reduction = { type: 'far_field' };
     }
     // micDistance==='off' → no noise_reduction key at all

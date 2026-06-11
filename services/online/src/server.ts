@@ -8,6 +8,7 @@ import { config } from './config.js';
 import { registerHealthz } from './routes/healthz.js';
 import { registerSession } from './routes/session.js';
 import { registerTranslate } from './routes/translate.js';
+import { registerGemini } from './routes/gemini.js';
 
 // pino-pretty is great for dev console output but causes trouble in the
 // bundled slim release (pino loads it via a worker thread that resolves
@@ -49,6 +50,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await registerHealthz(app);
   await registerSession(app);
   await registerTranslate(app);
+  await registerGemini(app);
 
   // Slim-distribution mode: when WEB_DIST_PATH is set, serve apps/web/dist as
   // static files so the entire stack runs from one process on one port.

@@ -156,6 +156,27 @@ describe('POST /session', () => {
     expect(body.session.audio.input.noise_reduction).toEqual({ type: 'near_field' });
   });
 
+  it('maps micDistance="meeting" to far_field noise_reduction', async () => {
+    const mockFn = vi.fn().mockResolvedValueOnce(
+      new Response(JSON.stringify(FAKE_SECRET), { status: 200 }),
+    );
+    vi.stubGlobal('fetch', mockFn);
+    mockConfig.OPENAI_API_KEY = 'sk-test';
+    const app = Fastify({ logger: false });
+    await registerSession(app);
+    await app.inject({
+      method: 'POST',
+      url: '/session',
+      payload: { micDistance: 'meeting' },
+    });
+
+    const [, init] = mockFn.mock.calls[0] as [string, { body: string }];
+    const body = JSON.parse(init.body) as {
+      session: { audio: { input: Record<string, unknown> } };
+    };
+    expect(body.session.audio.input.noise_reduction).toEqual({ type: 'far_field' });
+  });
+
   it('sets output language "en" when langPair is zh-TW→en', async () => {
     const mockFn = vi.fn().mockResolvedValueOnce(
       new Response(JSON.stringify(FAKE_SECRET), { status: 200 }),
