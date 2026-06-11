@@ -93,20 +93,33 @@ const HistoryStream = memo(function HistoryStream({ langPair }: HistoryStreamPro
   const [autoPin, setAutoPin] = useState(true);
   const [pendingNew, setPendingNew] = useState(0);
   const segmentsAtPauseRef = useRef<number>(0);
+  // Mirror autoPin into a ref so the ResizeObserver callback (created once,
+  // never re-subscribed) reads the live value instead of a stale closure.
+  const autoPinRef = useRef(true);
+  autoPinRef.current = autoPin;
 
-  // The last finalized segment is always rendered by LiveCaption (either as
-  // the live area's static content when no partial is in flight, or as the
-  // stable underlay while a fresh partial waits for its translation). So
-  // history must EXCLUDE it — otherwise the same line appears twice on the
-  // board, which was the P3.6 → P3.7 regression caught during the
-  // browser-level verification pass.
+  // The last finalized segment is rendered by LiveCaption ONLY while no
+  // partial is in flight (computeDisplayed shows the live partial otherwise).
+  // So the exclusion must be conditional:
+  //   - no live partial → LiveCaption shows the last final BIG → history must
+  //     exclude it (double-display was the P3.6 → P3.7 regression);
+  //   - live partial in flight → LiveCaption shows the NEW utterance → the
+  //     just-finished sentence must stay IN history, otherwise it vanishes
+  //     from the entire board for the 1–3 s the next sentence streams (the
+  //     dominant pattern on the continuous Gemini translate path).
+  const hasLive = useCaptionStore((s) => s.livePartial !== null);
   const historySegments = useMemo(
-    () => (segments.length > 0 ? segments.slice(0, -1) : segments),
-    [segments],
+    () => (hasLive || segments.length === 0 ? segments : segments.slice(0, -1)),
+    [segments, hasLive],
   );
 
   const isZhTarget = langPair === 'en→zh-TW';
 
+  // Target-side accessors fall back to the SOURCE text when no translation
+  // exists for a segment (CLAUDE.md: "translation fails → keep source
+  // transcript"). Without the fallback, untranslated finals — every sentence
+  // in Gemini's echo-silent case, or any MT failure — are skipped entirely
+  // and become invisible when the source column is toggled off.
   const zhParagraphs = useMemo(
     () =>
       groupParagraphsForSide({
@@ -114,7 +127,7 @@ const HistoryStream = memo(function HistoryStream({ langPair }: HistoryStreamPro
         translations,
         side: 'zh',
         accessor: (s, t) =>
-          isZhTarget ? t?.targetText ?? '' : s.text,
+          isZhTarget ? (t?.targetText || s.text) : s.text,
       }),
     [historySegments, translations, isZhTarget],
   );
@@ -125,7 +138,7 @@ const HistoryStream = memo(function HistoryStream({ langPair }: HistoryStreamPro
         translations,
         side: 'en',
         accessor: (s, t) =>
-          isZhTarget ? s.text : t?.targetText ?? '',
+          isZhTarget ? s.text : (t?.targetText || s.text),
       }),
     [historySegments, translations, isZhTarget],
   );
@@ -143,6 +156,11 @@ const HistoryStream = memo(function HistoryStream({ langPair }: HistoryStreamPro
     const onScroll = () => {
       const fromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
       const nowPinned = fromBottom < 32;
+      // Update the ref SYNCHRONOUSLY (not just via the render-time mirror) so a
+      // ResizeObserver callback that fires in the same frame — before React
+      // commits this setAutoPin — reads the fresh intent and does not yank the
+      // view back to the bottom while the user is scrolling up.
+      autoPinRef.current = nowPinned;
       setAutoPin((wasPinned) => {
         if (wasPinned && !nowPinned) {
           segmentsAtPauseRef.current = segments.length;
@@ -170,6 +188,28 @@ const HistoryStream = memo(function HistoryStream({ langPair }: HistoryStreamPro
     const el = historyRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [primaryParagraphs, secondaryParagraphs, autoPin]);
+
+  // Re-pin on ANY size change of the history pane or its content — not just
+  // when paragraph arrays change. The board is `grid-template-rows: 1fr auto`,
+  // so when the big live caption below wraps to extra lines the history pane
+  // (1fr) shrinks; the just-finalized small line that was sitting at the
+  // bottom then scrolls out of view. That resize fires no scroll event and
+  // no paragraph-array change, so the layout-effect above never caught it —
+  // the "剛講過的話不會自動拉到最底" bug. A ResizeObserver on the scroll
+  // container catches both its own height changes and content reflow.
+  useEffect(() => {
+    const el = historyRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return undefined;
+    const ro = new ResizeObserver(() => {
+      if (autoPinRef.current) el.scrollTop = el.scrollHeight;
+    });
+    ro.observe(el);
+    // Also observe the content column so late-arriving translations (which
+    // grow content height without resizing the container) re-pin too.
+    const firstCol = el.firstElementChild;
+    if (firstCol) ro.observe(firstCol);
+    return () => ro.disconnect();
+  }, []);
 
   function jumpToLatest(): void {
     const el = historyRef.current;
@@ -328,7 +368,15 @@ const LiveCaption = memo(function LiveCaption({ frozen, langPair }: LiveCaptionP
         data-testid="caption-target"
         data-status={displayed.status}
       >
-        {displayed.target || '…'}
+        {displayed.target
+          ? displayed.target
+          : isPartial
+            // Translation hasn't caught up to the fresh utterance yet — a bare
+            // 5rem ellipsis read as "nothing is happening". Label the state.
+            ? <span className={styles.translatingHint}>翻譯中…</span>
+            // Finalized with no translation (MT failure / speaker already in
+            // target language): degrade to the source text, never a blank.
+            : displayed.source || '…'}
       </div>
       {bilingual && (
         <div className={styles.source} data-testid="caption-source" data-status={displayed.status}>

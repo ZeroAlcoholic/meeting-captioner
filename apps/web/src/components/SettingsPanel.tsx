@@ -3,14 +3,20 @@ import { AudioLevelMeter } from './AudioLevelMeter.js';
 import { HealthRow } from './HealthRow.js';
 import { ModeSelector } from './ModeSelector.js';
 import { ScenarioPicker } from './ScenarioPicker.js';
-import { LANG_PAIR_OPTIONS, type LangPair, type MicDistance } from '../settings/settings-store.js';
+import { LANG_PAIR_OPTIONS, type LangPair, type MicDistance, type OnlineProvider } from '../settings/settings-store.js';
 import { useSettingsStore } from '../settings/use-settings-store.js';
 import styles from './SettingsPanel.module.css';
 
+const ONLINE_PROVIDER_OPTIONS: Array<{ id: OnlineProvider; label: string; hint: string }> = [
+  { id: 'openai', label: 'OpenAI', hint: 'OpenAI Realtime Translate (WebRTC). 預設。' },
+  { id: 'gemini', label: 'Gemini', hint: 'Google Gemini 3.5 Live Translate（WebSocket）。專用即時翻譯模型，連續串流、低延遲，繁體中文輸出。需伺服器設定 GEMINI_API_KEY。' },
+];
+
 const MIC_DISTANCE_OPTIONS: Array<{ id: MicDistance; label: string; hint: string }> = [
-  { id: 'close', label: 'Close', hint: 'Desktop / headset mic ≤ 1 m. AGC on + near_field noise reduction.' },
-  { id: 'far',   label: 'Far',   hint: 'Conference room, ceiling mic, far speakers. AGC off + far_field noise reduction.' },
-  { id: 'off',   label: 'Raw',   hint: 'No AGC, no noise reduction. For clean upstream (mixer / DSP).' },
+  { id: 'meeting', label: 'Meeting', hint: '多人會議共用一支麥克風（建議）。關閉瀏覽器 AGC/雜訊抑制，改用 OpenAI far_field — 換語者時不會把新講者當雜訊濾掉。' },
+  { id: 'close',   label: 'Close',   hint: 'Single speaker, desktop / headset mic ≤ 1 m. AGC on + near_field noise reduction.' },
+  { id: 'far',     label: 'Far',     hint: 'Conference room, ceiling mic, far speakers. AGC off (NS on) + far_field noise reduction.' },
+  { id: 'off',     label: 'Raw',     hint: 'No AGC, no noise reduction. For clean upstream (mixer / DSP).' },
 ];
 
 export interface SettingsPanelProps {
@@ -28,6 +34,12 @@ export interface SettingsPanelProps {
    * then the button's onClick re-opens, looking like the toggle is broken.
    */
   triggerRef?: RefObject<HTMLElement>;
+  /**
+   * True while any caption provider is running. Locks the online-backend
+   * picker: switching it mid-session would hide the running provider's
+   * Start/cost UI while the session (and its billing) silently continued.
+   */
+  sessionActive?: boolean;
 }
 
 /**
@@ -116,6 +128,55 @@ function LanguageBlock() {
  * micDistance='off' in that path; greying out the buttons here makes the
  * UI reflect that fact instead of pretending the setting still applies.
  */
+/**
+ * Online realtime backend selector (mode 'online_full' only). Switches which
+ * cloud provider brokers the realtime translation session. Both emit the same
+ * normalized events; switching mid-session requires Stop → Start.
+ */
+function OnlineProviderBlock({ sessionActive = false }: { sessionActive?: boolean }) {
+  const onlineProvider = useSettingsStore((s) => s.onlineProvider);
+  const setOnlineProvider = useSettingsStore((s) => s.setOnlineProvider);
+  const modeId = useSettingsStore((s) => s.modeId);
+  if (modeId !== 'online_full') return null;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <span style={{ fontSize: 12, opacity: 0.65, textTransform: 'uppercase', letterSpacing: 1 }}>
+        Online backend
+      </span>
+      <div style={{ display: 'flex', gap: 6 }}>
+        {ONLINE_PROVIDER_OPTIONS.map((opt) => (
+          <button
+            key={opt.id}
+            type="button"
+            data-testid={`online-provider-${opt.id}`}
+            disabled={sessionActive}
+            title={sessionActive ? '會議進行中 — 請先 Stop 再切換後端' : opt.hint}
+            onClick={() => setOnlineProvider(opt.id)}
+            style={{
+              padding: '5px 12px',
+              borderRadius: 4,
+              border: onlineProvider === opt.id ? '2px solid #4a9eff' : '1px solid #555',
+              background: onlineProvider === opt.id ? '#1a3a5c' : 'transparent',
+              color: '#e8e8e8',
+              cursor: sessionActive ? 'not-allowed' : 'pointer',
+              fontWeight: onlineProvider === opt.id ? 700 : 400,
+              fontSize: 14,
+              opacity: sessionActive ? 0.4 : 1,
+            }}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
+      {sessionActive && (
+        <span style={{ fontSize: 11, opacity: 0.6, marginTop: 2 }}>
+          會議進行中 — 切換後端前請先 Stop。
+        </span>
+      )}
+    </div>
+  );
+}
+
 function MicDistanceBlock() {
   const micDistance = useSettingsStore((s) => s.micDistance);
   const setMicDistance = useSettingsStore((s) => s.setMicDistance);
@@ -165,7 +226,7 @@ function MicDistanceBlock() {
 }
 
 
-export function SettingsPanel({ open, onClose, triggerRef }: SettingsPanelProps) {
+export function SettingsPanel({ open, onClose, triggerRef, sessionActive }: SettingsPanelProps) {
   const hasAudioLevel = useSettingsStore((s) => s.audioLevel !== null);
   const panelRef = useRef<HTMLElement>(null);
 
@@ -206,6 +267,7 @@ export function SettingsPanel({ open, onClose, triggerRef }: SettingsPanelProps)
             room without needing a divider line. */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
           <LanguageBlock />
+          <OnlineProviderBlock sessionActive={sessionActive ?? false} />
           <MicDistanceBlock />
         </div>
         <HealthRow />

@@ -149,10 +149,28 @@
   border-bottom: 1px solid #0f1522;
 }
 
+/* Landing cue: the row that just arrived from the live area gets a faint
+   one-shot background tint that fades over ~700 ms. Gives the eye an anchor
+   when a sentence jumps from 5rem live text to a 1.3rem history row. Pure
+   CSS on mount (rows are keyed by paragraph id, so it plays exactly once);
+   background-color only — no layout/paint storm at sentence rate. */
+.historyRow:last-child {
+  animation: rowLanded 700ms ease-out;
+}
+@keyframes rowLanded {
+  from { background-color: rgba(199, 146, 54, 0.10); }
+  to   { background-color: transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .historyRow:last-child { animation: none; }
+}
+
 .historyTime {
   font-family: var(--font-ui, 'DM Mono', monospace);
   font-size: 10px;
-  color: #2a3448;
+  /* #2a3448 was ~1.6:1 — effectively invisible on a projector. Still the
+     quietest element on the board, just no longer a ghost. */
+  color: #4a5870;
   letter-spacing: 0.04em;
   padding-top: 0.35rem;
   text-align: right;
@@ -188,7 +206,8 @@
   font-size: 1.05rem;
   font-weight: 400;
   line-height: 1.6;
-  color: #6a7889;
+  /* Bumped from #6a7889 (~4.3:1, AA-marginal at this size) for projector headroom. */
+  color: #7e8da1;
   letter-spacing: 0.01em;
 }
 
@@ -220,6 +239,29 @@
   line-height: 1.22;
   color: #edf0f5;
   letter-spacing: -0.01em;
+  /* Reserve ~2 lines so the area doesn't collapse to one short placeholder
+     line at every sentence start — that collapse made the history pane above
+     (1fr) grow/shrink once per sentence, a constant whole-board jitter. */
+  min-height: 2.5em;
+}
+
+/* CJK display sizing: 1.22 line-height and negative tracking are Latin
+   display parameters. Full-frame Traditional Chinese glyphs at 5rem need
+   more leading or dense strokes on adjacent lines visually collide on a
+   projector; CJK also reads worse with negative letter-spacing. */
+.board[data-lang-pair='en→zh-TW'] .target {
+  line-height: 1.35;
+  letter-spacing: 0;
+}
+
+/* "Translation catching up" placeholder inside the big target area — shown
+   small and dim so it reads as a status note, not as caption content. */
+.translatingHint {
+  font-family: var(--font-ui, 'DM Mono', monospace);
+  font-size: 0.3em;
+  font-weight: 400;
+  letter-spacing: 0.08em;
+  color: #6a7889;
 }
 /* In-flight partial: target is slightly softer until the translation has
    "caught up" to the source. Same intent as the old 'frozen' state, just
@@ -237,7 +279,10 @@
      English source doesn't overpower the big target while still staying
      readable from projector distance. */
   font-size: clamp(0.875rem, 1.15vw, 1.05rem);
-  color: #4a5870;
+  /* #4a5870 measured ≈2.7:1 against the board background — below even the
+     3:1 large-text floor, near-invisible on a washed-out projector. ≈7:1
+     keeps it readable; the small size alone keeps it secondary. */
+  color: #8a98ad;
   line-height: 1.5;
   letter-spacing: 0.01em;
 }

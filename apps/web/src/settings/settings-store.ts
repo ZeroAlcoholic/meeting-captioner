@@ -13,20 +13,36 @@ export type ModeId = 'online_full' | 'hybrid_privacy' | 'full_offline';
 export type LangPair = 'en→zh-TW' | 'zh-TW→en';
 export type OfflineAudioSource = 'mic' | 'system';
 /**
+ * Online realtime backend selector (mode 'online_full' only). Both are
+ * cloud realtime translation paths behind the same normalized event
+ * contracts; the user picks which provider brokers the session.
+ *   'openai' — OpenAI Realtime Translate (WebRTC). Default.
+ *   'gemini' — Google Gemini Live API (WebSocket, ephemeral token).
+ */
+export type OnlineProvider = 'openai' | 'gemini';
+/**
  * Acoustic environment selector. Drives BOTH:
  *   - browser-side getUserMedia AGC (auto-gain control)
  *   - server-side OpenAI `audio.input.noise_reduction.type`
  *
- *   'close' — desktop / headset mic: AGC on, noise_reduction=near_field.
- *             The default, fine for ~1 m mic distance.
- *   'far'   — conference-room / ceiling / table-far mic: AGC OFF (so soft
- *             speakers across the room aren't over-compressed) and
- *             noise_reduction=far_field (OpenAI's tuned profile for
- *             reverberant acoustic spaces).
- *   'off'   — raw signal: AGC off, no noise_reduction. For users who
- *             want OpenAI to see the unprocessed mic.
+ *   'meeting' — DEFAULT. Room with multiple people sharing one laptop mic.
+ *               ALL browser DSP off (AGC + NS + EC), noise_reduction=far_field.
+ *               Browser DSP is tuned for a single 1-on-1 caller: AGC locks
+ *               gain to the dominant speaker and near_field NS gates softer /
+ *               different-voiced participants as "noise", so when the speaker
+ *               changes the new voice is dropped. Feeding OpenAI the raw
+ *               multi-speaker signal and letting its far_field profile do the
+ *               work keeps every speaker around the table recognisable.
+ *   'close'   — desktop / headset mic ≤ 1 m, single speaker: AGC on,
+ *               noise_reduction=near_field.
+ *   'far'     — conference-room / ceiling / table-far mic: AGC OFF (so soft
+ *               speakers across the room aren't over-compressed), NS on, and
+ *               noise_reduction=far_field (OpenAI's tuned profile for
+ *               reverberant acoustic spaces).
+ *   'off'     — raw signal: AGC off, no noise_reduction. For users who
+ *               want OpenAI to see the unprocessed mic.
  */
-export type MicDistance = 'close' | 'far' | 'off';
+export type MicDistance = 'meeting' | 'close' | 'far' | 'off';
 
 export const LANG_PAIR_OPTIONS: Array<{ id: LangPair; label: string; hint: string }> = [
   { id: 'en→zh-TW', label: 'EN → 繁中', hint: 'English speech → Traditional Chinese captions' },
@@ -191,8 +207,10 @@ export interface SettingsState {
    * cross-checking the speaker's original words.
    */
   includeSourceTranscript: boolean;
-  /** See MicDistance docstring. Default 'close'. */
+  /** See MicDistance docstring. Default 'meeting' (multi-speaker room). */
   micDistance: MicDistance;
+  /** Online realtime backend (mode 'online_full'). Default 'openai'. */
+  onlineProvider: OnlineProvider;
   health: Record<HealthComponent, HealthSnapshot>;
   audioLevel: AudioLevelSnapshot | null;
   /** epoch ms when the current realtime session started; null when not running */
@@ -225,6 +243,7 @@ export interface SettingsState {
   setAudioSource: (s: OfflineAudioSource) => void;
   setIncludeSourceTranscript: (v: boolean) => void;
   setMicDistance: (v: MicDistance) => void;
+  setOnlineProvider: (v: OnlineProvider) => void;
   applyHealth: (event: HealthEvent) => void;
   applyAudioLevel: (event: AudioLevelEvent) => void;
   startSession: () => void;
@@ -250,6 +269,7 @@ interface PersistedPrefs {
   audioSource: OfflineAudioSource;
   includeSourceTranscript: boolean;
   micDistance: MicDistance;
+  onlineProvider: OnlineProvider;
 }
 const PREFS_KEY = 'meeting-audio:settings:v1';
 const PREFS_VERSION = 1;
@@ -301,7 +321,8 @@ export function createSettingsStore(): SettingsStore {
     langPair: hydrated?.langPair ?? DEFAULT_LANG_PAIR,
     audioSource: hydrated?.audioSource ?? 'mic',
     includeSourceTranscript: hydrated?.includeSourceTranscript ?? true,
-    micDistance: hydrated?.micDistance ?? 'close',
+    micDistance: hydrated?.micDistance ?? 'meeting',
+    onlineProvider: hydrated?.onlineProvider ?? 'openai',
     health: defaultHealth(initialTimestamp),
     audioLevel: null,
     sessionStartAt: null,
@@ -319,6 +340,7 @@ export function createSettingsStore(): SettingsStore {
     setAudioSource: (audioSource) => set({ audioSource }),
     setIncludeSourceTranscript: (v) => set({ includeSourceTranscript: v }),
     setMicDistance: (v) => set({ micDistance: v }),
+    setOnlineProvider: (v) => set({ onlineProvider: v }),
 
     applyHealth: (event) =>
       set((state) => {
@@ -376,7 +398,8 @@ export function createSettingsStore(): SettingsStore {
         langPair: DEFAULT_LANG_PAIR,
         audioSource: 'mic',
         includeSourceTranscript: true,
-        micDistance: 'close',
+        micDistance: 'meeting',
+        onlineProvider: 'openai',
         health: defaultHealth(new Date().toISOString()),
         audioLevel: null,
         sessionStartAt: null,
@@ -399,6 +422,7 @@ export function createSettingsStore(): SettingsStore {
         audioSource: state.audioSource,
         includeSourceTranscript: state.includeSourceTranscript,
         micDistance: state.micDistance,
+        onlineProvider: state.onlineProvider,
       };
       const snap = JSON.stringify(prefs);
       if (snap !== lastSnapshot) {

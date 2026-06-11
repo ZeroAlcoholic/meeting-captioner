@@ -237,8 +237,23 @@ describe('settingsStore — micDistance + persistence', () => {
     else delete (globalThis as { localStorage?: Storage }).localStorage;
   });
 
-  it('defaults micDistance to "close"', () => {
-    expect(store.getState().micDistance).toBe('close');
+  it('defaults micDistance to "meeting" (multi-speaker room)', () => {
+    expect(store.getState().micDistance).toBe('meeting');
+  });
+
+  it('setMicDistance accepts "meeting" and persists it', () => {
+    store.getState().setMicDistance('meeting');
+    expect(store.getState().micDistance).toBe('meeting');
+    const persisted = JSON.parse(memLs.get('meeting-audio:settings:v1') ?? '{}');
+    expect(persisted.micDistance).toBe('meeting');
+  });
+
+  it('defaults onlineProvider to "openai" and persists a switch to "gemini"', () => {
+    expect(store.getState().onlineProvider).toBe('openai');
+    store.getState().setOnlineProvider('gemini');
+    expect(store.getState().onlineProvider).toBe('gemini');
+    const persisted = JSON.parse(memLs.get('meeting-audio:settings:v1') ?? '{}');
+    expect(persisted.onlineProvider).toBe('gemini');
   });
 
   it('setMicDistance updates and persists to localStorage', () => {

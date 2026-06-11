@@ -798,8 +798,8 @@ describe('OpenAIRealtimeProvider', () => {
     // audio-active level-poll ticks (100 × 100ms = ~10s of speech evidence)
     // since the last DC event, and fires a renewal when BOTH conditions hold:
     //   dcGap > 30s  AND  audioActiveSamplesSinceDc >= 100
-    // The fake analyser returns 0.05 amplitude ≈ -26 dB, above the 'close'
-    // threshold of -40 dB, so every 100ms tick counts as audio-active.
+    // The fake analyser returns 0.05 amplitude ≈ -26 dB, above the default
+    // 'meeting' threshold of -48 dB, so every 100ms tick counts as audio-active.
     vi.useFakeTimers();
     const fetchMock = vi.fn()
       // Initial bring-up: /session OK + SDP OK
@@ -949,8 +949,8 @@ describe('OpenAIRealtimeProvider', () => {
 
   it('silence_detected emitted after 30s of sub-threshold audio; connected emitted when speech resumes', async () => {
     // The fake analyser returns amplitude 0.05 ≈ -26 dB, which is ABOVE the
-    // 'close' mic threshold of -40 dB. To simulate silence we swap it to a
-    // near-zero amplitude so no tick counts as audio-active.
+    // default 'meeting' mic threshold of -48 dB. To simulate silence we swap
+    // it to a near-zero amplitude so no tick counts as audio-active.
     vi.useFakeTimers();
 
     const silentBuf = new Float32Array(2048).fill(0.0001); // ~-80 dB: silent
@@ -990,9 +990,11 @@ describe('OpenAIRealtimeProvider', () => {
     const resumeEvents = healthEvents.filter(
       (e) => e.component === 'audio' && e.state === 'connected',
     );
-    // At least one connected after silence_detected
-    const resumeIdx = healthEvents.findLastIndex((e) => e.state === 'connected');
-    const silenceIdx = healthEvents.findLastIndex((e) => e.state === 'silence_detected');
+    // At least one connected after silence_detected. (lastIndexOf on a mapped
+    // states array keeps this ES2022-lib clean — Array.findLastIndex is ES2023.)
+    const states = healthEvents.map((e) => e.state);
+    const resumeIdx = states.lastIndexOf('connected');
+    const silenceIdx = states.lastIndexOf('silence_detected');
     expect(resumeIdx).toBeGreaterThan(silenceIdx);
 
     // silence_detected must not fire again while speaking

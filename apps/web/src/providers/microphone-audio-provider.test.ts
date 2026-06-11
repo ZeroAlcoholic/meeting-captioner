@@ -67,6 +67,39 @@ describe('MicrophoneAudioProvider', () => {
     expect(events[1]!.message).toContain('NotAllowedError');
   });
 
+  it('default (meeting) profile disables AGC, NS and EC so a switched speaker is not gated', async () => {
+    const stream = fakeStream();
+    const getUserMedia = vi.fn().mockResolvedValue(stream);
+    vi.stubGlobal('navigator', { mediaDevices: { getUserMedia } });
+    vi.stubGlobal('AudioContext', fakeAudioContext(stream));
+
+    // No constructor arg → 'meeting' default.
+    await new MicrophoneAudioProvider().acquire((e) => events.push(e));
+
+    const [arg] = getUserMedia.mock.calls[0] as [MediaStreamConstraints];
+    expect(arg.audio).toMatchObject({
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false,
+    });
+  });
+
+  it('close profile keeps AGC/NS/EC on (single near speaker)', async () => {
+    const stream = fakeStream();
+    const getUserMedia = vi.fn().mockResolvedValue(stream);
+    vi.stubGlobal('navigator', { mediaDevices: { getUserMedia } });
+    vi.stubGlobal('AudioContext', fakeAudioContext(stream));
+
+    await new MicrophoneAudioProvider('close').acquire((e) => events.push(e));
+
+    const [arg] = getUserMedia.mock.calls[0] as [MediaStreamConstraints];
+    expect(arg.audio).toMatchObject({
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    });
+  });
+
   it('release() stops all tracks and clears analyser', async () => {
     const stopFn = vi.fn();
     const stream = { getTracks: () => [{ stop: stopFn }] } as unknown as MediaStream;

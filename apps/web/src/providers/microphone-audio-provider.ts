@@ -13,17 +13,32 @@ function now(): string {
  * the dynamic range while OpenAI's near_field NR aggressively gates the
  * already-flat signal → soft far speakers vanish).
  *
- *   'close' — AGC + NS + EC all ON (desktop / headset mic at ~1 m).
- *   'far'   — AGC OFF, NS still ON (let OpenAI's far_field profile do
- *             the heavy lifting); EC ON so speaker echo from the
- *             other end isn't re-transcribed.
- *   'off'   — minimal processing: AGC off, NS off, EC off. Raw signal
- *             for users with already-clean audio chain (mixer, DSP).
+ *   'meeting' — multi-speaker room on one laptop mic: AGC + NS + EC all OFF.
+ *               Browser DSP is built for a single 1-on-1 caller — AGC locks
+ *               gain to the first/dominant voice and NS gates softer or
+ *               different-sounding participants as "noise", so the moment the
+ *               speaker changes the new voice is dropped. We hand OpenAI the
+ *               raw signal and let its far_field noise_reduction (paired in
+ *               session.ts) do speaker-aware cleanup instead.
+ *   'close'   — AGC + NS + EC all ON (desktop / headset mic at ~1 m, single
+ *               speaker).
+ *   'far'     — AGC OFF, NS still ON (let OpenAI's far_field profile do
+ *               the heavy lifting); EC ON so speaker echo from the
+ *               other end isn't re-transcribed.
+ *   'off'     — minimal processing: AGC off, NS off, EC off. Raw signal
+ *               for users with already-clean audio chain (mixer, DSP).
  */
-export type MicDistance = 'close' | 'far' | 'off';
+export type MicDistance = 'meeting' | 'close' | 'far' | 'off';
 
 function audioConstraints(micDistance: MicDistance): MediaTrackConstraints {
   switch (micDistance) {
+    case 'meeting':
+      return {
+        channelCount: { ideal: 1 },
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+      };
     case 'far':
       return {
         channelCount: { ideal: 1 },
@@ -59,7 +74,7 @@ export class MicrophoneAudioProvider implements AudioSource {
   private visibilityHandler: (() => void) | null = null;
   private trackEndedHandler: (() => void) | null = null;
 
-  constructor(private readonly micDistance: MicDistance = 'close') {}
+  constructor(private readonly micDistance: MicDistance = 'meeting') {}
 
   async acquire(onHealth: (e: HealthEvent) => void): Promise<MediaStream> {
     onHealth({ kind: 'health', component: 'audio', state: 'requesting_permission', timestamp: now() });

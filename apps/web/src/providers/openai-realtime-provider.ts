@@ -58,7 +58,10 @@ const STALE_DATA_THRESHOLD_MS = 30_000;
 // did nothing for those configurations because no sample ever counted as
 // "audio active". Loosening with micDistance makes detection consistent
 // across the three capture modes.
-const STALE_AUDIO_ACTIVE_DB_BY_MIC: Record<'close' | 'far' | 'off', number> = {
+const STALE_AUDIO_ACTIVE_DB_BY_MIC: Record<'meeting' | 'close' | 'far' | 'off', number> = {
+  // 'meeting' is raw multi-speaker room audio (no AGC) — similar low RMS to
+  // far-field, so use the same loosened threshold.
+  meeting: -48,
   close: -40,
   far: -48,
   off: -52,
@@ -150,11 +153,11 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
      */
     private readonly includeSourceTranscript: boolean = true,
     /**
-     * 'close' | 'far' | 'off' — drives both getUserMedia AGC and the
-     * upstream noise_reduction config (kept in lockstep so the audio
+     * 'meeting' | 'close' | 'far' | 'off' — drives both getUserMedia AGC and
+     * the upstream noise_reduction config (kept in lockstep so the audio
      * path is internally consistent).
      */
-    private readonly micDistance: 'close' | 'far' | 'off' = 'close',
+    private readonly micDistance: 'meeting' | 'close' | 'far' | 'off' = 'meeting',
   ) {
     this.mic = mic ?? new MicrophoneAudioProvider();
   }

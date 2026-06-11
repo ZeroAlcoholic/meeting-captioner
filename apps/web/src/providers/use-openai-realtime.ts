@@ -134,7 +134,7 @@ export function useOpenAIRealtime(): UseOpenAIRealtime {
     // when audioSource === 'system', so the UI and the actual /session
     // payload stay in sync.
     let audio: AudioSource;
-    let effectiveMicDistance: 'close' | 'far' | 'off';
+    let effectiveMicDistance: 'meeting' | 'close' | 'far' | 'off';
     if (audioSource === 'system') {
       audio = new DisplayMediaAudioProvider();
       effectiveMicDistance = 'off';
