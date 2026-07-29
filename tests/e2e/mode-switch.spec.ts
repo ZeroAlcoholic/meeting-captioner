@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 test.describe('mode switching', () => {
-  test('switching mode preserves caption history', async ({ page }) => {
+  test('running locks mode; Stop unlocks it without clearing caption history', async ({ page }) => {
     await page.goto('/');
     await page.getByTestId('settings-toggle').click();
 
@@ -14,11 +14,16 @@ test.describe('mode switching', () => {
     await expect(page.locator('body')).toContainText('歡迎參加會議。', { timeout: 15_000 });
 
     await page.getByTestId('settings-toggle').click();
+    await expect(page.getByTestId('mode-full_offline')).toBeDisabled();
+    await expect(page.getByTestId('mode-online_full')).toBeChecked();
+
+    await page.getByTestId('stop-fake-replay').click();
+    await page.getByTestId('settings-toggle').click();
+    await expect(page.getByTestId('mode-full_offline')).toBeEnabled();
     await page.getByTestId('mode-full_offline').check();
     await expect(page.getByTestId('mode-full_offline')).toBeChecked();
 
     await expect(page.locator('body')).toContainText('歡迎參加會議。');
-    await expect(page.getByTestId('caption-current')).toBeVisible();
   });
 
   test('all three modes are selectable', async ({ page }) => {

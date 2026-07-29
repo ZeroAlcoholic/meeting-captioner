@@ -73,6 +73,38 @@ test.describe('KEEPALIVE — online reliability (mock backend)', () => {
     expect(typeof summary[0]!.ttfcMs).toBe('number');
   });
 
+  test('running locks session configuration and Stop releases transport plus capture', async ({ page }) => {
+    await startOpenAI(page);
+    await mock.oaiInput('Configuration stays fixed while running.');
+    await mock.oaiOutput('執行期間設定保持固定。');
+    await mock.oaiComplete();
+    await expect(page.locator('body')).toContainText('執行期間設定保持固定。', {
+      timeout: 5_000,
+    });
+
+    expect(await mock.activeCaptureTracks()).toBe(1);
+    expect(await mock.oaiOpenPeers()).toBe(1);
+
+    await page.getByTestId('settings-toggle').click();
+    await expect(page.getByTestId('mode-full_offline')).toBeDisabled();
+    await expect(page.getByTestId('scenario-hybrid')).toBeDisabled();
+    await expect(page.getByTestId('online-provider-gemini')).toBeDisabled();
+    await expect(page.getByTestId('lang-zh-TW→en')).toBeDisabled();
+
+    await page.getByTestId('stop-fake-replay').click();
+    await expect.poll(() => mock.activeCaptureTracks()).toBe(0);
+    await expect.poll(() => mock.oaiOpenPeers()).toBe(0);
+
+    await page.getByTestId('settings-toggle').click();
+    await expect(page.getByTestId('mode-full_offline')).toBeEnabled();
+    await expect(page.getByTestId('scenario-hybrid')).toBeEnabled();
+    await expect(page.getByTestId('online-provider-gemini')).toBeEnabled();
+    await expect(page.getByTestId('lang-zh-TW→en')).toBeEnabled();
+    await page.getByTestId('online-provider-gemini').click();
+
+    await expect(page.locator('body')).toContainText('執行期間設定保持固定。');
+  });
+
   test('startup shows a connecting/listening cue instead of a blank board', async ({ page }) => {
     await page.goto('/');
     await page.getByTestId('start-real').click();
@@ -116,8 +148,13 @@ test.describe('KEEPALIVE — online reliability (mock backend)', () => {
     expect(mock.geminiSessionCalls()).toBe(0);
   });
 
-  test('paused online backend switch persists the resumed backend', async ({ page }) => {
-    await startOpenAI(page);
+  test('paused online backend switch persists the resumed backend when retention is opted in', async ({ page }) => {
+    await page.goto('/');
+    await page.getByTestId('settings-toggle').click();
+    await page.getByTestId('toggle-transcript-retention').check();
+    await page.keyboard.press('Escape');
+    await page.getByTestId('start-real').click();
+    await expect.poll(() => mock.oaiReady(), { timeout: 10_000 }).toBe(true);
     await mock.oaiOutput('暫停前。');
     await mock.oaiComplete();
     await expect(page.locator('body')).toContainText('暫停前。', { timeout: 5_000 });

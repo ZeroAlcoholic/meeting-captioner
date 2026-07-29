@@ -307,8 +307,8 @@ export function SettingsPanel({ open, onClose, triggerRef, sessionActive }: Sett
   return (
     <section ref={panelRef} className={styles.panel} data-testid="settings-panel">
       <div className={styles.row}>
-        <ScenarioPicker />
-        <ModeSelector />
+        <ScenarioPicker sessionActive={sessionActive ?? false} />
+        <ModeSelector sessionActive={sessionActive ?? false} />
         {/* Language + Mic distance share the "audio capture" theme — stack them
             in one column so the row has 4 slots instead of 5. Generous gap
             between them (22 px) gives the two sub-blocks visual breathing

@@ -32,6 +32,17 @@ const INIT_SCRIPT = `
   var mock = {
     getUserMediaCalls: 0,
     getDisplayMediaCalls: 0,
+    streams: [],
+    activeTrackCount: function () {
+      var count = 0;
+      for (var i = 0; i < this.streams.length; i++) {
+        var tracks = this.streams[i].getTracks();
+        for (var j = 0; j < tracks.length; j++) {
+          if (tracks[j].readyState === 'live') count++;
+        }
+      }
+      return count;
+    },
     audioAmplitude: 0.05, // ~ -29 dBFS RMS → counts as "audio active"
     oai: {
       pcs: [],
@@ -48,6 +59,13 @@ const INIT_SCRIPT = `
         return false;
       },
       dcCount: function () { return this.dcs.length; },
+      openPeerCount: function () {
+        var count = 0;
+        for (var i = 0; i < this.pcs.length; i++) {
+          if (this.pcs[i].connectionState !== 'closed') count++;
+        }
+        return count;
+      },
       ready: function () {
         for (var i = this.dcs.length - 1; i >= 0; i--) {
           if (this.dcs[i].readyState === 'open' && this.dcs[i].onmessage) return true;
@@ -92,13 +110,15 @@ const INIT_SCRIPT = `
     var audioTracks = [audioTrack];
     var videoTracks = kind === 'display' ? [videoTrack] : [];
     var tracks = audioTracks.concat(videoTracks);
-    return {
+    var stream = {
       id: 'fake-stream',
       getTracks: function () { return tracks; },
       getAudioTracks: function () { return audioTracks; },
       getVideoTracks: function () { return videoTracks; },
       addTrack: function () {}, removeTrack: function () {},
     };
+    mock.streams.push(stream);
+    return stream;
   }
   var md = {
     getUserMedia: function () { mock.getUserMediaCalls++; return Promise.resolve(fakeStream('user')); },
@@ -250,6 +270,10 @@ export interface OnlineMockController {
   displayMediaAcquisitions(): Promise<number>;
   /** Number of OpenAI data channels created (one per peer build). */
   oaiPeerCount(): Promise<number>;
+  /** Number of OpenAI peers that have not been closed. */
+  oaiOpenPeers(): Promise<number>;
+  /** Number of currently-live mock media tracks. */
+  activeCaptureTracks(): Promise<number>;
   /** True once the active DataChannel is open AND wired (safe to emit events). */
   oaiReady(): Promise<boolean>;
   /** How many times the /session broker has been hit (for pre-mint assertions). */
@@ -292,7 +316,12 @@ export async function installOnlineMocks(page: Page): Promise<OnlineMockControll
   );
   await page.route(/\/session\/gemini$/, (route) => {
     state.geminiSessionCalls += 1;
-    return route.fulfill({ json: { token: 'gemini-mock-token', model: 'gemini-3.5-live-translate-preview' } });
+    return route.fulfill({
+      json: {
+        token: 'gemini-mock-token',
+        model: 'models/gemini-3.5-live-translate-preview',
+      },
+    });
   });
   await page.route(/\/session$/, (route) => {
     state.oaiSessionCalls += 1;
@@ -339,6 +368,8 @@ export async function installOnlineMocks(page: Page): Promise<OnlineMockControll
     userMediaAcquisitions: () => page.evaluate(() => window.__mock.getUserMediaCalls),
     displayMediaAcquisitions: () => page.evaluate(() => window.__mock.getDisplayMediaCalls),
     oaiPeerCount: () => page.evaluate(() => window.__mock.oai.dcCount()),
+    oaiOpenPeers: () => page.evaluate(() => window.__mock.oai.openPeerCount()),
+    activeCaptureTracks: () => page.evaluate(() => window.__mock.activeTrackCount()),
     oaiReady: () => page.evaluate(() => window.__mock.oai.ready()),
     geminiSend: (obj) => page.evaluate((o) => window.__mock.gemini.send(o), obj),
     geminiServerContent: (sc) => page.evaluate((s) => window.__mock.gemini.send({ serverContent: s }), sc),
@@ -359,11 +390,13 @@ export async function installOnlineMocks(page: Page): Promise<OnlineMockControll
 interface MockGlobal {
   getUserMediaCalls: number;
   getDisplayMediaCalls: number;
+  activeTrackCount(): number;
   audioAmplitude: number;
   oai: {
     addedTrackKinds: Array<string | undefined>;
     emit(obj: Record<string, unknown>): boolean;
     dcCount(): number;
+    openPeerCount(): number;
     ready(): boolean;
   };
   gemini: { send(obj: Record<string, unknown>): boolean; close(): boolean; openCount(): number };
