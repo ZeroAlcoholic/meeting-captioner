@@ -45,6 +45,32 @@ animation. See [`CLAUDE.md`](../CLAUDE.md) §"Caption Path Is Sacred".
 
 ---
 
+## Online Self-Heal & Failover Ladder (Project KEEPALIVE, 2026-06-12)
+
+Both online backends now follow the same three-tier "never go dark" model:
+
+1. **Intra-model self-heal** (automatic, invisible):
+   - *OpenAI:* ICE-restart backoff → full session rebuild on ICE/connection
+     `failed` or `session.closed`; a **stale-data detector** (DC silent > 30 s
+     while audio is active) forces a rebuild; the scheduled 25-min renewal is
+     **make-before-break** (new peer built over the same mic stream, then
+     swapped) so it costs **zero caption gap** and never re-acquires the mic.
+   - *Gemini:* WS `onclose` AND a **receive-side wedge detector** (no
+     serverContent > 30 s while audio active) trigger a session-resuming
+     reconnect; reconnect retries **forever** with a capped backoff.
+2. **Surface `failed` while still retrying** — after the fast retries are
+   exhausted, transport health flips to `failed` (auto-retry continues in the
+   background). This is the signal, not a dead end.
+3. **Cross-model failover** (one click) — on `transport: failed` the
+   `FailoverBanner` offers a switch to the OTHER backend; it preserves the
+   transcript (no `beginSession`) and continues the same meeting.
+
+Degradation guarantee: a backend failure never blanks the board — the last
+captions stay visible, the system auto-retries, and the operator can hand off to
+the other model without losing history.
+
+---
+
 ## Test Coverage
 
 These failure modes must each have at least one automated or

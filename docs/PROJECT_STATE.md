@@ -8,6 +8,108 @@
 
 ## Current Phase
 
+**Gemini latency — root-cause closure + perceived-latency fix** ✅ **COMPLETE** (2026-07-02)
+
+Deep-dive against the current official Live API docs (live-translate page, API
+reference, best-practices, session-management, models page) settled the question:
+**`gemini-3.5-live-translate-preview` has NO server-side latency knob.**
+`translationConfig` carries only `targetLanguageCode` + `echoTargetLanguage`;
+TEXT modality, `speechConfig` speed, `thinkingConfig`, and VAD tuning are all
+unsupported/ineffective for this model, and the caption text side-channel
+(`outputAudioTranscription`) is structurally paced by the model's translated-
+audio generation. Independent measurement (LiveLingo, 120 utterances) puts
+first-audio latency at **~2.9 s median** (drift to ~14 s under stress); Google's
+own wording is "a few seconds behind the speaker". Our client stack (32 ms PCM
+frames, 16 kHz, 33 ms coalesce, live/final store split, output-first anchor)
+already meets every official best practice — client-side is at the floor.
+Reverting to the turn-based `gemini-3.1-flash-live-preview` path was evaluated
+and rejected: it was the ORIGINAL backend (2026-06-09) and was replaced by the
+translate model precisely because turn-based VAD waits are worse for continuous
+meeting speech.
+
+What shipped instead (the two levers that remain honest and real):
+
+- **Pending-source live caption** — during the ~2–3 s translation-lag window the
+  big target area now shows the already-arrived source text (dimmed
+  `.pendingSource`, tagged 翻譯中…) instead of a dead "翻譯中…" placeholder,
+  swapping to the translation on its first draft delta. This converts every
+  sentence's dead window into live captioning — the dominant "Gemini 特別慢"
+  percept. (`CaptionBoard.tsx`, `CaptionBoard.module.css`; e2e
+  `openai-realtime.spec.ts` "pending source" test — same LiveCaption path both
+  backends share.)
+- **Honest latency labeling** — the Gemini backend hint no longer claims
+  低延遲; it states ~2–3 s model-inherent lag and recommends OpenAI for
+  latency-sensitive meetings. (`SettingsPanel.tsx`.)
+- **e2e mock drift fix** — the mocked `getUserMedia` stream now implements
+  `getAudioTracks()` (the provider's audio-only SDP path), un-breaking 3
+  pre-existing openai-realtime e2e tests that failed with
+  `stream.getAudioTracks is not a function`.
+
+Verification: 283 web unit tests + 29 Playwright e2e green; `tsc -b` clean.
+
+**Gemini Live Translate latency correction** ✅ **COMPLETE** (2026-06-29)
+
+Field tests showed the remaining Gemini complaint was per-utterance cadence, not
+startup. The Gemini translate path now defaults to the official Live Translate
+`AUDIO` response modality and consumes `outputAudioTranscription` as the text
+caption side channel, discarding synthesized audio. This reverts the earlier
+cost-saving `TEXT` modality because venue use prioritizes fastest visible
+translation over output-audio token savings. The provider also now anchors
+`outputTranscription` deltas to a synthetic live transcript when translation text
+arrives before source transcription, so the caption board renders Gemini drafts
+immediately instead of waiting for `inputTranscription`. Locked by
+`gemini-live-provider.test.ts` setup-shape + output-first live-anchor coverage;
+YouTube/system-audio field test should be rerun against the same clip to confirm
+Gemini `ttfcMs`/`durP50` and visible stalls improve from the prior cadence.
+
+Review follow-up (2026-06-29): failover now checks target backend
+availability before rendering or executing the switch, so a self-retrying
+provider is not stopped when the alternate key/service is unavailable. The
+Gemini cost chip now estimates AUDIO-mode Live Translate billing (~$0.0368/min,
+input + generated output audio) instead of the old TEXT-output lower bound.
+
+**Project KEEPALIVE — 永續雙模型字幕強化** ✅ **COMPLETE** (2026-06-12)
+
+Reliability/continuity hardening of the online realtime path so it satisfies the
+three hard requirements: **多元模型 (multi-model) · 不會斷 (never goes dark) ·
+可接續 (resumable)**. Delivered:
+
+- **#16 Gemini receive-side wedge detection + persistent reconnect** — Gemini
+  now matches OpenAI's self-heal: a stale-data detector (no serverContent while
+  audio is active past 30 s) forces a session-resuming reconnect, and reconnect
+  retries FOREVER with a capped backoff (was: gave up after 5 attempts). After
+  5 quick attempts it surfaces `transport: failed` so the failover UI appears,
+  while still retrying underneath. (`gemini-live-provider.ts`, +5 tests.)
+- **#7 OpenAI zero-gap renewal (make-before-break)** — the 25-min session
+  renewal now builds the new peer over the EXISTING mic stream and swaps
+  atomically, so a scheduled renewal costs ZERO caption gap and never
+  re-acquires the mic (no OS-indicator blink / re-prompt). On failure the old
+  session is left alive and a persistent retry runs; status stays `running`.
+  (`openai-realtime-provider.ts`: `buildPeer`/`wirePeer`/`fetchSessionToken`/
+  `resetStaleBaselines`, +1 zero-gap test; existing retry/stop tests updated.)
+- **#21 Cross-model one-click failover** — when the active backend hits
+  `transport: failed`, a `FailoverBanner` offers a one-click switch to the other
+  model, preserving the transcript (no `beginSession`). Decision logic isolated
+  in `providers/failover.ts` (+7 tests). (`App.tsx`, `SessionLauncher.tsx`,
+  `index.css`.)
+- **#3 History tail-window rendering** — `HistoryStream` renders only the most
+  recent `HISTORY_RENDER_SEGMENTS` (400) finalized segments; the store keeps the
+  full history (Export reads it). Bounds DOM + paragraph-grouping cost on
+  multi-hour meetings. (`paragraph-grouping.ts` `tailSegments`, +4 tests.)
+- **#19 verified** — `package-online` ships `pcm-worklet.js` (Gemini needs it);
+  confirmed present in the produced release zip.
+
+Deferred (honest, not done blind): **#8 Gemini meeting-mode noise suppression** —
+Gemini has no server-side far_field NR like OpenAI, so the 'meeting' profile
+(all browser DSP off) hands it raw room audio. Enabling browser NS risks gating
+non-dominant speakers; this is a quality tradeoff that needs real multi-speaker
+meeting audio to tune without regressing. Tracked, not implemented.
+
+Verification: **238 web unit tests + 15 Playwright e2e (real Chromium) green**,
+typecheck clean, online build + `package-online` succeed.
+
+---
+
 **P3 — Offline STT + MT Pipeline** ✅ **COMPLETE** (4 commits on master)
 
 Full offline pipeline is production-ready. WHL runs as independent process (port 9090).
@@ -719,6 +821,173 @@ Fixed (all sampled live in-browser at 400 ms resolution):
 | **Status chip said "running" for OpenAI but "gemini" for Gemini** | Now names the backend (`openai`) — matters mid-failover. |
 | **Decimal split ("3." mid-number)** | ASCII period only ends a sentence when not preceded by a digit. |
 
+### Transcript durability hardening (interruption safety) — 2026-06-11
+
+User directive: 摘要稍晚，先嚴格確保轉錄資料能保全並輸出，包含中斷狀態。
+
+Audit of the persistence path found the normal flow solid (finalized
+`segments`+`translations` autosave to localStorage, reload rehydrates, graceful
+Stop finalizes the in-flight utterance via each provider's `flushSegment`/
+`finalizeTurn`, 4 export formats). Three interruption-state gaps remained, all
+rooted in **no synchronous flush before the page goes away**:
+
+| Gap | Risk before fix |
+|-----|------|
+| Debounced-only writes (800 ms, 5 s hard cap) | a hard crash / OS kill / tab-close inside the window dropped the most recent finalized segments |
+| `livePartial`/`liveTranslation` never persisted (by design, to avoid 20 Hz churn) | an utterance still being spoken at crash time was lost entirely |
+| Same window right after Stop | last finalized line could be lost if the tab closed before the debounce fired |
+
+Fix — `captionStore.flushNow()` (`apps/web/src/store/caption-store.ts`):
+- Synchronous `localStorage.setItem`, bypassing the debounce.
+- **Folds the in-flight `livePartial` + `liveTranslation` into the snapshot** as
+  a provisional segment (deduped by id) — the only writer that persists live
+  state, so a mid-sentence interruption survives reload.
+- Wired to `pagehide` + `visibilitychange→hidden` (the reliable unload signals;
+  guarded for the node test env where the APIs are absent).
+- `App.tsx` `handleStop` / `handlePause` call it explicitly so the last line is
+  durable the instant capture ends, not 800 ms later.
+- Recovery path already complete: reload rehydrates (now incl. the folded
+  in-flight line); `RestoredSessionChip` + header `ExportMenu` make it
+  exportable before any new Start.
+
+Refactor: `buildPersistPayload(state, includeLive)` + `writeSnapshot(key,payload)`
+shared by the debounced saver (`includeLive:false`) and `flushNow`
+(`includeLive:true`).
+
+Tests: web **210** (+4 — flushNow fold/dedupe/no-op, pagehide/visibilitychange
+emergency-flush wiring), typecheck + build clean. online/offline untouched.
+
+### Robustness pass — offline timeline + autosave honesty — 2026-06-11
+
+User directive: 摘要延後，完成各項穩健性強化. Follows the transcript-durability
+hardening above; closes the highest-value reliability gaps in the
+transcript/session lifecycle.
+
+**1. Offline/Hybrid wall-clock timeline rebase (correctness, was the documented
+P6 follow-up).** WHL emits `startMs` relative to audio position and **resets it
+to 0 on every WS connection**; `sessionStartMs` is `Date.now()`. Two real bugs
+followed:
+- Export `.srt`/`.md` and the history time-gutter computed
+  `elapsed = max(0, startMs − sessionStartMs)` → with a tiny relative `startMs`
+  and a `Date.now()` anchor this **clamped to 0:00 for every offline segment**.
+- After an auto-reconnect or Pause→Resume, the new connection's `startMs≈0`
+  sorted to the **front** of history (`upsertSorted` orders by `startMs`),
+  scrambling the log just hardened in the durability pass.
+
+Fix (`offline-stt-provider.ts`): a per-connection `connectionAnchorMs =
+Date.now()` stamped in `ws.onopen`; `rebaseTranscript()` shifts every transcript
+`startMs`/`endMs` onto wall-clock before forwarding. Re-stamped on each
+reconnect → monotonic across drops/resumes. Unifies offline timestamps with the
+online providers (already `Date.now()`-based). Translations key by
+`sourceSegmentId` (no time) → untouched. Covers Hybrid too (same provider).
+
+**2. Autosave no-silent-failure (`caption-store.ts`).** `writeSnapshot` swallowed
+QuotaExceeded/unavailable-storage errors silently — a failing autosave would
+lose the meeting on reload with zero warning. Now warns once (rate-limited)
+pointing the user to Export. In-memory captions never blocked either way.
+
+| Suite | Count | Status |
+|-------|-------|--------|
+| `apps/web` vitest | **212** (+2 rebase: absolute-shift + reconnect-monotonic) | ✅ |
+| typecheck / build | — | ✅ clean |
+
+Already-covered robustness (verified, no change needed): mic/display track-`ended`
+→ `failed` health; offline WS reconnect backoff + WS backpressure force-reconnect;
+OpenAI renewal backoff; Gemini stale-WS guard + backpressure; bounded ring buffer
+(`maxSegments`) + synced translation pruning.
+
+Remaining robustness backlog (features, not hardening): crash-**continue**
+(persist `pausedMode`/session so Resume survives a reload — today reload can
+export the restored log but must start a new session); IndexedDB tier for
+multi-session / >5 MB history.
+
+### Easy-start launcher + crash-continue + IndexedDB capacity — 2026-06-11
+
+User directive: 「1 2 並且優化啟動點，確保使用者啟動容易」→ clarified: single-session
+focus, easy to start different settings. Three interlocking pieces, all
+single-session.
+
+**1. Easy-start launcher (item 3).** New `SessionLauncher` (empty-state grid) +
+`ContinueBanner` (`components/SessionLauncher.tsx`). On a fresh idle screen the
+caption board's empty state is replaced by a one-click grid — OpenAI / Gemini /
+Hybrid / 全離線 / Demo — each of which SELECTS its mode+backend AND starts in a
+single click (no need to open Settings to switch configuration). Availability-
+aware: greys out OpenAI/Gemini without a key, Hybrid/Offline while WhisperLive
+is loading, with the reason inline. Header buttons unchanged (e2e + during-/
+post-session controls).
+
+**2. Crash-continue (item 1).** Session lifecycle is now persisted:
+`sessionMode` ('real'|'gemini'|'offline'|'hybrid'|'fake') + `sessionPhase`
+('running'|'paused'|'ended') in the caption-store snapshot. `beginSession(mode)`
+stamps mode+running; Pause → `setSessionPhase('paused')`; Resume →
+`'running'`; Stop/endSession → `'ended'`. On reload, if a restored session's
+phase is running/paused, `ContinueBanner` offers **▶ 繼續上次會議** — resumes the
+SAME backend WITHOUT `beginSession()`, preserving the transcript. Online modes
+continue into the currently-selected backend (the existing failover path),
+shared via `resumeProviderForMode()`.
+
+**3. IndexedDB single-session capacity (item 2).** New `store/idb-persistence.ts`
+(tiny dependency-free promise wrapper). IndexedDB is now the PRIMARY durable
+store (async debounced write of the full history); `DEFAULT_MAX_SEGMENTS` raised
+3000 → **20000** (~11 h). localStorage is retained as the **synchronous** crash
+net — IDB cannot be written on `pagehide` — holding a bounded `LS_TAIL_SEGMENTS`
+(2000) tail + the in-flight line. On load: instant sync hydrate from
+localStorage, then async IDB merge (`mergeSnapshots` — newer `savedAt` wins,
+union missing-by-id so the sync tail's post-debounce final/in-flight line is
+preserved, cap to maxSegments). A `sessionTouched` guard stops a late async
+hydrate from clobbering a freshly-started session. Persist bumped v3 → **v4**
+(v2/v3 still read; key `meeting-audio:captions:v4`). `clear()` now also
+`idbClear()`s.
+
+| Suite | Count | Status |
+|-------|-------|--------|
+| `apps/web` vitest | **220** (+8: lifecycle ×4, tail-bound ×1, mergeSnapshots ×2, tailPayload ×1) | ✅ |
+| typecheck / build | — | ✅ clean |
+| Live browser (Playwright, real dev server) | — | ✅ see below |
+
+**Browser-verified end-to-end (real dev server + HMR):**
+- Fresh idle → launcher grid (OpenAI/Gemini available, Hybrid/Offline greyed
+  "WhisperLive: unavailable", Demo) — `data-testid=session-launcher`.
+- Start Demo → persisted `phase=running, mode=fake, segments=4` in the v4 key.
+- Reload mid-session (crash) → `ContinueBanner` "上次會議未正常結束 · 4 段字幕已保留
+  · Demo 試播 · ▶ 繼續上次會議" + restored transcript visible.
+- ▶ 繼續 → status `fake` (running), banner gone, 4 segments preserved (no clear).
+- Stop → persisted `phase=ended` → reload would show only the 📂 restored chip.
+- Navigation triggered the pagehide emergency-flush, which correctly re-persisted
+  in-memory state (durability pass working). Only benign console errors (offline
+  :8000 down, favicon 404).
+
+Note: `e2e/fake-replay.spec.ts` pre-start assertion updated `caption-empty` →
+`session-launcher` (the empty state is now the launcher; header Demo button
+unchanged). e2e not run here (needs full stack).
+
+### Code-review fix pass (persistence races) — 2026-06-11
+
+High-effort review (7 finder angles) of the launcher/crash-continue/IDB diff
+surfaced 8 real issues, concentrated in the new IndexedDB layer; all fixed:
+
+| # | Fix | File |
+|---|-----|------|
+| 1 | **flushNow no longer writes IDB** — it fired on every `visibilitychange→hidden` (tab switch) and, during the pre-hydration window, would overwrite the full IDB history with the localStorage-tail-only state (data loss). Now LS-tail-sync only; the periodic debounced saver owns IDB; the LS tail is merged back over IDB on next load. | `caption-store.ts` |
+| 2 | **Late async hydrate clobbering Continue/Resume** — that path never set `sessionTouched`, so a slow IDB read could revert phase/mode and resurrect the restored chip after resume. `setSessionPhase` (Pause/Resume/Continue) and the first `applyTranscript` now set `sessionTouched`. | `caption-store.ts` |
+| 3 | **clear() vs in-flight idbSave race** — `clear()`’s delete could lose to a still-committing save from a just-prior flushNow, resurrecting a cleared meeting. All IDB writes now run through one serialized promise chain (`idbChain`); clear routes through it. | `caption-store.ts` |
+| 4 | **IDB write cost** — full-history structured clone on every debounce + every tab switch. Now gated (`idbHydrated`/`sessionTouched`) and throttled to ≥8 s (`IDB_SAVE_MIN_INTERVAL_MS`); LS tail is the sync net between IDB writes. | `caption-store.ts` |
+| 5 | **Page-exit listener leak** — pagehide/visibilitychange were registered per `createCaptionStore()`. Now deduped per key via module-level `lifecycleBoundKeys` (no stacking under HMR / repeated test construction). | `caption-store.ts` |
+| 6 | **Continue used the selected backend, not the recorded one** — a Gemini meeting could continue on OpenAI if the picker was changed. `handleContinue` now branches on the persisted `sessionMode` and syncs the picker. | `App.tsx` |
+| 7 | **Dead ternary** `sessionEndedAt != null ? 'ended' : 'ended'` → `?? 'ended'` (+ regression test that legacy phase-less data hydrates as `ended`, never resumable). | `caption-store.ts` |
+| 8 | **IDB `onblocked` hang** — a future `DB_VERSION` bump with another open tab would leave open requests pending forever. `openDb` now rejects on `onblocked` → callers fall back cleanly. | `idb-persistence.ts` |
+
+(#9 first-segment 0:00 from the finders was REFUTED — the leading segment
+correctly displays 0:00.)
+
+Re-verified live in-browser after the fixes: fresh → Demo → reload (crash) →
+ContinueBanner shows the merged **4 segments** (IDB held a throttled early write;
+the LS tail reconstructed via `mergeSnapshots`) → Continue → running, banner +
+restored chip gone (no resurrection), history grew **4→6** (preserved + appended).
+Tests: web **221** (+1 legacy-phase regression), typecheck + build clean.
+
+### Deferred / polish backlog
+
 Deferred (polish backlog): landing-tint continuity cue on the newest history
 row; timestamp anchor vs ring-buffer pruning (blocked: offline providers use
 connection-relative startMs, so `sessionStartMs` can't anchor them); Fraunces
@@ -726,3 +995,145 @@ mixed-script in zh captions; confidence-dimming as a non-opacity cue.
 
 Tests: web **206** (+stop-finalize, +decimal-guard), online 48, typecheck +
 build clean.
+
+---
+
+## KEEPALIVE test-engineering (T0 → T1 → T2) — 2026-06-12
+
+Automated verification so the reliability work above can't silently regress —
+the failure-injection coverage that previously only existed as manual procedures
+in `RUNBOOK.md`.
+
+- **T0 — mock-backend fault-injection e2e.** `tests/e2e/online-mock.ts` provides
+  `installOnlineMocks(page)`: an in-browser mock for BOTH online providers (no
+  cloud key) — replaces `RTCPeerConnection`/`RTCDataChannel`, `WebSocket`
+  (Gemini host only; all other sockets incl. Vite HMR delegate to native),
+  `getUserMedia`/`getDisplayMedia`, `AudioContext`/`AudioWorkletNode`, and routes
+  `/session*` + the OpenAI SDP call. Its controller injects faults (deltas,
+  `session.closed`, `/session` 500 from the Nth call, Gemini socket drop) and
+  reads counters (mic acquisitions, peer count). `tests/e2e/online-keepalive.spec.ts`
+  (5 tests) drives the REAL provider→store→board→failover loop: OpenAI happy
+  path; zero-gap renewal (2nd peer built, **mic reused — getUserMedia stays at
+  1**, history kept); repeated renewals (×5) never blank; OpenAI-fail → failover
+  banner → one-click switch to Gemini with transcript preserved; Gemini happy +
+  auto-reconnect.
+- **T1 — soak + zero-gap.** `apps/web/src/store/caption-store.soak.test.ts` —
+  5 000-turn interleaved stream + 200-session churn asserting render-path
+  invariants THROUGHOUT: `segments[]` reference stable across partials, ring
+  buffer capped, no translation orphan-leak, render feed bounded by
+  `HISTORY_RENDER_SEGMENTS`. The repeated-renewal e2e is the "mic acquired once,
+  no blank window" zero-gap proof.
+- **T2 — conformance + property tests.**
+  `apps/web/src/providers/provider-conformance.test.ts` validates every event
+  each provider (OpenAI/Gemini/offline/fake) emits against the shared
+  `NormalizedEvent` schema (enforces "UI consumes normalized events only").
+  `apps/web/src/caption-board/paragraph-grouping.property.test.ts` — seeded-PRNG
+  properties for `tailSegments` + `groupParagraphsForSide`.
+- **Lint hygiene.** `eslint.config.js`: ignore the `release/**` build artifact
+  (matching `dist`/`build`), disable base `no-undef` for TS (tsc covers it; it
+  false-positived on type-only refs like `RequestInit`), and an AudioWorklet
+  globals override for `pcm-worklet.js`. `pnpm lint` now passes (0 errors).
+
+Tests: web **251** unit (20 files; +10: soak ×2, conformance ×4, property ×4),
+**20** Playwright e2e (+5 KEEPALIVE), typecheck + lint clean. See
+`docs/TEST_PLAN.md` §"KEEPALIVE reliability verification (T0–T2)".
+
+---
+
+## Startup-latency / "啟動好幾秒消失" pass — 2026-06-12
+
+Operator feedback: cold start showed a dead-looking blank board for several
+seconds. Two root causes + fixes:
+
+- **No visible startup state (perception).** On Start the launcher vanished and
+  the board showed a bare "Waiting for captions…", while `ReconnectingIndicator`
+  deliberately ignores `connecting`. Fix: `LiveCaption`'s empty state is now
+  health-aware (`startupCue()` in `CaptionBoard.tsx`) — a staged cue with spinner
+  `請允許麥克風… → 連線中… → 已連線·正在聆聽…` (`data-phase` on `caption-empty`,
+  styled in `CaptionBoard.module.css`). Dead air → explicit "system is working".
+- **Sequential mic→token (real ~0.3-0.6 s).** `start()` awaited mic acquisition
+  THEN fetched the ephemeral token, though they're independent. Both providers
+  now fire the token fetch CONCURRENTLY with `mic.acquire()` (settle-wrapped so a
+  mic denial can't orphan the in-flight fetch); on a cold start the token is
+  ready by the time the user clicks Allow. Error attribution preserved (mic =
+  audio failure, token = transport failure). `openai-realtime-provider.ts`,
+  `gemini-live-provider.ts`.
+
+Inherent latency NOT removed (documented, honest): WebRTC ICE/DTLS handshake and
+the model needing ~1-2 s of speech before the first translation delta — these are
+now MASKED by the listening cue, not hidden.
+
+Follow-up (proposed, not yet done): OpenAI output-delta `s2tw()` re-converts the
+whole accumulated string per delta (O(n²)/utterance) — convert incrementally on
+the live path, full-convert on finalize.
+
+Verified in real Chromium: `online-keepalive.spec.ts` "startup shows a
+connecting/listening cue instead of a blank board". Tests: web **251** unit, **21**
+e2e, typecheck + lint clean.
+
+### Pre-warm architecture (P0 + P2) — 2026-06-12
+
+Operator note: "麥克風授權那個在啟動時就應該先做完". Correct — the root inefficiency
+was that the WHOLE capture pipeline was rebuilt per Start (and torn down per
+Stop). Introduced a shared, long-lived audio engine + online preconnect:
+
+- **`providers/audio-engine.ts` (new)** — one shared `AudioContext` (16 kHz) +
+  compiled AudioWorklet module, reused across every session (the worklet is
+  registered PER context, so pre-warming it requires a persistent shared
+  context). `getCaptureContext()`, `ensureCaptureWorklet()` (loads once),
+  `resumeCaptureContext()`, `preconnectRealtimeBackends()` (online-only TLS
+  preconnect to OpenAI + Gemini hosts), `prewarmCapture({online})`, and a
+  `__resetAudioEngineForTests()` hook. **Never acquires the mic** (zero privacy
+  cost — context stays suspended until a session resumes it).
+- **Providers route through the engine** — `MicrophoneAudioProvider`,
+  `GeminiLiveProvider`, `OfflineSTTProvider` use `getCaptureContext()` +
+  `ensureCaptureWorklet()` instead of `new AudioContext()` + `addModule()` per
+  start; release/cleanup detaches nodes but **no longer closes** the shared
+  context (closing forced a cold rebuild + worklet recompile next Start).
+- **`App.tsx`** calls `prewarmCapture()` on mount / mode change; preconnect is
+  gated to online mode so offline mode contacts no cloud host.
+- Test isolation: `src/test-setup.ts` (wired via `vite.config.ts` →
+  `test.setupFiles`) resets the engine before every test so the shared context
+  cache can't leak across tests.
+
+Removes the per-start AudioContext build + worklet compile (~70-280 ms) from the
+hot path and the TLS handshake (~100-300 ms, online) via preconnect.
+
+### P4 + P1 (re-examined, then completed) — 2026-06-13
+
+On reflection both were worth completing, but the framing changed:
+
+- **P4 — parallel local offer + ICE gather (not "pre-create the offer").**
+  `buildPeer` was split into `createLocalOffer(stream)` (mic-only: pc + dc +
+  createOffer + setLocalDescription — starts ICE gathering, NO token) and
+  `exchangeSdp(pc, offerSdp, secret)` (token: POST SDP + apply answer). `start()`
+  runs `createLocalOffer` the instant the mic is ready — IN PARALLEL with the
+  in-flight token mint — so STUN candidates accrue during the token RTT and we
+  POST the candidate-enriched `localDescription.sdp` at zero added latency
+  (previously a candidate-less offer was sent immediately). The renewal path's
+  `buildPeer` now composes the two sequentially (behaviour unchanged — the old
+  peer keeps captioning, so it gains nothing from parallelism). The real win
+  (faster ICE/DTLS connect on NAT/corporate networks) is confirmable only on a
+  real endpoint; the mock verifies correctness (still connects + captions).
+- **P1 — ephemeral-token pre-mint, safe-by-construction.** New
+  `providers/token-prewarm.ts` `WarmTokenCache`: pre-mints a token while idle and
+  hands it out single-use ONLY when key-matched + fresh (<45 s) + not within
+  120 s of expiry; any doubt → null → caller fetches fresh (worst case == today).
+  `openai-realtime-provider.ts` / `gemini-live-provider.ts` expose
+  `prewarmOpenAISession()` / `prewarmGeminiSession()` (+ a shared
+  `sessionRequestBody()` so the pre-mint key matches the real Start request);
+  `fetchSessionToken` / `mintToken` consume the warm token first. The hooks
+  pre-mint while idle (gated on `apiKeyStatus`/`geminiStatus` → online-only, no
+  cloud contact offline). This hides the ~150-250 ms token RTT that became the
+  long pole on a WARM start (after P0/P2 made everything else hot). Process-wide
+  caches are reset per test (`test-setup.ts`).
+
+Why P1 is still worth it after Fix B/P0: Fix B overlaps the token with mic
+acquisition and P0 preconnect removed its TLS handshake, but P2 made warm-starts
+so fast that the token became the remaining front-matter cost — pre-mint hides it.
+
+Verified in real Chromium: `online-keepalive.spec.ts` "idle pre-mint: token
+fetched before Start and consumed without a second fetch" + the failover test
+rewritten to a deterministic `setOaiSessionFailing()` flag (timing-independent of
+the idle pre-mint). Tests: `token-prewarm.test.ts` (9) + `audio-engine.test.ts`
+(6); web **265** unit, **22** e2e, typecheck + lint clean.

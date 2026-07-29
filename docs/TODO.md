@@ -7,6 +7,103 @@
 
 ## Now
 
+**Gemini latency root-cause closure (2026-07-02) complete.**
+- Official-docs research settled it: the translate model has NO latency knob
+  (translationConfig = targetLanguageCode + echoTargetLanguage only; no TEXT
+  modality / speed / thinking / effective VAD). ~2–3 s lag is structural
+  (caption text is paced by translated-audio generation; LiveLingo measured
+  ~2.9 s median). Client stack already meets all official best practices.
+- Shipped: pending-source live caption (big area shows arrived source text,
+  dimmed + 翻譯中… tag, during the translation-lag window) + honest ~2–3 s
+  labeling on the Gemini backend option + e2e getAudioTracks mock fix.
+- Do NOT revisit `gemini-3.1-flash-live-preview` as a "faster" path — it was
+  the original backend and was replaced because turn-based VAD waits are worse
+  for continuous meeting speech. Re-evaluate only if Google ships a new
+  translate model variant (watch the models page).
+
+**Gemini per-utterance latency fix (2026-06-29) complete.**
+- Reverted Gemini Live Translate from the earlier cost-saving `TEXT` modality to
+  the official speed-first `AUDIO` response modality, while still using
+  `outputAudioTranscription` for text captions and discarding synthesized audio.
+- Kept 512-sample / 32 ms PCM chunks; current evidence points to Gemini
+  translation cadence and live-render anchoring, not client audio framing.
+- Added output-first live anchoring: `outputTranscription` now emits a matching
+  partial transcript anchor before its draft translation, so Gemini captions can
+  render immediately even if `inputTranscription` arrives later.
+- Next manual check: rerun the same YouTube field test and compare Gemini
+  `ttfcMs`, `durP50`, and visible stalls against the prior cadence.
+
+**Project KEEPALIVE — 永續雙模型字幕強化 (2026-06-12) complete.**
+Dual-model reliability/continuity: 多元模型 · 不會斷 · 可接續.
+- **#16** Gemini wedge detection + persistent reconnect (parity with OpenAI).
+- **#7** OpenAI zero-gap renewal (make-before-break, mic-stream reuse).
+- **#21** Cross-model one-click failover (`FailoverBanner`, transcript preserved).
+- **#3** History tail-window render cap (`tailSegments`, 400) — store keeps full.
+- **#19** verified `pcm-worklet.js` ships in `package-online` zip.
+- 238 web unit tests + 15 Playwright e2e (real Chromium) green; typecheck +
+  online build + package-online clean. See PROJECT_STATE.md "Project KEEPALIVE".
+- **Deferred — #8 Gemini meeting-mode noise suppression**: needs real
+  multi-speaker meeting audio to tune (Gemini lacks OpenAI's server far_field
+  NR; blindly enabling browser NS risks gating non-dominant speakers). Do NOT
+  implement without an A/B on real room audio.
+- **Manual-only checks** (no live keys in CI): cross-model failover happy-path
+  and 30–60 min soak — procedures in `RUNBOOK.md`.
+
+**KEEPALIVE test-engineering (T0 → T1 → T2, 2026-06-12) complete.** The
+previously manual-only reliability checks are now automated:
+- **T0** mock-backend fault-injection e2e — `tests/e2e/online-mock.ts` (in-browser
+  mock for both providers, no key) + `online-keepalive.spec.ts` (5 tests):
+  zero-gap renewal (mic reused once), repeated renewals never blank,
+  OpenAI-fail → failover-to-Gemini with transcript preserved, Gemini reconnect.
+- **T1** soak — `caption-store.soak.test.ts` (5 000-turn + 200-session bounds &
+  reference-stability invariants).
+- **T2** conformance — `provider-conformance.test.ts` (every provider event vs
+  `NormalizedEvent`) + `paragraph-grouping.property.test.ts` (seeded-PRNG props).
+- Lint hygiene: `eslint.config.js` ignores `release/**`, disables base `no-undef`
+  for TS, AudioWorklet globals for `pcm-worklet.js`. `pnpm lint` clean.
+- **251 web unit + 20 e2e green; typecheck + lint clean.**
+
+---
+
+**Easy-start launcher + crash-continue + IDB capacity (2026-06-11) complete.**
+Single-session focus, easy to start different settings.
+- **Easy-start launcher**: `SessionLauncher` empty-state grid — one-click start
+  for OpenAI/Gemini/Hybrid/Offline/Demo, each selecting its config + starting
+  (no Settings detour); availability-aware.
+- **Crash-continue**: persisted `sessionMode`/`sessionPhase`; `ContinueBanner`
+  on reload of an interrupted/paused session → ▶ 繼續 resumes the same backend,
+  transcript preserved.
+- **IndexedDB capacity**: IDB primary async store; `maxSegments` 3000 → 20000;
+  localStorage kept as the synchronous crash net (2000-segment tail);
+  load-time merge; persist v3 → v4.
+- 220 web tests (+8), typecheck + build clean, full crash-continue lifecycle
+  browser-verified. See `PROJECT_STATE.md` "Easy-start launcher + crash-continue
+  + IndexedDB capacity".
+- Follow-up: multi-session history browser (deferred per user — single-session).
+
+**Robustness pass (2026-06-11) complete.** Following durability hardening:
+- **Offline/Hybrid wall-clock timeline rebase** — fixes the documented P6
+  follow-up. WHL connection-relative `startMs` (resets to 0/connection) is now
+  shifted onto wall-clock per connection in `offline-stt-provider.ts`. Fixes (a)
+  export/time-gutter timestamps clamping to 0:00 for offline, and (b) reconnect/
+  Resume segments sorting to the front of history. Monotonic across drops.
+- **Autosave no-silent-failure** — `writeSnapshot` warns once on QuotaExceeded/
+  storage-unavailable instead of swallowing; in-memory unaffected.
+- 212 web tests (+2), typecheck + build clean. See `PROJECT_STATE.md`
+  "Robustness pass — offline timeline + autosave honesty".
+- Remaining (features, not hardening): crash-**continue** (Resume survives
+  reload); IndexedDB tier for multi-session history.
+
+**Transcript durability hardening (2026-06-11) complete.** Interruption-state
+safety for the transcript log (summary deferred per user). Added
+`captionStore.flushNow()` — synchronous localStorage write that folds the
+in-flight `livePartial`/`liveTranslation` onto disk; wired to `pagehide` /
+`visibilitychange→hidden` and to graceful Stop/Pause. Closes the debounce-window
++ unfinalized-utterance loss on crash / tab-close. 210 web tests, typecheck +
+build clean. See `PROJECT_STATE.md` "Transcript durability hardening".
+Follow-up candidates: IndexedDB backup for >5 MB / multi-session history;
+explicit "continue after crash" (Resume survives reload).
+
 **Field-feedback pass (2026-06-08) complete.** Three reported issues fixed —
 see `PROJECT_STATE.md` "Field-feedback pass":
 - Online speaker-switch recognition → new default `'meeting'` acoustic profile
