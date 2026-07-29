@@ -1,9 +1,11 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
+  AudioLevelEvent,
   HealthEvent,
   TranscriptEvent,
   TranslationEvent,
 } from '@meeting-audio/contracts';
+import type { AudioSource } from './types.js';
 import {
   GeminiLiveProvider,
   floatTo16BitPCM,
@@ -65,6 +67,18 @@ describe('GeminiLiveProvider — message mapping', () => {
       sourceLanguage: 'en',
       targetLanguage: 'zh-TW',
     });
+  });
+
+  it('anchors output-first Gemini translation deltas to the live caption path', () => {
+    const { provider, transcripts, translations } = makeProvider('en→zh-TW');
+
+    provider.handleServerObject({ serverContent: { outputTranscription: { text: '即時字幕' } } });
+
+    expect(transcripts).toHaveLength(1);
+    expect(transcripts[0]).toMatchObject({ status: 'partial', text: '' });
+    expect(translations).toHaveLength(1);
+    expect(translations[0]).toMatchObject({ status: 'draft', targetText: '即時字幕' });
+    expect(translations[0]!.sourceSegmentId).toBe(transcripts[0]!.segmentId);
   });
 
   it('turnComplete finalizes both transcript and translation, next content is a new segment', () => {
@@ -190,6 +204,22 @@ describe('GeminiLiveProvider — message mapping', () => {
     expect(health.at(-1)).toMatchObject({ component: 'transport', state: 'reconnecting' });
   });
 
+  it('goAway finalizes the in-flight turn so it is not orphaned across the rotation', () => {
+    // Regression: a GoAway (and the wedge-driven forceReconnect, which shares
+    // finalizeTurn) must commit the half-spoken utterance before closing —
+    // otherwise the resumed session keeps appending into the stale curId.
+    const { provider, transcripts, translations } = makeProvider('en→zh-TW');
+    provider.handleServerObject({ serverContent: { inputTranscription: { text: 'Half spoken' } } });
+    provider.handleServerObject({ serverContent: { outputTranscription: { text: '說一半' } } });
+    expect(transcripts.filter((t) => t.status === 'final')).toHaveLength(0);
+
+    provider.handleServerObject({ goAway: { timeLeft: '5s' } });
+
+    expect(transcripts.filter((t) => t.status === 'final')).toHaveLength(1);
+    expect(transcripts.at(-1)).toMatchObject({ status: 'final', text: 'Half spoken' });
+    expect(translations.some((t) => t.status === 'final' && t.targetText === '說一半')).toBe(true);
+  });
+
   it('zh-TW→en sets reversed language tags', () => {
     const { provider, translations } = makeProvider('zh-TW→en');
     provider.handleServerObject({ serverContent: { inputTranscription: { text: '你好' } } });
@@ -215,5 +245,341 @@ describe('GeminiLiveProvider — PCM helpers', () => {
     const b64 = arrayBufferToBase64(bytes.buffer);
     const decoded = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
     expect(Array.from(decoded)).toEqual([0, 1, 2, 254, 255, 128]);
+  });
+});
+
+// ── Reconnect + wedge harness (#16) ─────────────────────────────────────────
+// These tests drive the FULL start() path, so they need a fake WebSocket,
+// AudioContext, AudioWorkletNode and mic. Kept in their own describe block with
+// scoped global stubs so the pure message-mapping tests above stay untouched.
+
+let wsAutoOpen = true; // when true a new socket opens on a microtask
+let wsEmitSetup = true; // when true the opened socket also emits setupComplete
+let wsAutoCloseAfterOpen = false; // when true the socket closes right after opening (connect-then-drop)
+
+class FakeWebSocket {
+  static OPEN = 1;
+  static CONNECTING = 0;
+  static CLOSING = 2;
+  static CLOSED = 3;
+  static instances: FakeWebSocket[] = [];
+
+  url: string;
+  binaryType = '';
+  readyState = 0;
+  bufferedAmount = 0;
+  onopen: (() => void) | null = null;
+  onmessage: ((e: { data: unknown }) => void) | null = null;
+  onerror: (() => void) | null = null;
+  onclose: (() => void) | null = null;
+  closeCount = 0;
+  sent: string[] = [];
+
+  constructor(url: string) {
+    this.url = url;
+    FakeWebSocket.instances.push(this);
+    if (wsAutoOpen) {
+      // Resolve connect()'s onopen on a microtask (after connect() wires the
+      // handlers synchronously), then deliver setupComplete to arm the wedge
+      // detector — exactly what a live socket does.
+      queueMicrotask(() => {
+        if (this.readyState !== 0) return;
+        this.readyState = 1;
+        this.onopen?.();
+        if (wsEmitSetup) this.onmessage?.({ data: JSON.stringify({ setupComplete: {} }) });
+        if (wsAutoCloseAfterOpen) this.close();
+      });
+    }
+  }
+
+  send(d: string): void {
+    this.sent.push(d);
+  }
+
+  close(): void {
+    this.closeCount += 1;
+    if (this.readyState === 3) return;
+    this.readyState = 3;
+    this.onclose?.();
+  }
+
+  emit(obj: unknown): void {
+    this.onmessage?.({ data: JSON.stringify(obj) });
+  }
+}
+
+class FakeAudioWorkletNode {
+  port = { onmessage: null as ((e: MessageEvent) => void) | null, close: vi.fn() };
+  connect(): void {}
+  disconnect(): void {}
+}
+
+function makeFakeAudioContextClass() {
+  return class {
+    audioWorklet = { addModule: vi.fn().mockResolvedValue(undefined) };
+    destination = {};
+    createMediaStreamSource() {
+      return { connect() {} };
+    }
+    resume() {
+      return Promise.resolve();
+    }
+    close() {
+      return Promise.resolve();
+    }
+  } as unknown as typeof AudioContext;
+}
+
+/** Mic that always returns an ACTIVE level (≈ -26 dB ≫ the -48 dB threshold). */
+function makeActiveMic(): AudioSource {
+  const buf = new Float32Array(2048).fill(0.05);
+  const analyser = {
+    fftSize: 2048,
+    getFloatTimeDomainData: (out: Float32Array) => out.set(buf),
+  } as unknown as AnalyserNode;
+  return {
+    analyser,
+    acquire: vi.fn().mockImplementation(async (onHealth: (e: HealthEvent) => void) => {
+      onHealth({ kind: 'health', component: 'audio', state: 'connected', timestamp: '' });
+      return { getTracks: () => [{ stop: vi.fn() }] } as unknown as MediaStream;
+    }),
+    release: vi.fn(),
+  } as unknown as AudioSource;
+}
+
+function tokenResponse(): Response {
+  return new Response(
+    JSON.stringify({ token: 'ephemeral', model: 'gemini-3.5-live-translate-preview' }),
+    { status: 200 },
+  );
+}
+
+describe('GeminiLiveProvider — reconnect + wedge detection (#16)', () => {
+  beforeEach(() => {
+    wsAutoOpen = true;
+    wsEmitSetup = true;
+    wsAutoCloseAfterOpen = false;
+    FakeWebSocket.instances = [];
+    vi.stubGlobal('WebSocket', FakeWebSocket as unknown as typeof WebSocket);
+    vi.stubGlobal('AudioContext', makeFakeAudioContextClass());
+    vi.stubGlobal('AudioWorkletNode', FakeAudioWorkletNode as unknown as typeof AudioWorkletNode);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  function makeHarness() {
+    const transcripts: TranscriptEvent[] = [];
+    const translations: TranslationEvent[] = [];
+    const health: HealthEvent[] = [];
+    const audioLevels: AudioLevelEvent[] = [];
+    const handlers = {
+      onTranscript: (e: TranscriptEvent) => transcripts.push(e),
+      onTranslation: (e: TranslationEvent) => translations.push(e),
+      onHealth: (e: HealthEvent) => health.push(e),
+      onAudioLevel: (e: AudioLevelEvent) => audioLevels.push(e),
+    };
+    const provider = new GeminiLiveProvider(
+      'http://localhost/session/gemini',
+      handlers,
+      makeActiveMic(),
+      'en→zh-TW',
+      'meeting',
+    );
+    return { provider, transcripts, translations, health, audioLevels };
+  }
+
+  it('translate model setup uses the official AUDIO + transcription side-channel path', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(tokenResponse()));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { provider } = makeHarness();
+    await provider.start();
+
+    const setupFrame = FakeWebSocket.instances.at(-1)!.sent[0];
+    expect(setupFrame).toBeTruthy();
+    const setup = JSON.parse(setupFrame!) as {
+      setup: {
+        inputAudioTranscription?: unknown;
+        outputAudioTranscription?: unknown;
+        generationConfig?: {
+          responseModalities?: string[];
+          inputAudioTranscription?: unknown;
+          outputAudioTranscription?: unknown;
+          translationConfig?: { targetLanguageCode?: string; echoTargetLanguage?: boolean };
+        };
+      };
+    };
+
+    // Transcription fields MUST be at setup top level — the live service
+    // rejects the generationConfig-nested shape with WS close 1007 (verified
+    // 2026-07-28, 8/8 handshake matrix; see diagnostic report §4.3). This
+    // assertion guards against regressing to the doc-page nested shape.
+    expect(setup.setup.inputAudioTranscription).toEqual({});
+    expect(setup.setup.outputAudioTranscription).toEqual({});
+    expect(setup.setup.generationConfig).toMatchObject({
+      responseModalities: ['AUDIO'],
+      translationConfig: { targetLanguageCode: 'zh-Hant', echoTargetLanguage: false },
+    });
+    expect(setup.setup.generationConfig).not.toHaveProperty('inputAudioTranscription');
+    expect(setup.setup.generationConfig).not.toHaveProperty('outputAudioTranscription');
+
+    provider.stop();
+  });
+
+  it('persistent reconnect: keeps retrying past 5 attempts and surfaces a failed health state (never gives up / never stop()s)', async () => {
+    vi.useFakeTimers();
+    // Initial mint OK (so start connects), every subsequent mint fails so each
+    // reconnect attempt fails fast and the backoff keeps climbing.
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(tokenResponse())
+      .mockResolvedValue(new Response('upstream gone', { status: 503 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { provider, health } = makeHarness();
+    await provider.start();
+    expect(provider.status).toBe('running');
+
+    // Drop the live socket → triggers the reconnect ladder.
+    FakeWebSocket.instances.at(-1)!.close();
+
+    // Walk through more than RECONNECT_FAILED_HEALTH_AFTER (5) attempts. The
+    // capped backoff is 1,2,4,8,16,30s — advance generously past all of them.
+    await vi.advanceTimersByTimeAsync(120_000);
+
+    // A 'failed' transport health (the failover affordance) must have appeared…
+    const failed = health.filter((e) => e.component === 'transport' && e.state === 'failed');
+    expect(failed.length).toBeGreaterThan(0);
+    expect(failed.at(-1)!.message).toMatch(/switch backend/);
+    // …yet the provider is STILL running (auto-heal never gave up / never stopped).
+    expect(provider.status).toBe('running');
+    // And it really kept minting tokens (≫ the old 5-attempt cap).
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(6);
+
+    provider.stop();
+  });
+
+  it('connect-then-wedge loop STILL escalates to failed (attempt counter resets on setupComplete, not raw onopen)', async () => {
+    // Regression: if reconnectAttempts reset on ws.onopen, a socket that opens
+    // then immediately drops (never reaching setupComplete) would oscillate
+    // 0↔1 forever and never surface 'failed' → the cross-model failover banner
+    // could never appear. The reset must happen on setupComplete (proven live).
+    vi.useFakeTimers();
+    wsEmitSetup = false; // socket opens but never confirms the session…
+    wsAutoCloseAfterOpen = true; // …and drops right after open
+    const fetchMock = vi.fn(() => Promise.resolve(tokenResponse()));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { provider, health } = makeHarness();
+    await provider.start();
+
+    // Drive many connect-then-drop cycles through the capped backoff.
+    await vi.advanceTimersByTimeAsync(120_000);
+
+    const failed = health.filter((e) => e.component === 'transport' && e.state === 'failed');
+    expect(failed.length).toBeGreaterThan(0);
+    expect(provider.status).toBe('running'); // still retrying, never gave up
+
+    provider.stop();
+  });
+
+  it('reconnect succeeds → resets the attempt counter (no premature failed state)', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(() => Promise.resolve(tokenResponse()));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { provider, health } = makeHarness();
+    await provider.start();
+
+    // Drop the socket once; the reconnect should re-open (wsAutoOpen) and heal.
+    FakeWebSocket.instances.at(-1)!.close();
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    // A single transient drop must NOT escalate to 'failed'.
+    expect(health.some((e) => e.component === 'transport' && e.state === 'failed')).toBe(false);
+    // It reconnected (a second socket was created) and is connected again.
+    expect(FakeWebSocket.instances.length).toBeGreaterThanOrEqual(2);
+    expect(health.filter((e) => e.state === 'connected').length).toBeGreaterThanOrEqual(2);
+
+    provider.stop();
+  });
+
+  it('receive-side wedge: OPEN socket but no server content while audio is active → forces a reconnect', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(() => Promise.resolve(tokenResponse()));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { provider, health } = makeHarness();
+    await provider.start();
+    expect(provider.status).toBe('running');
+
+    const firstSocket = FakeWebSocket.instances.at(-1)!;
+    // No further server messages — the socket is wedged. Audio stays active
+    // (mic returns -26 dB every 100 ms tick). After 30 s DC silence + ≥100
+    // active samples the detector must fire.
+    await vi.advanceTimersByTimeAsync(35_000);
+
+    const wedged = health.find(
+      (e) => e.component === 'transport' && e.state === 'degraded' && e.message?.includes('Wedged'),
+    );
+    expect(wedged).toBeDefined();
+    expect(wedged!.message).toMatch(/no server content while audio active/);
+    // The wedged socket was closed and a fresh one opened (reconnect).
+    expect(firstSocket.closeCount).toBeGreaterThan(0);
+    expect(FakeWebSocket.instances.length).toBeGreaterThanOrEqual(2);
+    expect(provider.status).toBe('running');
+
+    provider.stop();
+  });
+
+  it('wedge detector does NOT fire while server content keeps arriving', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(() => Promise.resolve(tokenResponse()));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { provider, health } = makeHarness();
+    await provider.start();
+    const socket = FakeWebSocket.instances.at(-1)!;
+
+    // Emit a server message every 5 s for 60 s — well within the 30 s window,
+    // so the detector clock keeps resetting and never trips.
+    for (let i = 0; i < 12; i++) {
+      socket.emit({ serverContent: { inputTranscription: { text: `chunk ${i} ` } } });
+      await vi.advanceTimersByTimeAsync(5_000);
+    }
+
+    expect(health.some((e) => e.state === 'degraded' && e.message?.includes('Wedged'))).toBe(false);
+    // Only the initial socket — no reconnect happened.
+    expect(FakeWebSocket.instances.length).toBe(1);
+
+    provider.stop();
+  });
+
+  it('stop() halts the reconnect ladder (no further sockets / no leaked timers)', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(tokenResponse())
+      .mockResolvedValue(new Response('gone', { status: 503 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { provider } = makeHarness();
+    await provider.start();
+    FakeWebSocket.instances.at(-1)!.close();
+    await vi.advanceTimersByTimeAsync(3_000);
+
+    provider.stop();
+    const callsAfterStop = fetchMock.mock.calls.length;
+    const socketsAfterStop = FakeWebSocket.instances.length;
+
+    // Advance far past every backoff — a stopped provider must not reconnect.
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(fetchMock.mock.calls.length).toBe(callsAfterStop);
+    expect(FakeWebSocket.instances.length).toBe(socketsAfterStop);
+    expect(provider.status).toBe('stopped');
   });
 });
