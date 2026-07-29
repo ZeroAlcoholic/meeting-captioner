@@ -1,11 +1,4 @@
-import {
-  memo,
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react';
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useSettingsStore } from '../settings/use-settings-store.js';
 import { useCaptionStore, captionStore } from '../store/use-caption-store.js';
 import type { CaptionSegment, CaptionTranslation } from '../store/caption-store.js';
@@ -13,6 +6,8 @@ import type { LangPair } from '../settings/settings-store.js';
 import {
   formatElapsedFromStart,
   groupParagraphsForSide,
+  tailSegments,
+  HISTORY_RENDER_SEGMENTS,
   type Paragraph,
 } from './paragraph-grouping.js';
 import styles from './CaptionBoard.module.css';
@@ -108,10 +103,14 @@ const HistoryStream = memo(function HistoryStream({ langPair }: HistoryStreamPro
   //     from the entire board for the 1–3 s the next sentence streams (the
   //     dominant pattern on the continuous Gemini translate path).
   const hasLive = useCaptionStore((s) => s.livePartial !== null);
-  const historySegments = useMemo(
-    () => (hasLive || segments.length === 0 ? segments : segments.slice(0, -1)),
-    [segments, hasLive],
-  );
+  const historySegments = useMemo(() => {
+    // Exclude the last final only when LiveCaption is already showing it big
+    // (no partial in flight) — see the note above.
+    const base = hasLive || segments.length === 0 ? segments : segments.slice(0, -1);
+    // Cap the RENDERED tail so DOM + paragraph-grouping cost stay flat on a
+    // multi-hour meeting. The store keeps the full history; Export reads it.
+    return tailSegments(base, HISTORY_RENDER_SEGMENTS);
+  }, [segments, hasLive]);
 
   const isZhTarget = langPair === 'en→zh-TW';
 
@@ -126,8 +125,7 @@ const HistoryStream = memo(function HistoryStream({ langPair }: HistoryStreamPro
         segments: historySegments,
         translations,
         side: 'zh',
-        accessor: (s, t) =>
-          isZhTarget ? (t?.targetText || s.text) : s.text,
+        accessor: (s, t) => (isZhTarget ? t?.targetText || s.text : s.text),
       }),
     [historySegments, translations, isZhTarget],
   );
@@ -137,8 +135,7 @@ const HistoryStream = memo(function HistoryStream({ langPair }: HistoryStreamPro
         segments: historySegments,
         translations,
         side: 'en',
-        accessor: (s, t) =>
-          isZhTarget ? s.text : (t?.targetText || s.text),
+        accessor: (s, t) => (isZhTarget ? s.text : t?.targetText || s.text),
       }),
     [historySegments, translations, isZhTarget],
   );
@@ -319,10 +316,38 @@ function computeDisplayed(
   };
 }
 
+/**
+ * Map the live transport+audio health onto a staged startup cue, so the empty
+ * board never reads as "frozen / dead air" during the unavoidable few seconds
+ * between Start and the first caption (mic grant → token → WebRTC/WS handshake →
+ * the model hearing its first phrase). CLAUDE.md mandates a visible state for
+ * each of these — a bare "Waiting for captions…" hid them all.
+ */
+type StartupPhase = 'idle' | 'permission' | 'connecting' | 'listening';
+function startupCue(
+  transport: string,
+  audio: string,
+): { phase: StartupPhase; label: string; sub?: string } {
+  if (audio === 'requesting_permission') {
+    return { phase: 'permission', label: '請允許麥克風存取…', sub: '瀏覽器正在詢問權限' };
+  }
+  if (transport === 'connecting' || audio === 'connecting') {
+    return { phase: 'connecting', label: '連線中…', sub: '正在建立即時翻譯連線' };
+  }
+  if (transport === 'connected') {
+    // Connected but no caption yet → the model is waiting for the first phrase.
+    return { phase: 'listening', label: '正在聆聽…', sub: '開始說話即會出現字幕' };
+  }
+  return { phase: 'idle', label: 'Waiting for captions…' };
+}
+
 const LiveCaption = memo(function LiveCaption({ frozen, langPair }: LiveCaptionProps) {
   const live = useCaptionStore((s) => s.livePartial);
   const lastFinal = useCaptionStore((s) => s.segments.at(-1));
   const bilingual = useSettingsStore((s) => s.includeSourceTranscript);
+  // Health drives the staged startup cue rendered in the empty state below.
+  const transportState = useSettingsStore((s) => s.health.transport.state);
+  const audioState = useSettingsStore((s) => s.health.audio.state);
   // Live translation is kept in its own slot — see CaptionState.liveTranslation.
   const liveTranslation = useCaptionStore((s): CaptionTranslation | undefined =>
     s.liveTranslation && live && s.liveTranslation.sourceSegmentId === live.segmentId
@@ -334,12 +359,7 @@ const LiveCaption = memo(function LiveCaption({ frozen, langPair }: LiveCaptionP
   );
 
   const frozenSnapshotRef = useRef<DisplayedLive | null>(null);
-  const liveDisplayed = computeDisplayed(
-    live,
-    lastFinal,
-    liveTranslation,
-    lastFinalTranslation,
-  );
+  const liveDisplayed = computeDisplayed(live, lastFinal, liveTranslation, lastFinalTranslation);
 
   if (frozen && frozenSnapshotRef.current === null && liveDisplayed) {
     frozenSnapshotRef.current = { ...liveDisplayed, status: 'paused' };
@@ -347,14 +367,35 @@ const LiveCaption = memo(function LiveCaption({ frozen, langPair }: LiveCaptionP
     frozenSnapshotRef.current = null;
   }
 
-  const displayed: DisplayedLive | null = frozen
-    ? frozenSnapshotRef.current
-    : liveDisplayed;
+  const displayed: DisplayedLive | null = frozen ? frozenSnapshotRef.current : liveDisplayed;
+
+  // Auto-pin the live area to the bottom whenever its text grows, so the most
+  // recent words of a long in-flight utterance always stay visible — the older
+  // lines scroll off the top but remain reachable via the scrollbar (usable
+  // while frozen, when no new deltas fight the scroll). Skipped when frozen so a
+  // paused long caption can be scrolled up freely.
+  const currentRef = useRef<HTMLDivElement>(null);
+  const liveKey = displayed ? `${displayed.target} ${displayed.source}` : '';
+  useLayoutEffect(() => {
+    if (frozen) return;
+    const el = currentRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [liveKey, frozen]);
 
   if (!displayed) {
+    const cue = startupCue(transportState, audioState);
     return (
-      <div className={styles.empty} data-lang-pair={langPair} data-testid="caption-empty">
-        <p>Waiting for captions…</p>
+      <div
+        className={styles.empty}
+        data-lang-pair={langPair}
+        data-testid="caption-empty"
+        data-phase={cue.phase}
+      >
+        <div className={styles.startupCue}>
+          {cue.phase !== 'idle' && <span className={styles.startupSpinner} aria-hidden="true" />}
+          <p className={styles.startupLabel}>{cue.label}</p>
+          {cue.sub && <p className={styles.startupSub}>{cue.sub}</p>}
+        </div>
       </div>
     );
   }
@@ -362,28 +403,44 @@ const LiveCaption = memo(function LiveCaption({ frozen, langPair }: LiveCaptionP
   const isPartial = displayed.status === 'partial';
 
   return (
-    <div className={styles.current} data-testid="caption-current" data-status={displayed.status}>
-      <div
-        className={styles.target}
-        data-testid="caption-target"
-        data-status={displayed.status}
-      >
-        {displayed.target
-          ? displayed.target
-          : isPartial
-            // Translation hasn't caught up to the fresh utterance yet — a bare
-            // 5rem ellipsis read as "nothing is happening". Label the state.
-            ? <span className={styles.translatingHint}>翻譯中…</span>
-            // Finalized with no translation (MT failure / speaker already in
-            // target language): degrade to the source text, never a blank.
-            : displayed.source || '…'}
+    <div
+      ref={currentRef}
+      className={styles.current}
+      data-testid="caption-current"
+      data-status={displayed.status}
+    >
+      <div className={styles.target} data-testid="caption-target" data-status={displayed.status}>
+        {displayed.target ? (
+          displayed.target
+        ) : isPartial && displayed.source ? (
+          // Translation trails the source stream — ~2–3 s on Gemini Live
+          // Translate, where the caption text is structurally paced by the
+          // model's translated-audio generation (no server-side knob exists to
+          // shorten it; verified against the official docs 2026-07-02). A bare
+          // 翻譯中… label left the big area dead for that whole window every
+          // sentence, which read as "the system is slow". Show the source text
+          // that HAS arrived, dimmed and tagged, and swap in the translation
+          // the instant its first draft delta lands.
+          <>
+            <span className={styles.pendingSource} data-testid="pending-source">
+              {displayed.source}
+            </span>
+            <span className={styles.translatingHint}>翻譯中…</span>
+          </>
+        ) : isPartial ? (
+          // Nothing at all has arrived for this utterance yet — a bare
+          // 5rem ellipsis read as "nothing is happening". Label the state.
+          <span className={styles.translatingHint}>翻譯中…</span>
+        ) : (
+          // Finalized with no translation (MT failure / speaker already in
+          // target language): degrade to the source text, never a blank.
+          displayed.source || '…'
+        )}
       </div>
       {bilingual && (
         <div className={styles.source} data-testid="caption-source" data-status={displayed.status}>
           {displayed.source}
-          {isPartial && (
-            <span className={styles.cursor} aria-hidden="true" />
-          )}
+          {isPartial && <span className={styles.cursor} aria-hidden="true" />}
         </div>
       )}
       {frozen && (
@@ -519,9 +576,7 @@ export function CaptionBoard() {
     const board = boardRef.current;
     if (!board) return;
     function onWheel(this: void, e: WheelEvent): void {
-      const history = board?.querySelector(
-        '[data-testid="caption-history"]',
-      ) as HTMLElement | null;
+      const history = board?.querySelector('[data-testid="caption-history"]') as HTMLElement | null;
       if (!history) return;
       if (history.contains(e.target as Node)) return; // native scroll handles it
       // Translate the wheel deltaMode into pixels. Most mice/trackpads use

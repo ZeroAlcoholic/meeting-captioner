@@ -38,5 +38,9 @@ export default defineConfig(({ mode }) => {
       port: 5173,
       strictPort: true,
     },
+    test: {
+      // Reset the shared audio-engine cache before every test (see test-setup).
+      setupFiles: ['./src/test-setup.ts'],
+    },
   };
 });

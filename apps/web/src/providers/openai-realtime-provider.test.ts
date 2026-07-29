@@ -10,6 +10,7 @@ let fakeIceState = 'connected';
 let fakeConnectionState = 'connected';
 let fakeRestartIce: ReturnType<typeof vi.fn>;
 let fakePCClose: ReturnType<typeof vi.fn>;
+let addedTrackKinds: string[] = [];
 let lastPC: { fireIce: () => void; fireConn: () => void } | null = null;
 
 // ── Mock factories ─────────────────────────────────────────────────────────────
@@ -39,7 +40,9 @@ function makeFakeRTCPeerConnectionClass() {
       return dc;
     }
 
-    addTrack() {}
+    addTrack(track: MediaStreamTrack) {
+      addedTrackKinds.push(track.kind);
+    }
     async createOffer() {
       return { type: 'offer', sdp: 'mock-offer-sdp' };
     }
@@ -51,7 +54,13 @@ function makeFakeRTCPeerConnectionClass() {
 }
 
 function makeFakeStream() {
-  return { getTracks: () => [{ stop: vi.fn() }] } as unknown as MediaStream;
+  const audioTrack = { kind: 'audio', stop: vi.fn() } as unknown as MediaStreamTrack;
+  const videoTrack = { kind: 'video', stop: vi.fn() } as unknown as MediaStreamTrack;
+  return {
+    getTracks: () => [audioTrack, videoTrack],
+    getAudioTracks: () => [audioTrack],
+    getVideoTracks: () => [videoTrack],
+  } as unknown as MediaStream;
 }
 
 function makeFakeAnalyser() {
@@ -103,6 +112,7 @@ beforeEach(() => {
   fireDCMessage = () => {};
   fakeRestartIce = vi.fn();
   fakePCClose = vi.fn();
+  addedTrackKinds = [];
   lastPC = null;
 
   const analyser = makeFakeAnalyser();
@@ -207,10 +217,16 @@ describe('OpenAIRealtimeProvider', () => {
     provider.stop();
   });
 
-  it('bilingual mode does NOT synthesize a partial transcript on output deltas', async () => {
-    // Negative case: when source transcription is enabled OpenAI sends its
-    // own input_transcript.delta — synthesizing a second partial would
-    // race the real one and corrupt inputAcc display.
+  it('bilingual mode ALSO anchors a live partial on output deltas, carrying the source-so-far', async () => {
+    // The dominant "OpenAI 無法顯示字幕" failure: the translation
+    // (output_transcript.delta) streams continuously while the source whisper
+    // transcript (input_transcript.delta) lags to utterance end. If the
+    // provider only anchored livePartial from input deltas, the live
+    // translated caption would stay blank for the whole utterance because
+    // applyTranslation routes drafts into the finalized map with no live
+    // segment to bind to. So bilingual mode anchors a partial too — but
+    // carrying the source-so-far (inputAcc), never a bare '' that would
+    // clobber a real input delta.
     mockFetch();
     const { handlers, transcripts, translations } = makeHandlers();
     const provider = new OpenAIRealtimeProvider(
@@ -222,10 +238,20 @@ describe('OpenAIRealtimeProvider', () => {
     );
 
     await provider.start();
+    // Real source delta arrives first…
+    fireDCMessage(JSON.stringify({ type: 'session.input_transcript.delta', delta: 'Hello' }));
+    // …then the translation streams; the anchor partial must carry 'Hello',
+    // not overwrite it with ''.
     fireDCMessage(JSON.stringify({ type: 'session.output_transcript.delta', delta: '你好' }));
 
-    expect(transcripts).toHaveLength(0);
+    const partials = transcripts.filter((t) => t.status === 'partial');
+    // One from the input delta, one anchored alongside the output delta.
+    expect(partials).toHaveLength(2);
+    expect(partials[1]!.text).toBe('Hello'); // source-so-far, not ''
     expect(translations).toHaveLength(1);
+    expect(translations[0]!.targetText).toBe('你好');
+    // Same segmentId binds the draft to the live segment.
+    expect(partials[1]!.segmentId).toBe(translations[0]!.sourceSegmentId);
 
     provider.stop();
   });
@@ -366,6 +392,17 @@ describe('OpenAIRealtimeProvider', () => {
     provider.stop();
   });
 
+  it('adds only audio tracks to the peer connection', async () => {
+    mockFetch();
+    const { handlers } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+
+    await provider.start();
+
+    expect(addedTrackKinds).toEqual(['audio']);
+    provider.stop();
+  });
+
   it('zh-TW→en langPair emits correct source/target language metadata', async () => {
     mockFetch();
     const { handlers, translations } = makeHandlers();
@@ -402,6 +439,25 @@ describe('OpenAIRealtimeProvider', () => {
 
     expect(provider.status).toBe('stopped');
     expect(healthEvents.find((e) => e.state === 'api_error')).toBeDefined();
+  });
+
+  it('initial SDP exchange failure closes the provisional peer connection', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn()
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ client_secret: { value: 'tok' } }), { status: 200 }),
+        )
+        .mockResolvedValueOnce(new Response('upstream rejected sdp', { status: 500 })),
+    );
+    const { handlers, healthEvents } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+
+    await provider.start();
+
+    expect(provider.status).toBe('stopped');
+    expect(fakePCClose).toHaveBeenCalledTimes(1);
+    expect(healthEvents.find((e) => e.component === 'transport' && e.state === 'api_error')).toBeDefined();
   });
 
   it('stop() called between fetch and SDP exchange short-circuits cleanly (no NPE, no misleading api_error)', async () => {
@@ -548,13 +604,69 @@ describe('OpenAIRealtimeProvider', () => {
     provider.stop();
   });
 
-  it('stop() cancels the pending renewal-retry timer even when already stopped', async () => {
-    // Regression guard (Codex P1): after a renewal failure the instance
-    // settles into _status='stopped' WITH a renewalRetryTimer pending.
-    // If the user manually starts a new session, the hook calls stop()
-    // on the prior provider — that stop() must run cleanup() even though
-    // status is already 'stopped', otherwise the orphan timer fires later
-    // and opens a parallel session.
+  it('make-before-break renewal reuses the mic stream (single getUserMedia) and never goes idle', async () => {
+    // Headline #7 behaviour: a scheduled 25-min renewal must NOT release and
+    // re-acquire the mic (no OS-indicator blink / re-prompt), and must NOT drop
+    // the provider to 'idle' between tearing down and rebuilding — it builds the
+    // new peer over the SAME mic stream, then swaps. The old peer is closed only
+    // after the new one is ready (zero caption gap).
+    vi.useFakeTimers();
+    const getUserMedia = vi.fn().mockResolvedValue(makeFakeStream());
+    vi.stubGlobal('navigator', { mediaDevices: { getUserMedia } });
+    const fetchMock = vi
+      .fn()
+      // Initial bring-up: /session (renew in 1s) + SDP.
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ client_secret: { value: 'tok1' }, session_renewal_recommended_ms: 1000 }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(new Response('sdp-1', { status: 200 }))
+      // Renewal: fresh /session + SDP.
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ client_secret: { value: 'tok2' }, session_renewal_recommended_ms: 1000 }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValue(new Response('sdp-2', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const statuses: string[] = [];
+    const { handlers, translations } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+    provider.onStatus((s) => statuses.push(s));
+
+    await provider.start();
+    expect(provider.status).toBe('running');
+    expect(getUserMedia).toHaveBeenCalledTimes(1);
+
+    // Fire the scheduled renewal.
+    await vi.advanceTimersByTimeAsync(1000);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Mic was reused — NOT re-acquired.
+    expect(getUserMedia).toHaveBeenCalledTimes(1);
+    // The old peer was closed during the make-before-break swap.
+    expect(fakePCClose).toHaveBeenCalled();
+    // Status never dipped to idle/stopped through the renewal (zero-gap).
+    expect(statuses).not.toContain('idle');
+    expect(provider.status).toBe('running');
+    // The NEW datachannel is live (post-swap wiring works) — a delta routes.
+    fireDCMessage(JSON.stringify({ type: 'session.output_transcript.delta', delta: '你好' }));
+    expect(translations.some((t) => t.targetText === '你好')).toBe(true);
+
+    provider.stop();
+  });
+
+  it('stop() cancels the pending renewal-retry timer (no orphan reconnect)', async () => {
+    // Under make-before-break a renewal FAILURE keeps the provider 'running'
+    // (the old session may still be alive, and we keep retrying) with a
+    // renewalRetryTimer armed. A manual stop() — e.g. the hook stopping the old
+    // provider when the user starts a new session — must cancel that timer, or
+    // the orphan fires later and opens a parallel session.
     vi.useFakeTimers();
     const fetchMock = vi.fn();
     fetchMock.mockResolvedValueOnce(
@@ -576,21 +688,18 @@ describe('OpenAIRealtimeProvider', () => {
     await provider.start();
     expect(provider.status).toBe('running');
 
-    // Trigger the first renewal (which will fail and schedule a 5-min retry).
+    // Trigger the first renewal (fails → schedules a 30s retry). The session
+    // stays 'running' (make-before-break keeps the old peer; we keep retrying).
     await vi.advanceTimersByTimeAsync(1000);
     await Promise.resolve();
     await Promise.resolve();
-    expect(provider.status).toBe('stopped');
-    // Retry timer is now armed.
+    expect(provider.status).toBe('running');
 
-    // Snapshot how many fetch calls were made before stop().
     const callsBeforeStop = fetchMock.mock.calls.length;
-
-    // Now: manual stop() while still in 'stopped'. Must cancel retry timer.
     provider.stop();
+    expect(provider.status).toBe('stopped');
 
-    // Advance well past the 5-min retry threshold. If the timer wasn't
-    // cancelled the provider would call /session again on its own.
+    // Advance well past every backoff — a stopped provider must not reconnect.
     await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
     await Promise.resolve();
     await Promise.resolve();

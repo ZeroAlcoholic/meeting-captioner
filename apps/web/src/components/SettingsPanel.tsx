@@ -9,7 +9,7 @@ import styles from './SettingsPanel.module.css';
 
 const ONLINE_PROVIDER_OPTIONS: Array<{ id: OnlineProvider; label: string; hint: string }> = [
   { id: 'openai', label: 'OpenAI', hint: 'OpenAI Realtime Translate (WebRTC). 預設。' },
-  { id: 'gemini', label: 'Gemini', hint: 'Google Gemini 3.5 Live Translate（WebSocket）。專用即時翻譯模型，連續串流、低延遲，繁體中文輸出。需伺服器設定 GEMINI_API_KEY。' },
+  { id: 'gemini', label: 'Gemini', hint: 'Google Gemini 3.5 Live Translate（WebSocket）。專用即時翻譯模型，連續串流，繁體中文原生輸出；譯文約落後語音 2–3 秒（模型特性，官方無參數可調）。延遲敏感的會議建議用 OpenAI。需伺服器設定 GEMINI_API_KEY。' },
 ];
 
 const MIC_DISTANCE_OPTIONS: Array<{ id: MicDistance; label: string; hint: string }> = [
@@ -49,7 +49,7 @@ export interface SettingsPanelProps {
  * dropped down) keeps the controls visually grouped — language pair on
  * top, capture mode beneath — and frees a column slot.
  */
-function LanguageBlock() {
+function LanguageBlock({ sessionActive = false }: { sessionActive?: boolean }) {
   const langPair = useSettingsStore((s) => s.langPair);
   const setLangPair = useSettingsStore((s) => s.setLangPair);
   const includeSource = useSettingsStore((s) => s.includeSourceTranscript);
@@ -65,7 +65,17 @@ function LanguageBlock() {
             key={opt.id}
             type="button"
             data-testid={`lang-${opt.id}`}
-            title={opt.hint}
+            // Translation DIRECTION is fixed at upstream session creation
+            // (OpenAI audio.output.language / Gemini translationConfig). Unlike
+            // the bilingual toggle below, there is no auto-restart wired for a
+            // langPair change — and the dedicated translate models capture it at
+            // construction — so allowing a mid-session change would silently
+            // leave the stream translating to the OLD language while the UI
+            // shows the new one (a "no silent failures" violation). Lock it
+            // during a live session, mirroring the backend switcher: a
+            // direction change is effectively a new meeting, so Stop → Start.
+            disabled={sessionActive}
+            title={sessionActive ? '會議進行中 — 請先 Stop 再切換翻譯方向' : opt.hint}
             onClick={() => setLangPair(opt.id as LangPair)}
             style={{
               padding: '5px 12px',
@@ -73,7 +83,8 @@ function LanguageBlock() {
               border: langPair === opt.id ? '2px solid #4a9eff' : '1px solid #555',
               background: langPair === opt.id ? '#1a3a5c' : 'transparent',
               color: '#e8e8e8',
-              cursor: 'pointer',
+              cursor: sessionActive ? 'not-allowed' : 'pointer',
+              opacity: sessionActive && langPair !== opt.id ? 0.4 : 1,
               fontWeight: langPair === opt.id ? 700 : 400,
               fontSize: 14,
             }}
@@ -266,7 +277,7 @@ export function SettingsPanel({ open, onClose, triggerRef, sessionActive }: Sett
             between them (22 px) gives the two sub-blocks visual breathing
             room without needing a divider line. */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
-          <LanguageBlock />
+          <LanguageBlock sessionActive={sessionActive ?? false} />
           <OnlineProviderBlock sessionActive={sessionActive ?? false} />
           <MicDistanceBlock />
         </div>

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useSettingsStore } from '../settings/use-settings-store.js';
+import { TWD_PER_USD, fmtDuration, fmtUsd } from './cost-format.js';
 import styles from './RealtimePricingPanel.module.css';
 
 // ─── Pricing constants ────────────────────────────────────────────────────────
@@ -20,23 +21,6 @@ import styles from './RealtimePricingPanel.module.css';
 
 const TRANSLATE_USD_PER_MIN = 0.034;
 const WHISPER_USD_PER_MIN = 0.017;
-const TWD_PER_USD = 32; // fixed display-only rate; the bill is in USD
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function fmtDuration(min: number): string {
-  const totalSec = Math.floor(min * 60);
-  const h = Math.floor(totalSec / 3600);
-  const m = Math.floor((totalSec % 3600) / 60);
-  const sec = totalSec % 60;
-  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
-}
-
-function fmtUsd(n: number): string {
-  // Two decimals up to $100, four below — gives meaningful resolution on
-  // a short 1-min demo while staying compact for a 1-hour meeting.
-  return n >= 1 ? `$${n.toFixed(2)}` : `$${n.toFixed(4)}`;
-}
 
 // ─── Component ────────────────────────────────────────────────────────────────
 export function RealtimePricingPanel() {
@@ -74,7 +58,9 @@ export function RealtimePricingPanel() {
   // Tooltip rate reflects what the CURRENT live session is billed at (or
   // what the next Start would use, if not running).
   const tooltipBilingual = isLive ? liveBilingual : includeSourceTranscript;
-  const ratePerMin = tooltipBilingual ? TRANSLATE_USD_PER_MIN + WHISPER_USD_PER_MIN : TRANSLATE_USD_PER_MIN;
+  const ratePerMin = tooltipBilingual
+    ? TRANSLATE_USD_PER_MIN + WHISPER_USD_PER_MIN
+    : TRANSLATE_USD_PER_MIN;
   const rateLabel = `$${ratePerMin.toFixed(3)}/min ${tooltipBilingual ? 'bilingual' : 'translate'}`;
 
   return (
@@ -88,7 +74,9 @@ export function RealtimePricingPanel() {
       }
     >
       {isLive && <span className={styles.liveDot} aria-label="Live" />}
-      <span className={styles.timer} data-live={isLive}>{fmtDuration(translateMin)}</span>
+      <span className={styles.timer} data-live={isLive}>
+        {fmtDuration(translateMin)}
+      </span>
       <span className={styles.sep}>·</span>
       <span className={styles.cost}>
         {hasData ? `${fmtUsd(total)} ≈ NT$${Math.round(totalTWD)}` : '—'}

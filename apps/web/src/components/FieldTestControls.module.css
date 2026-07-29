@@ -1,0 +1,15 @@
+.wrapper {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.recording {
+  border-color: rgba(199, 146, 54, 0.72) !important;
+  background: rgba(199, 146, 54, 0.14) !important;
+  color: #e8b060 !important;
+}
+
+.export {
+  padding-inline: 0.75rem !important;
+}

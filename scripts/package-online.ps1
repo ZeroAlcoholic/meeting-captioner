@@ -64,13 +64,15 @@ Write-Host "==> Copying server bundle -> $ServerDist"
 New-Item -ItemType Directory -Path $ServerDist | Out-Null
 Copy-Item -Force (Join-Path $RepoRoot 'services/online/dist/server.bundle.cjs') $ServerDist
 
-# 4. Copy the built web assets; strip the offline PCM worklet which is
-#    irrelevant to the online build (OpenAI Realtime uses WebRTC, not PCM).
+# 4. Copy the built web assets. KEEP pcm-worklet.js: it used to be stripped as
+#    "offline-only", but the Gemini Live ONLINE backend captures mic/system
+#    audio through this worklet (addModule('/pcm-worklet.js')). Removing it 404s
+#    the worklet load -> Gemini sends no audio -> connects but produces zero
+#    translation in the shipped build. (OpenAI Realtime uses WebRTC and does not
+#    need it, but it must ship for Gemini to work.)
 $WebOut = Join-Path $StageDir 'web'
 Write-Host "==> Copying apps/web/dist -> $WebOut"
 Copy-Item -Recurse -Force (Join-Path $RepoRoot 'apps/web/dist') $WebOut
-$PcmWorklet = Join-Path $WebOut 'pcm-worklet.js'
-if (Test-Path $PcmWorklet) { Remove-Item -Force $PcmWorklet }
 
 # 5. Drop launchers + README. Deliberately NO .env.example — the slim
 #    distribution reads OPENAI_API_KEY from system env only.

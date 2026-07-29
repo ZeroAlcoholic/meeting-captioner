@@ -1,5 +1,21 @@
 import type { TranscriptEvent, TranslationEvent } from '@meeting-audio/contracts';
 import { createStore, type StoreApi } from 'zustand/vanilla';
+import { idbClear, idbLoad, idbSave } from './idb-persistence.js';
+
+/**
+ * Which capture configuration produced this session. Persisted so a reload
+ * after a crash / accidental tab-close can offer to CONTINUE the same meeting
+ * on the same backend, instead of forcing the operator to start over.
+ */
+export type SessionMode = 'fake' | 'real' | 'gemini' | 'offline' | 'hybrid';
+
+/**
+ * Session lifecycle phase. `running`/`paused` mean the meeting was still live
+ * (or intentionally paused) the last time state was persisted — i.e. a reload
+ * in either phase is a candidate for "continue". `ended` means the operator
+ * pressed Stop, so a reload just shows the restored log (export / clear).
+ */
+export type SessionPhase = 'running' | 'paused' | 'ended';
 
 export interface CaptionSegment {
   segmentId: string;
@@ -72,6 +88,17 @@ export interface CaptionState {
    */
   sessionEndedAt: number | null;
   /**
+   * Which capture configuration this session is running (or last ran). Persisted
+   * so a reload can resume the same backend. Null when no session has started.
+   */
+  sessionMode: SessionMode | null;
+  /**
+   * Lifecycle phase of the current/last session. Persisted. `running`/`paused`
+   * on hydration ⇒ the meeting was interrupted and can be CONTINUED; `ended` ⇒
+   * cleanly stopped. Null when no session has started.
+   */
+  sessionPhase: SessionPhase | null;
+  /**
    * EPHEMERAL — never persisted. True only at construction when hydration
    * actually loaded data from storage, and stays true until the user
    * starts a new session in this tab. Drives the "📂 Restored N segments"
@@ -89,16 +116,51 @@ export interface CaptionState {
    * "this is old data" chip dismisses. Called by App.tsx whenever the user
    * clicks Start (fake/real/offline) — without this, post-Start transcript
    * events would append into the previous session's history with timestamps
-   * anchored to the old sessionStartMs.
+   * anchored to the old sessionStartMs. Pass the capture `mode` so a later
+   * reload can offer to continue this exact backend.
    */
-  beginSession: () => void;
+  beginSession: (mode?: SessionMode) => void;
+  /**
+   * Update the lifecycle phase (running ⇄ paused, or → ended) without touching
+   * the transcript. Persisted, so a reload can tell an interrupted/paused
+   * meeting (resumable) from a cleanly-stopped one. No-op if no session begun.
+   */
+  setSessionPhase: (phase: SessionPhase) => void;
+  /**
+   * Update which capture/backend the CURRENT session is running on, WITHOUT
+   * clearing the transcript. Used by cross-model failover: the operator switches
+   * OpenAI⇄Gemini mid-meeting (no `beginSession`, history preserved), and the
+   * persisted `sessionMode` must follow so a later crash-Continue resumes the
+   * backend actually in use — not the one the session originally started on.
+   * No-op if no session has begun.
+   */
+  setSessionMode: (mode: SessionMode) => void;
   /**
    * Mark the active session as ended without clearing its data. Called by
    * App.tsx on Stop. The data remains visible (and persisted) so the user
-   * can still export it after stopping.
+   * can still export it after stopping. Also sets sessionPhase = 'ended'.
    */
   endSession: () => void;
   clear: () => void;
+  /**
+   * Synchronously write the current snapshot to localStorage RIGHT NOW,
+   * bypassing the debounce — and, unlike the debounced writer, FOLD the
+   * in-flight `livePartial` / `liveTranslation` into the persisted segments so
+   * a mid-sentence interruption isn't lost.
+   *
+   * This is the durability backstop for interruption states the debounced
+   * saver cannot cover:
+   *   - a hard crash / OS kill / accidental tab-close inside the debounce
+   *     window (up to PERSIST_MAX_INTERVAL_MS of finalized segments at risk);
+   *   - an utterance that was still partial (never finalized) when the page
+   *     went away — that text lives only in `livePartial`, which the debounced
+   *     writer intentionally never persists.
+   *
+   * Called automatically on `pagehide` / `visibilitychange→hidden`, and
+   * explicitly by the app on graceful Stop / Pause so the last spoken line is
+   * durable the instant capture ends. No-op when persistence is disabled.
+   */
+  flushNow: () => void;
 }
 
 export interface CreateCaptionStoreOptions {
@@ -107,54 +169,76 @@ export interface CreateCaptionStoreOptions {
   persistKey?: string | null;
 }
 
-// Buffer cap. Sized for a long business meeting: at ~2-3 s per segment
-// (typical conversational pace) a 90-minute meeting produces ~1800-2700
-// segments. 3000 gives ~100 minutes of headroom before the oldest
-// segment is pruned from scrollback / persisted state. Storage cost is
-// bounded — at ~200 bytes per JSON segment the on-disk persisted state
-// peaks around 600 KB, well within the 5-10 MB localStorage quota.
-const DEFAULT_MAX_SEGMENTS = 3000;
+// Buffer cap. IndexedDB is the primary durable store (async, multi-MB headroom),
+// so a single long session can hold far more than the old localStorage-bound
+// 3000. At ~200 bytes/segment, 20000 ≈ 4 MB JSON — comfortable for IDB and ~11
+// hours of meeting at typical conversational pace. localStorage only ever holds
+// a bounded TAIL (see LS_TAIL_SEGMENTS) as the synchronous crash-safety net,
+// because IndexedDB cannot be written synchronously on pagehide.
+const DEFAULT_MAX_SEGMENTS = 20000;
+// Newest-N segments mirrored into localStorage for the synchronous emergency
+// flush + instant first paint. ~2000 × ~200 B ≈ 400 KB, safely under the 5 MB
+// localStorage quota even with translations. The full history lives in IDB.
+const LS_TAIL_SEGMENTS = 2000;
 const PERSIST_DEBOUNCE_MS = 800;
-const PERSIST_VERSION = 3;
-const DEFAULT_PERSIST_KEY = 'meeting-audio:captions:v3';
+const PERSIST_VERSION = 4;
+const DEFAULT_PERSIST_KEY = 'meeting-audio:captions:v4';
 // Legacy keys we still attempt to read for backward-compat. The current
 // writer only ever writes to DEFAULT_PERSIST_KEY; once the user re-saves
 // after migration the legacy entry can be deleted.
-const LEGACY_PERSIST_KEYS = ['meeting-audio:captions:v2'] as const;
+const LEGACY_PERSIST_KEYS = ['meeting-audio:captions:v3', 'meeting-audio:captions:v2'] as const;
+const ACCEPTED_PERSIST_VERSIONS = new Set([2, 3, 4]);
 
-interface PersistedState {
+export interface PersistedState {
   v: number;
   segments: CaptionSegment[];
   translations: Record<string, CaptionTranslation>;
   sessionStartMs?: number | null;
   sessionId?: string | null;
   sessionEndedAt?: number | null;
+  sessionMode?: SessionMode | null;
+  sessionPhase?: SessionPhase | null;
   savedAt: string;
 }
 
-interface HydratedSnapshot {
+export interface HydratedSnapshot {
   segments: CaptionSegment[];
   translations: Record<string, CaptionTranslation>;
   sessionStartMs: number | null;
   sessionId: string | null;
   sessionEndedAt: number | null;
+  sessionMode: SessionMode | null;
+  sessionPhase: SessionPhase | null;
+  /** ms epoch parsed from `savedAt` — used to pick the newer of IDB vs localStorage. */
+  savedAtMs: number;
+}
+
+function snapshotFromPersisted(parsed: PersistedState): HydratedSnapshot {
+  const savedAtMs = parsed.savedAt ? Date.parse(parsed.savedAt) : NaN;
+  return {
+    segments: parsed.segments ?? [],
+    translations: parsed.translations ?? {},
+    sessionStartMs: parsed.sessionStartMs ?? null,
+    sessionId: parsed.sessionId ?? null,
+    sessionEndedAt: parsed.sessionEndedAt ?? null,
+    sessionMode: parsed.sessionMode ?? null,
+    // Older payloads (v2/v3) had no phase. Treat them as 'ended' so a reload of
+    // pre-upgrade data shows the restored chip (export/clear) but does NOT pop a
+    // misleading "continue" prompt for a session that may have ended long ago —
+    // legacy data has no reliable signal that it was genuinely still live.
+    sessionPhase: parsed.sessionPhase ?? 'ended',
+    savedAtMs: Number.isFinite(savedAtMs) ? savedAtMs : 0,
+  };
 }
 
 function decodePersisted(raw: string): HydratedSnapshot | null {
   try {
     const parsed = JSON.parse(raw) as PersistedState;
-    // v2 ⇢ v3: missing sessionId / sessionEndedAt default to null. The
-    // restoredFromStorage flag (set by the caller) is what makes the chip
-    // appear, so v2 data lands in the same "you have restored captions"
-    // UX as v3 data that was persisted without a clean Stop.
-    if (parsed.v !== 2 && parsed.v !== PERSIST_VERSION) return null;
-    return {
-      segments: parsed.segments ?? [],
-      translations: parsed.translations ?? {},
-      sessionStartMs: parsed.sessionStartMs ?? null,
-      sessionId: parsed.sessionId ?? null,
-      sessionEndedAt: parsed.sessionEndedAt ?? null,
-    };
+    // v2/v3 ⇢ v4: missing session fields default to null. The restoredFromStorage
+    // flag (set by the caller) is what makes the chip appear, so legacy data
+    // lands in the same "you have restored captions" UX as current data.
+    if (!ACCEPTED_PERSIST_VERSIONS.has(parsed.v)) return null;
+    return snapshotFromPersisted(parsed);
   } catch {
     return null;
   }
@@ -184,6 +268,134 @@ function loadPersisted(key: string): HydratedSnapshot | null {
   }
 }
 
+/**
+ * Build the on-disk snapshot from live store state.
+ *
+ * When `includeLive` is true (the crash-safety / flushNow path) the in-flight
+ * `livePartial` is appended as a provisional segment and its `liveTranslation`
+ * folded into the translations map, keyed by the partial's id — so a sentence
+ * that was still being spoken when the page went away survives the reload.
+ * The debounced writer passes `false`: persisting the 20 Hz partial stream on
+ * every tick is exactly the churn the live/final store split exists to avoid.
+ */
+function buildPersistPayload(state: CaptionState, includeLive: boolean): PersistedState {
+  let segments = state.segments;
+  let translations = state.translations;
+  if (includeLive && state.livePartial) {
+    const live = state.livePartial;
+    // Dedupe defensively: if the partial already landed in segments[] (race
+    // with a finalize), don't double it.
+    if (!segments.some((s) => s.segmentId === live.segmentId)) {
+      segments = [...segments, live];
+    }
+    if (state.liveTranslation) {
+      translations = {
+        ...translations,
+        [live.segmentId]: { ...state.liveTranslation, sourceSegmentId: live.segmentId },
+      };
+    }
+  }
+  return {
+    v: PERSIST_VERSION,
+    segments,
+    translations,
+    sessionStartMs: state.sessionStartMs,
+    sessionId: state.sessionId,
+    sessionEndedAt: state.sessionEndedAt,
+    sessionMode: state.sessionMode,
+    sessionPhase: state.sessionPhase,
+    savedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * Bound a payload to its newest-N segments for the localStorage tier. The full
+ * history lives in IndexedDB; localStorage is only the synchronous crash net,
+ * which must stay well under the ~5 MB quota. Translations are pruned to the
+ * retained segment ids so the tail stays self-consistent.
+ */
+export function tailPayload(full: PersistedState, tail: number): PersistedState {
+  if (full.segments.length <= tail) return full;
+  const segments = full.segments.slice(full.segments.length - tail);
+  const keep = new Set(segments.map((s) => s.segmentId));
+  const translations: Record<string, CaptionTranslation> = {};
+  for (const id of keep) {
+    const t = full.translations[id];
+    if (t) translations[id] = t;
+  }
+  return { ...full, segments, translations };
+}
+
+/**
+ * Merge two persisted snapshots (e.g. localStorage tail + IndexedDB full) into
+ * one. The newer `savedAtMs` wins as the base for the session-scalar fields and
+ * ordering; any segments the OTHER snapshot has but the base lacks are unioned
+ * in (the crash case: the sync localStorage flush captured the final/in-flight
+ * line AFTER IDB's last debounced write). Segments are re-sorted by startMs and
+ * capped to maxSegments.
+ */
+export function mergeSnapshots(
+  a: HydratedSnapshot,
+  b: HydratedSnapshot,
+  maxSegments: number,
+): HydratedSnapshot {
+  const base = a.savedAtMs >= b.savedAtMs ? a : b;
+  const other = base === a ? b : a;
+  const byId = new Map<string, CaptionSegment>();
+  for (const s of base.segments) byId.set(s.segmentId, s);
+  for (const s of other.segments) if (!byId.has(s.segmentId)) byId.set(s.segmentId, s);
+  let segments = Array.from(byId.values()).sort((x, y) => x.startMs - y.startMs);
+  if (segments.length > maxSegments) segments = segments.slice(segments.length - maxSegments);
+  const keep = new Set(segments.map((s) => s.segmentId));
+  const translations: Record<string, CaptionTranslation> = {};
+  for (const [id, t] of Object.entries({ ...other.translations, ...base.translations })) {
+    if (keep.has(id)) translations[id] = t;
+  }
+  return {
+    segments,
+    translations,
+    sessionStartMs: base.sessionStartMs ?? other.sessionStartMs,
+    sessionId: base.sessionId ?? other.sessionId,
+    sessionEndedAt: base.sessionEndedAt ?? other.sessionEndedAt,
+    sessionMode: base.sessionMode ?? other.sessionMode,
+    sessionPhase: base.sessionPhase ?? other.sessionPhase,
+    savedAtMs: Math.max(a.savedAtMs, b.savedAtMs),
+  };
+}
+
+// Keys whose page-exit listeners are already registered. Prevents stacking a
+// fresh pagehide/visibilitychange listener every time a store is (re)created for
+// the same key — e.g. under Vite HMR or repeated construction in tests — which
+// would leak listeners and let a stale store's flush run on tab-hide.
+const lifecycleBoundKeys = new Set<string>();
+
+let persistWriteWarned = false;
+/**
+ * Synchronous localStorage write of the crash-safety TAIL. The full history is
+ * written to IndexedDB separately (async). `payload` is expected to already be
+ * tail-bounded by the caller via tailPayload().
+ */
+function writeSnapshot(key: string, payload: PersistedState): void {
+  try {
+    localStorage.setItem(key, JSON.stringify(payload));
+  } catch (err) {
+    // QuotaExceeded or unavailable storage — in-memory keeps working, so this
+    // never blocks captions. But a silently-failing autosave means a crash
+    // would lose the meeting with no warning, which violates "no silent
+    // failures" — surface it once (subsequent writes stay quiet to avoid log
+    // spam at the debounce / partial rate).
+    if (!persistWriteWarned) {
+      persistWriteWarned = true;
+      const reason = err instanceof Error ? err.message : String(err);
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[caption-store] transcript autosave failed (${reason}). The meeting ` +
+          `stays in memory but will NOT survive a reload — export to a file to keep it.`,
+      );
+    }
+  }
+}
+
 function makeSessionId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return crypto.randomUUID();
@@ -210,57 +422,51 @@ function makeSessionId(): string {
  *      cap at PERSIST_MAX_INTERVAL_MS so the user's history is durable
  *      even mid-monologue.
  */
-function makeDebouncedSaver(key: string): (state: CaptionState) => void {
+function makeDebouncedSaver(
+  key: string,
+  scheduleIdbSave: (full: PersistedState) => void,
+): (state: CaptionState) => void {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let lastSegmentsRef: CaptionSegment[] | null = null;
   let lastTranslationsRef: Record<string, CaptionTranslation> | null = null;
   let lastSessionStartMs: number | null | undefined = undefined; // sentinel "never seen"
   let lastSessionId: string | null | undefined = undefined;
   let lastSessionEndedAt: number | null | undefined = undefined;
+  let lastSessionMode: SessionMode | null | undefined = undefined;
+  let lastSessionPhase: SessionPhase | null | undefined = undefined;
   let lastFlushAt = 0;
   const PERSIST_MAX_INTERVAL_MS = 5_000;
 
   return (state) => {
-    // Reference-equality early-exit: if neither persisted slice changed,
-    // there is nothing new to write. partial-delta updates flow through
-    // here all day long and they should all return immediately.
-    const segmentsChanged = state.segments !== lastSegmentsRef;
-    const translationsChanged = state.translations !== lastTranslationsRef;
-    const sessionStartChanged = state.sessionStartMs !== lastSessionStartMs;
-    const sessionIdChanged = state.sessionId !== lastSessionId;
-    const sessionEndedAtChanged = state.sessionEndedAt !== lastSessionEndedAt;
-    if (
-      !segmentsChanged &&
-      !translationsChanged &&
-      !sessionStartChanged &&
-      !sessionIdChanged &&
-      !sessionEndedAtChanged
-    ) {
-      return;
-    }
+    // Reference-equality early-exit: if no persisted slice changed, there is
+    // nothing new to write. partial-delta updates flow through here all day
+    // long and they should all return immediately.
+    const changed =
+      state.segments !== lastSegmentsRef ||
+      state.translations !== lastTranslationsRef ||
+      state.sessionStartMs !== lastSessionStartMs ||
+      state.sessionId !== lastSessionId ||
+      state.sessionEndedAt !== lastSessionEndedAt ||
+      state.sessionMode !== lastSessionMode ||
+      state.sessionPhase !== lastSessionPhase;
+    if (!changed) return;
     lastSegmentsRef = state.segments;
     lastTranslationsRef = state.translations;
     lastSessionStartMs = state.sessionStartMs;
     lastSessionId = state.sessionId;
     lastSessionEndedAt = state.sessionEndedAt;
+    lastSessionMode = state.sessionMode;
+    lastSessionPhase = state.sessionPhase;
 
     const doFlush = () => {
       timer = null;
       lastFlushAt = Date.now();
-      try {
-        const payload: PersistedState = {
-          v: PERSIST_VERSION,
-          segments: state.segments,
-          translations: state.translations,
-          sessionStartMs: state.sessionStartMs,
-          sessionId: state.sessionId,
-          sessionEndedAt: state.sessionEndedAt,
-          savedAt: new Date().toISOString(),
-        };
-        localStorage.setItem(key, JSON.stringify(payload));
-      } catch {
-        // QuotaExceeded or unavailable storage — fail silently, in-memory keeps working.
-      }
+      const full = buildPersistPayload(state, false);
+      // Full history → IndexedDB (async, multi-MB headroom; gated + throttled +
+      // serialized by scheduleIdbSave). Bounded tail → localStorage (sync crash
+      // net + fast first paint).
+      scheduleIdbSave(full);
+      writeSnapshot(key, tailPayload(full, LS_TAIL_SEGMENTS));
     };
 
     // Max-interval guard: if it has been a long time since the last
@@ -339,6 +545,20 @@ function upsertSorted(
 
 export type CaptionStore = StoreApi<CaptionState>;
 
+/** Apply a hydrated snapshot (e.g. merged IDB+localStorage) onto the store. */
+function applyHydratedSnapshot(store: CaptionStore, snap: HydratedSnapshot): void {
+  store.setState({
+    segments: snap.segments,
+    translations: snap.translations,
+    sessionStartMs: snap.sessionStartMs,
+    sessionId: snap.sessionId,
+    sessionEndedAt: snap.sessionEndedAt,
+    sessionMode: snap.sessionMode,
+    sessionPhase: snap.sessionPhase,
+    restoredFromStorage: snap.segments.length > 0,
+  });
+}
+
 export function createCaptionStore(options: CreateCaptionStoreOptions = {}): CaptionStore {
   const maxSegments = options.maxSegments ?? DEFAULT_MAX_SEGMENTS;
   const persistKey = options.persistKey === null ? null : options.persistKey ?? DEFAULT_PERSIST_KEY;
@@ -353,7 +573,42 @@ export function createCaptionStore(options: CreateCaptionStoreOptions = {}): Cap
   // restored chip on first run.
   const restoredFromStorage = (hydrated?.segments?.length ?? 0) > 0;
 
-  const store = createStore<CaptionState>((set) => ({
+  // Set true the moment the user starts/clears/continues a session in THIS tab
+  // (beginSession, clear, setSessionPhase, or the first transcript event). The
+  // async IndexedDB hydration below must NOT clobber a session that has already
+  // become live before the IDB read resolves.
+  let sessionTouched = false;
+
+  // ── IndexedDB write gating ────────────────────────────────────────────────
+  // `idbHydrated` is false only while the initial async idbLoad is in flight for
+  // the default-key store. Until it resolves we must NOT write the (possibly
+  // localStorage-tail-only) in-memory state back to IDB, or we'd overwrite the
+  // full history we're about to merge in. A freshly-touched session is exempt —
+  // overwriting old data with a new session is intended.
+  let idbHydrated = !(persistKey === DEFAULT_PERSIST_KEY && typeof indexedDB !== 'undefined');
+  let lastIdbSaveAt = 0;
+  // Serialize every IDB mutation through one promise chain so clear()'s delete
+  // can never race (and lose to) a still-in-flight save — and overlapping
+  // transactions don't interleave.
+  let idbChain: Promise<void> = Promise.resolve();
+  // Coarser cadence than the localStorage tail: the sync LS tail is the
+  // crash net, so the full-history IDB write can be throttled to bound the
+  // structured-clone cost on long meetings.
+  const IDB_SAVE_MIN_INTERVAL_MS = 8_000;
+
+  const scheduleIdbSave = (full: PersistedState): void => {
+    if (!persistKey) return;
+    if (!idbHydrated && !sessionTouched) return; // don't clobber un-hydrated full history
+    const now = Date.now();
+    if (lastIdbSaveAt !== 0 && now - lastIdbSaveAt < IDB_SAVE_MIN_INTERVAL_MS) return;
+    lastIdbSaveAt = now;
+    idbChain = idbChain.then(() => idbSave(full)).catch(() => {});
+  };
+  const scheduleIdbClear = (): void => {
+    idbChain = idbChain.then(() => idbClear()).catch(() => {});
+  };
+
+  const store = createStore<CaptionState>((set, get) => ({
     maxSegments,
     segments: hydrated?.segments ?? [],
     livePartial: null,
@@ -362,10 +617,16 @@ export function createCaptionStore(options: CreateCaptionStoreOptions = {}): Cap
     sessionStartMs: hydrated?.sessionStartMs ?? null,
     sessionId: hydrated?.sessionId ?? null,
     sessionEndedAt: hydrated?.sessionEndedAt ?? null,
+    sessionMode: hydrated?.sessionMode ?? null,
+    sessionPhase: hydrated?.sessionPhase ?? null,
     restoredFromStorage,
 
     applyTranscript: (event) =>
       set((state) => {
+        // A real transcript event means a live session is in progress (covers
+        // the Continue/Resume path, which doesn't call beginSession) — block any
+        // still-pending async IDB hydrate from clobbering it.
+        sessionTouched = true;
         const sessionStartMs = state.sessionStartMs ?? Date.now();
 
         // Partials and revisions are in-flight ─ they update livePartial only.
@@ -476,7 +737,8 @@ export function createCaptionStore(options: CreateCaptionStoreOptions = {}): Cap
         };
       }),
 
-    beginSession: () =>
+    beginSession: (mode) => {
+      sessionTouched = true;
       set({
         segments: [],
         livePartial: null,
@@ -485,7 +747,32 @@ export function createCaptionStore(options: CreateCaptionStoreOptions = {}): Cap
         sessionStartMs: null,
         sessionId: makeSessionId(),
         sessionEndedAt: null,
+        sessionMode: mode ?? null,
+        sessionPhase: 'running',
         restoredFromStorage: false,
+      });
+    },
+
+    setSessionPhase: (phase) =>
+      set((state) => {
+        // Pause/Resume/Continue all flow through here — mark the session live so
+        // a late async IDB hydrate can't revert the phase or resurrect the chip.
+        sessionTouched = true;
+        if (state.sessionId === null) return {};
+        if (state.sessionPhase === phase) return {};
+        return {
+          sessionPhase: phase,
+          ...(phase === 'ended' && state.sessionEndedAt === null ? { sessionEndedAt: Date.now() } : {}),
+        };
+      }),
+
+    setSessionMode: (mode) =>
+      set((state) => {
+        // Mark the session live so a late async IDB hydrate can't revert it.
+        sessionTouched = true;
+        if (state.sessionId === null) return {};
+        if (state.sessionMode === mode) return {};
+        return { sessionMode: mode };
       }),
 
     endSession: () =>
@@ -495,10 +782,11 @@ export function createCaptionStore(options: CreateCaptionStoreOptions = {}): Cap
         // — shouldn't happen via UI but defensively safe) the timestamp would
         // be misleading, so guard against it.
         if (state.sessionId === null) return {};
-        return { sessionEndedAt: Date.now() };
+        return { sessionEndedAt: Date.now(), sessionPhase: 'ended' };
       }),
 
     clear: () => {
+      sessionTouched = true;
       set({
         segments: [],
         livePartial: null,
@@ -507,25 +795,100 @@ export function createCaptionStore(options: CreateCaptionStoreOptions = {}): Cap
         sessionStartMs: null,
         sessionId: null,
         sessionEndedAt: null,
+        sessionMode: null,
+        sessionPhase: null,
         restoredFromStorage: false,
       });
       if (persistKey && typeof localStorage !== 'undefined') {
         try {
           localStorage.removeItem(persistKey);
           // Also evict legacy keys so the next mount doesn't resurrect them
-          // via the v2-fallback path inside loadPersisted().
+          // via the legacy-fallback path inside loadPersisted().
           for (const legacy of LEGACY_PERSIST_KEYS) {
             localStorage.removeItem(legacy);
           }
         } catch { /* noop */ }
       }
+      // Full history lives in IndexedDB — evict it too. Routed through the same
+      // serialized chain as saves so a still-in-flight idbSave (e.g. from a
+      // Stop→flushNow a moment earlier) can't commit AFTER this delete and
+      // resurrect the cleared meeting.
+      scheduleIdbClear();
+    },
+
+    flushNow: () => {
+      if (!persistKey || typeof localStorage === 'undefined') return;
+      const full = buildPersistPayload(get(), true);
+      // Sync tail → localStorage ONLY. This path fires on every pagehide AND
+      // visibilitychange→hidden (i.e. every tab switch), so it must stay cheap
+      // and must NOT idbSave: an IDB write here would (a) re-clone the full
+      // history on every tab switch, and (b) during the pre-hydration window
+      // overwrite the full IDB history with the localStorage-tail-only state.
+      // The periodic debounced saver owns IDB; the LS tail (incl. the in-flight
+      // line) is merged back over IDB on the next load.
+      writeSnapshot(persistKey, tailPayload(full, LS_TAIL_SEGMENTS));
     },
   }));
 
+  // Async IndexedDB hydration. localStorage gave us an instant (tail) snapshot
+  // above; IDB holds the FULL history, which may be larger and/or newer. Merge
+  // it in once it resolves — UNLESS the user already started/cleared a session
+  // in this tab (sessionTouched), in which case a late hydrate must not clobber
+  // the live session.
+  if (persistKey === DEFAULT_PERSIST_KEY && typeof indexedDB !== 'undefined') {
+    void idbLoad<PersistedState>().then((record) => {
+      // Whatever the outcome, the initial read has settled: open the IDB-write
+      // gate so the debounced saver can persist from here on.
+      idbHydrated = true;
+      if (!record || sessionTouched) return;
+      const idb = snapshotFromPersisted(record);
+      if (idb.segments.length === 0) return;
+      const current = store.getState();
+      // Re-derive a snapshot from the (already-hydrated) localStorage state so
+      // the merge keeps any in-flight tail the sync flush captured. Its savedAt
+      // is the construction-time localStorage timestamp.
+      const lsSnap: HydratedSnapshot = {
+        segments: current.segments,
+        translations: current.translations,
+        sessionStartMs: current.sessionStartMs,
+        sessionId: current.sessionId,
+        sessionEndedAt: current.sessionEndedAt,
+        sessionMode: current.sessionMode,
+        sessionPhase: current.sessionPhase,
+        savedAtMs: hydrated?.savedAtMs ?? 0,
+      };
+      const merged = mergeSnapshots(lsSnap, idb, maxSegments);
+      // Guard again — the IDB read is async; bail if a session began meanwhile.
+      if (sessionTouched) return;
+      applyHydratedSnapshot(store, merged);
+    });
+  }
+
   // Subscribe AFTER hydration so we don't immediately overwrite with empty state.
   if (persistKey && typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
-    const save = makeDebouncedSaver(persistKey);
+    const save = makeDebouncedSaver(persistKey, scheduleIdbSave);
     store.subscribe((state) => save(state));
+
+    // Emergency synchronous flush before the page goes away. The debounced
+    // saver can leave up to PERSIST_MAX_INTERVAL_MS of finalized segments — and
+    // the entire in-flight utterance — unwritten; flushNow() folds both onto
+    // disk in one synchronous setItem. `pagehide` is the reliable unload signal
+    // (fires on real navigation away AND bfcache freeze); `visibilitychange→
+    // hidden` covers mobile / tab-discard cases where pagehide may not fire.
+    if (!lifecycleBoundKeys.has(persistKey)) {
+      lifecycleBoundKeys.add(persistKey);
+      const flushOnExit = () => {
+        try { store.getState().flushNow(); } catch { /* never block teardown */ }
+      };
+      if (typeof window.addEventListener === 'function') {
+        window.addEventListener('pagehide', flushOnExit);
+      }
+      if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+        document.addEventListener('visibilitychange', () => {
+          if (document.visibilityState === 'hidden') flushOnExit();
+        });
+      }
+    }
   }
 
   return store;

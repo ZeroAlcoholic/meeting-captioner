@@ -10,10 +10,16 @@ const INIT_SCRIPT = `
     configurable: true,
     writable: true,
     value: {
-      getUserMedia: () =>
-        Promise.resolve({
-          getTracks: () => [{ stop: () => {} }],
-        }),
+      getUserMedia: () => {
+        // Keep parity with what the provider actually touches: getAudioTracks()
+        // feeds pc.addTrack (video excluded from the SDP), getTracks() feeds
+        // release/stop paths.
+        const audioTrack = { kind: 'audio', stop: () => {} };
+        return Promise.resolve({
+          getTracks: () => [audioTrack],
+          getAudioTracks: () => [audioTrack],
+        });
+      },
     },
   });
 
@@ -95,11 +101,15 @@ test.describe('OpenAI Realtime provider (mocked WebRTC)', () => {
 
   test('Start Real → audio health: requesting_permission then connected', async ({ page }) => {
     await page.goto('/');
+
+    // Idle baseline (panel open), then close before starting: the header Start
+    // button is an outside-click that dismisses the panel, so re-open after.
+    await page.getByTestId('settings-toggle').click();
+    await expect(page.getByTestId('health-audio')).toHaveAttribute('data-state', 'idle');
     await page.getByTestId('settings-toggle').click();
 
-    await expect(page.getByTestId('health-audio')).toHaveAttribute('data-state', 'idle');
-
     await page.getByTestId('start-real').click();
+    await page.getByTestId('settings-toggle').click();
 
     await expect(page.getByTestId('health-audio')).toHaveAttribute('data-state', 'connected', {
       timeout: 5_000,
@@ -108,9 +118,11 @@ test.describe('OpenAI Realtime provider (mocked WebRTC)', () => {
 
   test('Start Real → transport health reaches connected', async ({ page }) => {
     await page.goto('/');
-    await page.getByTestId('settings-toggle').click();
 
+    // Start first, THEN open settings — clicking Start while the panel is open
+    // would dismiss it (outside-click), hiding the in-panel health row.
     await page.getByTestId('start-real').click();
+    await page.getByTestId('settings-toggle').click();
 
     await expect(page.getByTestId('health-transport')).toHaveAttribute('data-state', 'connected', {
       timeout: 5_000,
@@ -164,6 +176,49 @@ test.describe('OpenAI Realtime provider (mocked WebRTC)', () => {
     });
 
     await expect(page.getByTestId('caption-target')).toContainText('測試字幕板。', { timeout: 3_000 });
+  });
+
+  test('Target area shows pending source while translation lags, swaps on first delta', async ({ page }) => {
+    // The translation stream trails the source stream on every backend —
+    // ~2–3 s per sentence on Gemini Live Translate. The big target area must
+    // bridge that window with the source text that HAS arrived (dimmed,
+    // tagged 翻譯中…) instead of going dead, and swap to the translation the
+    // moment its first draft delta lands.
+    await page.goto('/');
+    await page.getByTestId('start-real').click();
+
+    await page.getByTestId('settings-toggle').click();
+    await expect(page.getByTestId('health-transport')).toHaveAttribute('data-state', 'connected', {
+      timeout: 5_000,
+    });
+
+    // Source-only window: input delta arrived, no translation yet.
+    await page.evaluate(() => {
+      const w = window as Window & { __fireDCMessage?: (d: string) => void };
+      w.__fireDCMessage?.(JSON.stringify({
+        type: 'session.input_transcript.delta',
+        delta: 'Revenue grew strongly this quarter.',
+      }));
+    });
+    const pendingSource = page.getByTestId('pending-source');
+    await expect(pendingSource).toContainText('Revenue grew strongly this quarter.', {
+      timeout: 3_000,
+    });
+    await expect(page.getByTestId('caption-target')).toContainText('翻譯中…');
+
+    // First translation delta lands → pending source is replaced by the real
+    // translated caption.
+    await page.evaluate(() => {
+      const w = window as Window & { __fireDCMessage?: (d: string) => void };
+      w.__fireDCMessage?.(JSON.stringify({
+        type: 'session.output_transcript.delta',
+        delta: '本季營收強勁成長。',
+      }));
+    });
+    await expect(page.getByTestId('caption-target')).toContainText('本季營收強勁成長。', {
+      timeout: 3_000,
+    });
+    await expect(pendingSource).toHaveCount(0);
   });
 
   test('No API key → "Start Real" shows disabled state with tooltip', async ({ page }) => {

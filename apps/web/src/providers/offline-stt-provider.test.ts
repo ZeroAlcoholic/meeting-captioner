@@ -368,3 +368,79 @@ describe('OfflineSTTProvider', () => {
     expect(ctrl.translate).toBe(false);
   });
 });
+
+// ── Wall-clock timeline rebase ──────────────────────────────────────────────
+//
+// WHL emits connection-relative startMs (resets to 0 each connection). The
+// provider must shift these onto a wall-clock-absolute timeline so (a) export /
+// time-gutter elapsed isn't clamped to 0:00 and (b) reconnect / Resume segments
+// don't sort to the front of history.
+
+function lastTranscript(handlers: CaptionProviderHandlers): { startMs: number; endMs?: number; segmentId?: string } {
+  const calls = (handlers.onTranscript as ReturnType<typeof vi.fn>).mock.calls;
+  return calls[calls.length - 1]![0] as { startMs: number; endMs?: number; segmentId?: string };
+}
+
+describe('OfflineSTTProvider — wall-clock timeline rebase', () => {
+  it('rebases connection-relative startMs/endMs onto wall-clock using the connection anchor', async () => {
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_000_000_000_000);
+    try {
+      const handlers = makeHandlers();
+      const provider = new OfflineSTTProvider('ws://localhost:8000/ws', handlers, makeMicMock());
+      await startProvider(provider); // onopen sets anchor = 1_000_000_000_000
+
+      mockWsInstance!.simulateMessage({
+        kind: 'transcript', provider: 'offline-stt', mode: 'full_offline', source: 'microphone',
+        segmentId: 'seg-1000', status: 'final', text: 'Hello.', startMs: 1000, endMs: 2000,
+      });
+
+      const ev = lastTranscript(handlers);
+      expect(ev.startMs).toBe(1_000_000_001_000); // anchor + relative 1000
+      expect(ev.endMs).toBe(1_000_000_002_000); // anchor + relative 2000
+      provider.stop();
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('keeps the timeline monotonic across a reconnect (relative restart at 0 must not sort to the front)', async () => {
+    vi.useFakeTimers();
+    const nowSpy = vi.spyOn(Date, 'now');
+    try {
+      nowSpy.mockReturnValue(1_000_000); // connection #1 anchor
+      const handlers = makeHandlers();
+      const provider = new OfflineSTTProvider('ws://localhost:8000/ws', handlers, makeMicMock());
+      const startPromise = provider.start();
+      await flush();
+      mockWsInstance!.simulateOpen();
+      await startPromise;
+
+      // Connection #1: a late segment at relative 5000.
+      mockWsInstance!.simulateMessage({
+        kind: 'transcript', provider: 'offline-stt', mode: 'full_offline', source: 'microphone',
+        segmentId: 'a', status: 'final', text: 'first', startMs: 5000,
+      });
+      const firstAbs = lastTranscript(handlers).startMs; // 1_005_000
+
+      // Drop → reconnect fires after the backoff delay; #2 anchors 50 s later.
+      mockWsInstance!.simulateClose();
+      nowSpy.mockReturnValue(1_050_000);
+      await vi.advanceTimersByTimeAsync(1000); // first backoff = 1000ms → new WS
+      mockWsInstance!.simulateOpen(); // sets anchor #2 = 1_050_000
+
+      // Connection #2: WHL restarts relative timestamps at 0.
+      mockWsInstance!.simulateMessage({
+        kind: 'transcript', provider: 'offline-stt', mode: 'full_offline', source: 'microphone',
+        segmentId: 'b', status: 'final', text: 'second', startMs: 0,
+      });
+      const secondAbs = lastTranscript(handlers).startMs; // 1_050_000
+
+      // Despite the relative restart (0 < 5000), the absolute timeline advances.
+      expect(secondAbs).toBeGreaterThan(firstAbs);
+      provider.stop();
+    } finally {
+      nowSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+});

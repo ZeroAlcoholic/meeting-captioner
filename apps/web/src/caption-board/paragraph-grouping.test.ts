@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { CaptionSegment, CaptionTranslation } from '../store/caption-store.js';
-import { formatElapsedFromStart, groupParagraphsForSide } from './paragraph-grouping.js';
+import {
+  formatElapsedFromStart,
+  groupParagraphsForSide,
+  tailSegments,
+} from './paragraph-grouping.js';
 
 const THIN_SPACE = ' ';
 
@@ -220,5 +224,40 @@ describe('formatElapsedFromStart', () => {
   it('clamps negative elapsed to 0:00 (defensive against clock skew)', () => {
     const start = 1_700_000_000_000;
     expect(formatElapsedFromStart(start - 5000, start)).toBe('0:00');
+  });
+});
+
+describe('tailSegments — history render cap', () => {
+  const make = (n: number): CaptionSegment[] =>
+    Array.from({ length: n }, (_, i) => seg(`s${i}`, `line ${i}`, i * 1000));
+
+  it('returns the SAME reference when within the cap (lets useMemo skip work)', () => {
+    const segs = make(10);
+    expect(tailSegments(segs, 400)).toBe(segs);
+    // Exactly at the cap is still within — no copy.
+    const exact = make(400);
+    expect(tailSegments(exact, 400)).toBe(exact);
+  });
+
+  it('keeps only the most-recent N segments when over the cap', () => {
+    const segs = make(450);
+    const tail = tailSegments(segs, 400);
+    expect(tail).toHaveLength(400);
+    // Oldest 50 dropped; the window ends at the newest segment.
+    expect(tail[0]!.segmentId).toBe('s50');
+    expect(tail.at(-1)!.segmentId).toBe('s449');
+  });
+
+  it('does not mutate the source array (full history stays intact for Export)', () => {
+    const segs = make(450);
+    tailSegments(segs, 400);
+    expect(segs).toHaveLength(450);
+    expect(segs[0]!.segmentId).toBe('s0');
+  });
+
+  it('limit <= 0 disables the cap (returns the full array)', () => {
+    const segs = make(450);
+    expect(tailSegments(segs, 0)).toBe(segs);
+    expect(tailSegments(segs, -1)).toBe(segs);
   });
 });

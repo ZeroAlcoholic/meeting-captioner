@@ -8,6 +8,7 @@ import type {
   TranslationEvent,
 } from '@meeting-audio/contracts';
 import { MicrophoneAudioProvider } from './microphone-audio-provider.js';
+import { WarmTokenCache } from './token-prewarm.js';
 import type { AudioSource, CaptionProvider, CaptionProviderHandlers, ProviderStatus } from './types.js';
 
 // gpt-realtime-translate only outputs 'zh' (Simplified). Convert to Traditional Chinese (Taiwan).
@@ -89,6 +90,61 @@ interface SessionResponse {
   session_renewal_recommended_ms?: number;
 }
 
+export interface SessionRequestBody {
+  langPair: string;
+  includeSourceTranscript: boolean;
+  micDistance: 'meeting' | 'close' | 'far' | 'off';
+}
+
+/** The exact /session POST body — shared by the live provider and the pre-mint
+ * path so a pre-warmed token's request key matches the real Start request. */
+export function sessionRequestBody(
+  langPair: string,
+  includeSourceTranscript: boolean,
+  micDistance: 'meeting' | 'close' | 'far' | 'off',
+): SessionRequestBody {
+  return { langPair, includeSourceTranscript, micDistance };
+}
+
+async function postSession(url: string, body: SessionRequestBody): Promise<SessionResponse> {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`/session failed (${res.status}): ${text || res.statusText}`);
+  }
+  return (await res.json()) as SessionResponse;
+}
+
+function sessionExpiryMs(r: SessionResponse): number | null {
+  return r.client_secret.expires_at !== undefined ? r.client_secret.expires_at * 1000 : null;
+}
+
+// Process-wide warm cache (single live session at a time → one entry is enough).
+const warmSession = new WarmTokenCache<SessionResponse>();
+const warmKey = (url: string, body: SessionRequestBody): string => `${url}|${JSON.stringify(body)}`;
+
+/**
+ * Pre-mint a /session token for `body` into the warm cache while the app is idle,
+ * so the next matching Start skips the token round-trip. Best-effort + single-use
+ * (see WarmTokenCache). Online-only caller (the hook gates on apiKeyStatus).
+ */
+export function prewarmOpenAISession(url: string, body: SessionRequestBody): void {
+  void warmSession.prewarm(
+    warmKey(url, body),
+    () => postSession(url, body),
+    sessionExpiryMs,
+  );
+}
+
+/** Test hook: drop any pre-warmed token so it can't leak across tests. */
+export function __resetWarmSessionForTests(): void {
+  warmSession.clear();
+}
+
 export class OpenAIRealtimeProvider implements CaptionProvider {
   readonly name = 'openai-realtime';
 
@@ -102,6 +158,17 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
   private statusListeners: Set<(s: ProviderStatus) => void> = new Set();
   private pc: RTCPeerConnection | null = null;
   private readonly mic: AudioSource;
+  // The acquired mic MediaStream, persisted ACROSS renewals. Make-before-break
+  // renewal re-uses these exact tracks for the new peer connection instead of
+  // releasing + re-acquiring the device — no OS mic-indicator blink, no
+  // getUserMedia re-prompt, and no transient capture failure every 25 minutes.
+  // Released only on full stop()/cleanup().
+  private stream: MediaStream | null = null;
+  // Re-entrancy guard: a renewal can be triggered concurrently by the 25-min
+  // timer, an ICE/connection failure, a session.closed event, the stale
+  // detector, and the retry backoff. Only one make-before-break swap may run at
+  // a time, or two new peers would race to become this.pc.
+  private renewing = false;
   private levelInterval: ReturnType<typeof setInterval> | null = null;
   private segmentFlushTimer: ReturnType<typeof setTimeout> | null = null;
   private renewTimer: ReturnType<typeof setTimeout> | null = null;
@@ -133,8 +200,14 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
   // on every 100 ms tick while the user is still quiet.
   private silenceEmitted = false;
   // Diagnostic counters — surfaced via periodic console dump so silent
-  // WebRTC wedges leave forensic evidence in DevTools.
+  // WebRTC wedges leave forensic evidence in DevTools. inputDeltaCount /
+  // outputDeltaCount let a field operator confirm the suspected asymmetry:
+  // if outputDeltaCount climbs while inputDeltaCount stays ~0, the source
+  // whisper transcript is lagging/absent — the live-anchor path is what
+  // keeps captions visible in that case.
   private dcEventCount = 0;
+  private inputDeltaCount = 0;
+  private outputDeltaCount = 0;
   private diagInterval: ReturnType<typeof setInterval> | null = null;
   private inputAcc = '';
   private outputAcc = '';
@@ -206,6 +279,19 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
     // the check.
     const aborted = (): boolean => this.status !== 'running';
 
+    // Kick the token-broker fetch off CONCURRENTLY with mic acquisition. The two
+    // are independent (the token doesn't need the mic, the mic doesn't need the
+    // token), so overlapping them shaves a full network RTT (~0.3-0.6 s) off
+    // time-to-first-caption — and on a cold start the fetch completes while the
+    // user is still reading the permission dialog. Settle-wrapped so a mic
+    // denial can't turn the in-flight fetch into an unhandled rejection; a token
+    // minted-but-unused on the rare mic-denied path is a negligible cost.
+    this.emitHealth('transport', 'connecting');
+    const tokenPromise = this.fetchSessionToken().then(
+      (value) => ({ ok: true as const, value }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+
     // Step 1: mic acquisition. Failures here are AUDIO failures, not transport.
     let stream: MediaStream;
     try {
@@ -221,6 +307,7 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       // user to tick the "Share audio" checkbox.
       this.setStatus('stopped');
       this.cleanup();
+      void tokenPromise; // settled-wrapped: nothing to surface, just don't dangle
       return;
     }
     if (aborted()) {
@@ -228,28 +315,35 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       // stream but we never used it — release tracks so the OS mic indicator
       // turns off.
       stream.getTracks().forEach((t) => t.stop());
+      void tokenPromise;
       return;
     }
+    // Persist for make-before-break renewal — re-used, not re-acquired.
+    this.stream = stream;
 
-    // Step 2+: token broker → SDP exchange. Failures here are TRANSPORT failures.
+    // Step 2+: peer build + SDP exchange. TRANSPORT failures.
     try {
-      this.emitHealth('transport', 'connecting');
-      const sessionRes = await fetch(this.sessionUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          langPair: this.langPair,
-          includeSourceTranscript: this.includeSourceTranscript,
-          micDistance: this.micDistance,
-        }),
-      });
-      if (aborted()) return;
-      if (!sessionRes.ok) {
-        const text = await sessionRes.text().catch(() => '');
-        throw new Error(`/session failed (${sessionRes.status}): ${text || sessionRes.statusText}`);
+      // Build the local offer NOW — it needs only the mic, not the token — so
+      // ICE candidate gathering runs IN PARALLEL with the still-in-flight token
+      // mint. By the time the token arrives, localDescription carries the STUN
+      // candidates gathered during that window, so exchangeSdp POSTs a
+      // candidate-enriched offer at zero added latency.
+      const conn = await this.createLocalOffer(this.stream);
+      if (conn === null || aborted()) {
+        conn?.pc.close();
+        void tokenPromise;
+        return;
       }
-      const sessionData = (await sessionRes.json()) as SessionResponse;
-      if (aborted()) return;
+
+      const token = await tokenPromise;
+      if (token.ok === false) {
+        conn.pc.close();
+        throw token.error instanceof Error
+          ? token.error
+          : new Error('Session token fetch failed');
+      }
+      const sessionData = token.value;
+      if (sessionData === null || aborted()) { conn.pc.close(); return; }
       const { client_secret } = sessionData;
       this.renewDelayMs =
         sessionData.session_renewal_recommended_ms ?? DEFAULT_SESSION_RENEW_MS;
@@ -259,78 +353,39 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       // and go straight to renewSession() which will fetch a fresh token.
       // This handles clock drift and the edge case where a cached /session
       // response is replayed after the tab sleeps through the 25-min mark.
+      // Status stays 'running' (mic is already acquired into this.stream) so
+      // renewSession's make-before-break path brings the session up against a
+      // null old peer — recovering cleanly instead of stalling in 'idle'.
       if (client_secret.expires_at !== undefined) {
         const remainingMs = client_secret.expires_at * 1000 - Date.now();
         if (remainingMs < 60_000) {
+          conn.pc.close(); // discard the un-exchanged peer; renewSession rebuilds
           this.emitHealth('transport', 'reconnecting', 'Session token near expiry — refreshing before connect');
-          this.setStatus('idle');
           void this.renewSession();
           return;
         }
       }
 
-      // Configure ICE servers so corporate / strict-firewall networks can
-      // gather server-reflexive candidates and complete the WebRTC handshake.
-      // Browsers' built-in default works on home/open Wi-Fi but typically
-      // fails on enterprise NAT — the user just sees "ICE connection failed"
-      // with no clue what to do. Google's public STUN is fine for this; the
-      // OpenAI session itself still flows over the negotiated path.
-      this.pc = new RTCPeerConnection({
-        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
-      });
-      // We do NOT want the model's translated voice — caption-only UX. Stop
-      // any incoming audio track immediately so OpenAI knows we won't
-      // consume it and the browser doesn't buffer the PCM stream in memory.
-      this.pc.ontrack = (ev: RTCTrackEvent) => {
-        for (const track of ev.streams[0]?.getTracks() ?? []) {
-          track.stop();
-        }
-      };
-      const dc = this.pc.createDataChannel('oai-events');
-      dc.onmessage = (ev: MessageEvent<string>) => {
-        try {
-          this.handleDCEvent(JSON.parse(ev.data) as DCEvent);
-        } catch (err) {
-          console.warn('[openai-rt] DC event error:', err, 'raw:', ev.data.slice(0, 200));
-        }
-      };
-      stream.getTracks().forEach((t) => this.pc!.addTrack(t, stream));
-      this.pc.oniceconnectionstatechange = () => this.handleIceState();
-      this.pc.onconnectionstatechange = () => this.handleConnectionState();
-
-      const offer = await this.pc.createOffer();
-      if (aborted() || !this.pc) return;
-      await this.pc.setLocalDescription(offer);
-      if (aborted() || !this.pc) return;
-      const sdpRes = await fetch(OPENAI_TRANSLATION_CALLS_URL, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${client_secret.value}`,
-          'Content-Type': 'application/sdp',
-        },
-        body: offer.sdp!,
-      });
-      if (aborted() || !this.pc) return;
-      if (!sdpRes.ok) {
-        throw new Error(`OpenAI SDP exchange failed (${sdpRes.status})`);
+      let exchanged: boolean;
+      try {
+        exchanged = await this.exchangeSdp(conn.pc, conn.offerSdp, client_secret.value);
+      } catch (err) {
+        conn.pc.close();
+        throw err;
       }
-      const sdpText = await sdpRes.text();
-      if (aborted() || !this.pc) return;
-      await this.pc.setRemoteDescription({ type: 'answer', sdp: sdpText });
-      if (aborted() || !this.pc) return;
+      if (!exchanged || aborted()) {
+        conn.pc.close();
+        return;
+      }
+      this.pc = conn.pc;
+      this.wirePeer(conn.pc, conn.dc);
       this.emitHealth('transport', 'connected');
 
       // Bring-up succeeded — any prior renewal-retry backoff state is now
-      // moot. Reset the counter so a fresh failure later starts at 5 min,
+      // moot. Reset the counter so a fresh failure later starts at 30 s,
       // not at whatever the previous failure escalated to.
       this.renewalRetryAttempt = 0;
-
-      // Reset stale-data detector baselines so the 30 s grace period
-      // starts now, not at whatever the previous run left behind.
-      this.lastDcEventAt = Date.now();
-      this.lastAudioActiveAt = 0;
-      this.audioActiveSamplesSinceDc = 0;
-      this.silenceEmitted = false;
+      this.resetStaleBaselines();
 
       this.startLevelPolling();
       this.scheduleRenewal(this.renewDelayMs);
@@ -342,6 +397,142 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       this.setStatus('stopped');
       this.cleanup();
     }
+  }
+
+  /**
+   * POST /session for a fresh ephemeral token. Returns null if the provider was
+   * stopped mid-flight; throws on a non-2xx response (transport failure).
+   */
+  private async fetchSessionToken(): Promise<SessionResponse | null> {
+    const body = sessionRequestBody(this.langPair, this.includeSourceTranscript, this.micDistance);
+    // Use a pre-warmed token if one was minted for this EXACT request and is
+    // still fresh (single-use; consume clears it so a renewal mints fresh).
+    const warm = warmSession.consume(warmKey(this.sessionUrl, body));
+    if (warm) {
+      // Honour the abort contract even on the fast path.
+      return this.status === 'running' ? warm : null;
+    }
+    const session = await postSession(this.sessionUrl, body);
+    if (this.status !== 'running') return null;
+    return session;
+  }
+
+  /**
+   * Phase 1 of peer setup: build the RTCPeerConnection + DataChannel + local
+   * offer over the GIVEN mic stream. Needs ONLY the mic — NOT the session token —
+   * so the caller can run this in PARALLEL with the token mint. Crucially this
+   * also starts ICE candidate gathering immediately (setLocalDescription), so
+   * server-reflexive (STUN) candidates accrue DURING the token RTT and land in
+   * localDescription. The SDP we later POST is then candidate-enriched at zero
+   * added latency, which speeds the ICE/DTLS connect on NAT / corporate networks.
+   * The DataChannel handler is left UNWIRED (see wirePeer) so make-before-break
+   * can swap atomically. Returns null if stopped mid-flight (peer closed).
+   */
+  private async createLocalOffer(
+    stream: MediaStream,
+  ): Promise<{ pc: RTCPeerConnection; dc: RTCDataChannel; offerSdp: string } | null> {
+    const aborted = (): boolean => this.status !== 'running';
+    // Configure ICE servers so corporate / strict-firewall networks can gather
+    // server-reflexive candidates and complete the WebRTC handshake. Browsers'
+    // built-in default works on home/open Wi-Fi but typically fails on
+    // enterprise NAT. Google's public STUN is fine; the OpenAI session itself
+    // still flows over the negotiated path.
+    const pc = new RTCPeerConnection({
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+    });
+    // Caption-only UX: stop any incoming translated-voice track immediately so
+    // the browser doesn't buffer PCM in memory.
+    pc.ontrack = (ev: RTCTrackEvent) => {
+      for (const track of ev.streams[0]?.getTracks() ?? []) track.stop();
+    };
+    const dc = pc.createDataChannel('oai-events');
+    // Display capture requires a video track for browser permission UX, but
+    // this provider is audio-only. Keep video out of the OpenAI SDP.
+    stream.getAudioTracks().forEach((track) => pc.addTrack(track, stream));
+
+    const offer = await pc.createOffer();
+    if (aborted()) { pc.close(); return null; }
+    await pc.setLocalDescription(offer); // ICE candidate gathering starts here
+    if (aborted()) { pc.close(); return null; }
+    return { pc, dc, offerSdp: offer.sdp ?? '' };
+  }
+
+  /**
+   * Phase 2 of peer setup: exchange SDP with OpenAI using the session token.
+   * POSTs the candidate-enriched localDescription (falling back to the original
+   * offer SDP when localDescription is unavailable, e.g. test mocks) and applies
+   * the answer. Returns false if stopped mid-flight; throws on a non-2xx SDP
+   * exchange. The caller owns closing `pc` on failure/early-out.
+   */
+  private async exchangeSdp(
+    pc: RTCPeerConnection,
+    offerSdp: string,
+    secretValue: string,
+  ): Promise<boolean> {
+    const aborted = (): boolean => this.status !== 'running';
+    // localDescription accrues ICE candidates after setLocalDescription — prefer
+    // it so the offer we send is as complete as it can be by now.
+    const sdp = pc.localDescription?.sdp ?? offerSdp;
+    const sdpRes = await fetch(OPENAI_TRANSLATION_CALLS_URL, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${secretValue}`, 'Content-Type': 'application/sdp' },
+      body: sdp,
+    });
+    if (aborted()) return false;
+    if (!sdpRes.ok) throw new Error(`OpenAI SDP exchange failed (${sdpRes.status})`);
+    const sdpText = await sdpRes.text();
+    if (aborted()) return false;
+    await pc.setRemoteDescription({ type: 'answer', sdp: sdpText });
+    if (aborted()) return false;
+    return true;
+  }
+
+  /**
+   * Sequential offer→SDP→answer build (token already in hand). Used by the
+   * make-before-break renewal path — there the OLD peer keeps captioning, so the
+   * start()-path's parallel-offer optimization buys nothing. Returns null if
+   * stopped mid-flight; throws on SDP failure. Closes the half-built peer on any
+   * early-out.
+   */
+  private async buildPeer(
+    stream: MediaStream,
+    secretValue: string,
+  ): Promise<{ pc: RTCPeerConnection; dc: RTCDataChannel } | null> {
+    const conn = await this.createLocalOffer(stream);
+    if (conn === null) return null;
+    try {
+      const ok = await this.exchangeSdp(conn.pc, conn.offerSdp, secretValue);
+      if (!ok) { conn.pc.close(); return null; }
+      return { pc: conn.pc, dc: conn.dc };
+    } catch (err) {
+      conn.pc.close();
+      throw err;
+    }
+  }
+
+  /** Attach the live event/state handlers to a freshly-built peer. */
+  private wirePeer(pc: RTCPeerConnection, dc: RTCDataChannel): void {
+    dc.onmessage = (ev: MessageEvent<string>) => {
+      try {
+        this.handleDCEvent(JSON.parse(ev.data) as DCEvent);
+      } catch (err) {
+        console.warn('[openai-rt] DC event error:', err, 'raw:', ev.data.slice(0, 200));
+      }
+    };
+    pc.oniceconnectionstatechange = () => this.handleIceState();
+    pc.onconnectionstatechange = () => this.handleConnectionState();
+  }
+
+  /**
+   * Reset the stale-data detector + silence baselines so the 30 s grace period
+   * starts now, not at whatever a previous connection left behind. Called on
+   * every successful bring-up and make-before-break swap.
+   */
+  private resetStaleBaselines(): void {
+    this.lastDcEventAt = Date.now();
+    this.lastAudioActiveAt = 0;
+    this.audioActiveSamplesSinceDc = 0;
+    this.silenceEmitted = false;
   }
 
   stop(): void {
@@ -378,9 +569,13 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
     this.renewalRetryTimer = null;
     this.diagInterval = null;
     this.renewScheduledAtMs = 0;
+    this.renewing = false;
     this.pc?.close();
     this.pc = null;
+    // Releasing the mic stops the shared MediaStream tracks (this.stream points
+    // at the same object the mic holds), so the OS capture indicator turns off.
     this.mic.release();
+    this.stream = null;
   }
 
   private scheduleRenewal(delayMs: number): void {
@@ -390,43 +585,92 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
     this.renewTimer = setTimeout(() => this.renewSession(), delayMs);
   }
 
+  /**
+   * Make-before-break session renewal. Build a brand-new peer connection over
+   * the EXISTING mic stream while the current one keeps delivering captions,
+   * then swap atomically — so a scheduled 25-min renewal costs ZERO caption gap
+   * and never re-acquires the mic. For a failure-driven renewal (ICE/connection
+   * failed, session.closed, wedge) the old peer is already dead, so there's no
+   * gap to save, but reusing the mic and not tearing down the level/diagnostic
+   * loops still keeps recovery clean.
+   *
+   * On failure the OLD peer is left untouched (a healthy scheduled renewal stays
+   * live; a dead failure-driven one stays dead) and a persistent retry is
+   * scheduled. Status stays 'running' throughout so the UI shows auto-recovery
+   * (+ the cross-model failover affordance) rather than a dead Start button.
+   */
   private async renewSession(): Promise<void> {
     if (this._status !== 'running') return;
-    // Skip if a connection (re)bring-up is already in flight — avoids double SDP.
-    if (this.pc?.connectionState === 'connecting') {
-      this.scheduleRenewal(this.renewDelayMs);
-      return;
-    }
-    this.emitHealth('transport', 'reconnecting', 'Renewing OpenAI session before 30-min cap');
-    this.flushSegment();
-    this.cleanup();
-    this.setStatus('idle');
-    // Re-enter start(); captionStore is intentionally NOT cleared.
+    if (this.renewing) return; // one swap at a time
+    if (!this.stream) return; // no mic to reuse — should not happen while running
+    this.renewing = true;
+    this.emitHealth('transport', 'reconnecting', 'Renewing OpenAI session (zero-gap)');
     try {
-      await this.start();
-      // start() mutates _status; read via .status getter to avoid TS literal narrowing.
-      if (this.status !== 'running') {
-        throw new Error('renewal start did not reach running');
+      const sessionData = await this.fetchSessionToken();
+      if (sessionData === null || this._status !== 'running') return;
+      this.renewDelayMs = sessionData.session_renewal_recommended_ms ?? this.renewDelayMs;
+      const conn = await this.buildPeer(this.stream, sessionData.client_secret.value);
+      if (conn === null || this._status !== 'running') {
+        conn?.pc.close();
+        return;
       }
+
+      // ── Atomic make-before-break swap ──
+      // Finalize the OLD session's in-flight text first so the last line is
+      // neither lost nor duplicated, then detach + close the old peer and
+      // promote the new one. The new DataChannel handler is wired only HERE
+      // (buildPeer left it unwired), so the new session's deltas can't
+      // double-render alongside the old during the overlap window.
+      this.flushSegment();
+      const oldPc = this.pc;
+      if (oldPc) {
+        oldPc.oniceconnectionstatechange = null;
+        oldPc.onconnectionstatechange = null;
+        oldPc.ontrack = null;
+        oldPc.close();
+      }
+      this.pc = conn.pc;
+      this.wirePeer(conn.pc, conn.dc);
+
+      // A stale ICE-restart timer from the old peer would call restartIce on the
+      // NEW one — clear it and reset the backoff for a clean slate.
+      if (this.iceRestartTimer !== null) {
+        clearTimeout(this.iceRestartTimer);
+        this.iceRestartTimer = null;
+      }
+      this.iceRestartAttempt = 0;
+      this.resetStaleBaselines();
+      this.renewalRetryAttempt = 0;
+      this.scheduleRenewal(this.renewDelayMs);
+      // Level polling + diagnostics persist across a normal swap (mic reused).
+      // Start them if this renewal IS the bring-up (token-near-expiry-at-start).
+      if (this.levelInterval === null) this.startLevelPolling();
+      if (this.diagInterval === null) this.startDiagnosticDump();
+      this.emitHealth('transport', 'connected');
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Session renewal failed';
-      // Persistent backoff retry — long meetings must heal themselves even
-      // if the first retry also fails. Counter resets to 0 on any
-      // successful start(). cleanup() cancels the pending timer if the
-      // user manually stops or restarts in the interim.
-      if (this.status === 'stopped') {
-        this.scheduleRenewalRetry(message);
-      }
+      if (this._status === 'running') this.scheduleRenewalRetry(message);
+    } finally {
+      this.renewing = false;
     }
   }
 
   /**
    * Schedule the next renewal retry using the persistent backoff sequence.
-   * Called from renewSession's catch AND from the retry timer's own
-   * callback when its start() attempt also fails. The recursion is what
-   * makes the long-meeting auto-recovery actually persist.
+   * Called from renewSession's catch AND from the retry timer's own callback
+   * when its renewSession() attempt also fails. The recursion is what makes the
+   * long-meeting auto-recovery actually persist — it never gives up. cleanup()
+   * cancels the pending timer on user-initiated stop.
    */
   private scheduleRenewalRetry(reason?: string): void {
+    // Disarm the stale-data detector while we're in retry mode: the retry timer
+    // is now the single driver of recovery. Left armed, the level-poll detector
+    // would independently fire more renewSession() calls during the backoff
+    // window (no DC events arrive on a dead/renewing session), racing the timer
+    // and escalating the backoff faster than intended. resetStaleBaselines()
+    // re-arms it on the next successful connection.
+    this.lastDcEventAt = 0;
+    this.audioActiveSamplesSinceDc = 0;
     const idx = Math.min(this.renewalRetryAttempt, RENEWAL_RETRY_BACKOFF_MS.length - 1);
     const delay = RENEWAL_RETRY_BACKOFF_MS[idx]!;
     this.renewalRetryAttempt += 1;
@@ -442,21 +686,11 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       'failed',
       `${detail}auto-retry in ${humanDelay} (attempt #${this.renewalRetryAttempt})`,
     );
-    this.renewalRetryTimer = setTimeout(async () => {
+    this.renewalRetryTimer = setTimeout(() => {
       this.renewalRetryTimer = null;
-      if (this._status !== 'stopped') return;
-      try {
-        await this.start();
-      } catch {
-        // start()'s own catch already runs cleanup + sets _status='stopped';
-        // surfaced via api_error event.
-      }
-      // If the retry attempt itself did not reach running, schedule the
-      // NEXT one with the bumped backoff. cleanup() cancels this timer
-      // if user manually stops or starts in the interim.
-      if (this.status === 'stopped') {
-        this.scheduleRenewalRetry();
-      }
+      if (this._status !== 'running') return;
+      // renewSession's own catch re-schedules the NEXT retry if this one fails.
+      void this.renewSession();
     }, delay);
   }
 
@@ -543,6 +777,7 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
 
       case 'session.input_transcript.delta': {
         if (!ev.delta) break;
+        this.inputDeltaCount += 1;
         this.inputAcc += ev.delta;
         const meta = LANG_PAIR_META[this.langPair] ?? DEFAULT_META;
         // Whisper transcribes Mandarin as Simplified Chinese — convert to Traditional for zh-TW source
@@ -564,35 +799,45 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
 
       case 'session.output_transcript.delta': {
         if (!ev.delta) break;
+        this.outputDeltaCount += 1;
         this.outputAcc += ev.delta;
         const meta = LANG_PAIR_META[this.langPair] ?? DEFAULT_META;
 
-        // Translation-only mode (includeSourceTranscript=false): OpenAI
-        // never emits `session.input_transcript.delta` because no upstream
-        // whisper transcription was requested. Without an input-side
-        // transcript event the store never sets `livePartial`, so the
-        // caption store's `applyTranslation` routes every draft into the
-        // finalized `translations` map — and `LiveCaption` only renders
-        // `liveTranslation`, leaving the main view blank until the 1 s
-        // flush emits a final segment.
+        // Anchor the live caption from the TRANSLATION stream — in BOTH modes.
         //
-        // Synthesize a zero-text partial transcript here to anchor the
-        // live segment. The UI hides the (empty) source row anyway via
-        // the bilingual gate, so this is invisible to the user but keeps
-        // the live caption area updating at draft rate.
-        if (!this.includeSourceTranscript) {
-          const synth: TranscriptEvent = {
-            kind: 'transcript',
-            provider: 'openai-realtime',
-            mode: 'online_full',
-            source: 'microphone',
-            segmentId: this.currentSegmentId,
-            status: 'partial',
-            text: '',
-            startMs: this.startMs,
-          };
-          this.handlers.onTranscript(synth);
-        }
+        // The translated transcript (`output_transcript.delta`) streams
+        // continuously, but the optional source transcript
+        // (`input_transcript.delta`, gpt-realtime-whisper) LAGS — whisper
+        // typically only emits near utterance end, not per word. Without a
+        // `livePartial` anchored to this segment, the store's
+        // `applyTranslation` routes every draft into the finalized
+        // `translations` map, and `LiveCaption` (which renders only
+        // `liveTranslation`) stays blank for the whole utterance — captions
+        // appear to never show, lurching forward once per 1 s flush. That is
+        // the dominant "OpenAI 無法顯示字幕" failure, and it bites the DEFAULT
+        // bilingual mode hardest because that's where whisper runs and lags.
+        //
+        // Emit a partial transcript carrying the source text we have SO FAR
+        // (`inputAcc` — empty in translation-only mode, the real running
+        // source once whisper catches up). Using `inputAcc` rather than a
+        // bare '' is what makes this safe in bilingual mode: it can never
+        // clobber a real input_transcript.delta with empty text (the race the
+        // previous bilingual-skip guarded against), it just keeps the live
+        // segment anchored so the draft translation streams live. Same
+        // segmentId on both sides lets the store bind the draft to
+        // `liveTranslation`. Redundant partials are coalesced at 50 ms.
+        const srcSoFar = meta.src === 'zh-TW' ? s2tw(this.inputAcc) : this.inputAcc;
+        const synth: TranscriptEvent = {
+          kind: 'transcript',
+          provider: 'openai-realtime',
+          mode: 'online_full',
+          source: 'microphone',
+          segmentId: this.currentSegmentId,
+          status: 'partial',
+          text: srcSoFar,
+          startMs: this.startMs,
+        };
+        this.handlers.onTranscript(synth);
 
         // Convert accumulated simplified Chinese to Traditional Chinese (Taiwan)
         const targetText = meta.tgt === 'zh-TW' ? s2tw(this.outputAcc) : this.outputAcc;
@@ -821,6 +1066,8 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
         pcConn: this.pc?.connectionState,
         pcIce: this.pc?.iceConnectionState,
         dcEvents: this.dcEventCount,
+        inputDeltas: this.inputDeltaCount,
+        outputDeltas: this.outputDeltaCount,
         sinceLastDcMs: sinceDc,
         sinceLastAudioMs: sinceAudio,
         // ~100 samples = ~10 s of cumulative speech; threshold for wedge fire.

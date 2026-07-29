@@ -6,9 +6,9 @@ import type {
 } from '@meeting-audio/contracts';
 import type { AudioSource, CaptionProvider, CaptionProviderHandlers, ProviderStatus } from './types.js';
 import { MicrophoneAudioProvider } from './microphone-audio-provider.js';
+import { getCaptureContext, ensureCaptureWorklet, resumeCaptureContext } from './audio-engine.js';
 
 // Path to AudioWorklet module served from apps/web/public/
-const PCM_WORKLET_URL = '/pcm-worklet.js';
 
 function iso(): string {
   return new Date().toISOString();
@@ -26,10 +26,23 @@ export class OfflineSTTProvider implements CaptionProvider {
   private _status: ProviderStatus = 'idle';
   private readonly mic: AudioSource;
   private ws: WebSocket | null = null;
+  // Shared capture context (owned by audio-engine; never closed here).
   private audioCtx: AudioContext | null = null;
+  private sourceNode: MediaStreamAudioSourceNode | null = null;
   private workletNode: AudioWorkletNode | null = null;
   private stream: MediaStream | null = null;
   private levelInterval: ReturnType<typeof setInterval> | null = null;
+  // Wall-clock anchor for the CURRENT WebSocket connection. WHL emits startMs
+  // relative to audio position and RESETS it to 0 on every connection — so
+  // without rebasing, segments from a reconnect or Pause→Resume would carry
+  // startMs≈0 and sort to the FRONT of the caption history (upsertSorted orders
+  // by startMs), corrupting chronology; and export / time-gutter elapsed
+  // (startMs − sessionStartMs, where sessionStartMs is Date.now()) would clamp
+  // to 0:00 for every offline segment. Adding this anchor converts the
+  // connection-relative timeline into a wall-clock-absolute one, unifying
+  // offline timestamps with the online providers (which already use Date.now()).
+  // Re-stamped on every (re)connect so the timeline stays monotonic across drops.
+  private connectionAnchorMs = 0;
   // Reconnect state — exponential backoff after WS drops while still 'running'.
   private reconnectAttempts = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -111,6 +124,9 @@ export class OfflineSTTProvider implements CaptionProvider {
       }, 15000);
 
       ws.onopen = () => {
+        // Anchor this connection's relative timeline onto wall-clock NOW, so a
+        // reconnect / Resume continues monotonically instead of restarting at 0.
+        this.connectionAnchorMs = Date.now();
         ws.send(JSON.stringify({ type: 'start', langPair: this.langPair, source: this.audioSource, translate: this.translate }));
         clearTimeout(timeout);
         this.reconnectAttempts = 0;
@@ -170,9 +186,10 @@ export class OfflineSTTProvider implements CaptionProvider {
   private handleEvent(event: OfflineEvent): void {
     switch (event.kind) {
       case 'transcript':
-        this.handlers.onTranscript(event as TranscriptEvent);
+        this.handlers.onTranscript(this.rebaseTranscript(event as TranscriptEvent));
         break;
       case 'translation':
+        // Translations key by sourceSegmentId (no time field) → no rebase needed.
         this.handlers.onTranslation(event as TranslationEvent);
         break;
       case 'health':
@@ -181,13 +198,35 @@ export class OfflineSTTProvider implements CaptionProvider {
     }
   }
 
+  /**
+   * Shift a connection-relative transcript onto the wall-clock timeline using
+   * this connection's anchor (see `connectionAnchorMs`). Partials and their
+   * eventual final share the same start_key + anchor, so livePartial→final
+   * promotion still lines up. Returns the event unchanged if no anchor is set
+   * yet (defensive — should not happen, since onopen always sets it first).
+   */
+  private rebaseTranscript(e: TranscriptEvent): TranscriptEvent {
+    if (this.connectionAnchorMs === 0) return e;
+    const out: TranscriptEvent = { ...e, startMs: this.connectionAnchorMs + e.startMs };
+    if (e.endMs !== undefined) out.endMs = this.connectionAnchorMs + e.endMs;
+    return out;
+  }
+
   private async startAudioCapture(): Promise<void> {
     if (!this.stream) return;
     try {
-      this.audioCtx = new AudioContext({ sampleRate: 16000 });
-      await this.audioCtx.audioWorklet.addModule(PCM_WORKLET_URL);
-      const source = this.audioCtx.createMediaStreamSource(this.stream);
-      this.workletNode = new AudioWorkletNode(this.audioCtx, 'pcm-worklet', {
+      // Reuse the shared, pre-warmed 16 kHz capture context + worklet module
+      // (the per-start rebuild was pure startup latency). Engine owns the ctx.
+      const ctx = getCaptureContext();
+      if (!ctx) {
+        this.emitHealth('audio', 'degraded', 'AudioContext unavailable');
+        return;
+      }
+      this.audioCtx = ctx;
+      await ensureCaptureWorklet(ctx);
+      this.sourceNode = ctx.createMediaStreamSource(this.stream);
+      const source = this.sourceNode;
+      this.workletNode = new AudioWorkletNode(ctx, 'pcm-worklet', {
         channelCount: 1,
         channelCountMode: 'explicit',
         channelInterpretation: 'speakers',
@@ -236,9 +275,10 @@ export class OfflineSTTProvider implements CaptionProvider {
       // Must connect to destination: Chrome's audio pull model only calls process() when there is
       // a path to AudioDestinationNode. The worklet outputs silence (no samples written to outputs),
       // so nothing plays back through the speakers — but the connection keeps process() alive.
-      this.workletNode.connect(this.audioCtx.destination);
-      // Resume in case AudioContext was created after async microtask (outside user-gesture window).
-      await this.audioCtx.resume();
+      this.workletNode.connect(ctx.destination);
+      // Resume in case the shared context was pre-warmed (created suspended,
+      // outside a user-gesture window) before this Start.
+      await resumeCaptureContext();
     } catch {
       // AudioContext/AudioWorklet unavailable (e.g., test environment) — non-fatal
       this.emitHealth('audio', 'degraded', 'AudioWorklet unavailable');
@@ -283,12 +323,15 @@ export class OfflineSTTProvider implements CaptionProvider {
       this.reconnectTimer = null;
     }
     this.reconnectAttempts = 0;
+    this.connectionAnchorMs = 0;
     this.wsBackpressureDropCount = 0;
     this.wsBackpressureConsecutiveDrops = 0;
     this.workletNode?.disconnect();
     this.workletNode?.port.close();
-    void this.audioCtx?.close();
+    this.sourceNode?.disconnect?.();
+    // Do NOT close the context — shared engine context, reused next session.
     this.workletNode = null;
+    this.sourceNode = null;
     this.audioCtx = null;
     this.ws?.close();
     this.ws = null;

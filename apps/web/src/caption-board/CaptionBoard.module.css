@@ -2,7 +2,14 @@
 .board {
   position: relative;
   display: grid;
-  grid-template-rows: 1fr auto;
+  /* History (top) takes the remaining space; the live row (bottom) is content-
+     sized but HARD-CAPPED at 45% of the board, so a long single utterance can
+     never starve the history scrollback. A plain `auto` row sized the track to
+     the live caption's full intrinsic height (ignoring the item's max-height),
+     which collapsed history to a ~4-28 px sliver — the reported "上半字幕被擠掉 /
+     要一直手動往下捲" bug. minmax(0, 45%) caps the TRACK itself, which `max-height`
+     on the item cannot do. */
+  grid-template-rows: minmax(0, 1fr) minmax(0, 45%);
   flex: 1;
   /* min-height: 0 lets the grid honour the parent's bounded height instead of
      growing with content (which used to push the live caption below the fold). */
@@ -25,7 +32,9 @@
   z-index: 1;
   opacity: 0;
   transform: translateY(-2px);
-  transition: opacity 160ms, transform 160ms;
+  transition:
+    opacity 160ms,
+    transform 160ms;
   pointer-events: none;
 }
 .board:hover .boardActions,
@@ -66,7 +75,10 @@
   padding: 0.3rem 0.65rem;
   border-radius: 999px;
   cursor: pointer;
-  transition: color 100ms, border-color 100ms, background 100ms;
+  transition:
+    color 100ms,
+    border-color 100ms,
+    background 100ms;
 }
 .actionBtn:hover {
   color: var(--text-0, #edf0f5);
@@ -95,6 +107,48 @@
   background: #080c15;
   border-radius: 0.5rem;
   border: 1px solid #111828;
+}
+
+/* Staged startup cue (permission → connecting → listening). Brighter than the
+   idle "waiting" text so the operator sees the system is actively working
+   during the unavoidable few seconds before the first caption. */
+.startupCue {
+  display: grid;
+  place-items: center;
+  gap: 0.85rem;
+  text-align: center;
+}
+.startupLabel {
+  margin: 0;
+  font-size: 1.15rem;
+  letter-spacing: 0.12em;
+  color: #6f86b8;
+}
+.startupSub {
+  margin: 0;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  color: #38445e;
+  text-transform: none;
+}
+.empty[data-phase='listening'] .startupLabel {
+  color: var(--accent, #5fd0a8);
+}
+.startupSpinner {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid #2a3448;
+  border-top-color: #6f86b8;
+  animation: reconnectSpin 0.9s linear infinite;
+}
+.empty[data-phase='listening'] .startupSpinner {
+  border-top-color: var(--accent, #5fd0a8);
+}
+@media (prefers-reduced-motion: reduce) {
+  .startupSpinner {
+    animation: none;
+  }
 }
 
 /* ─── History: split paragraph streams ──────────────────────────────────────── */
@@ -127,19 +181,30 @@
   grid-template-columns: 1fr 0.78fr;
 }
 /* Subtle scrollbar — visible enough to hint scrollability, not distracting. */
-.history::-webkit-scrollbar { width: 6px; }
-.history::-webkit-scrollbar-thumb { background: #1e293a; border-radius: 3px; }
-.history::-webkit-scrollbar-track { background: transparent; }
+.history::-webkit-scrollbar {
+  width: 6px;
+}
+.history::-webkit-scrollbar-thumb {
+  background: #1e293a;
+  border-radius: 3px;
+}
+.history::-webkit-scrollbar-track {
+  background: transparent;
+}
 
 .historyCol {
   display: flex;
   flex-direction: column;
-  gap: 0.875rem;
+  /* Row gap tightened ~10% (0.875 → 0.79rem) alongside the line-height drop
+     below, per user request to compress the history line spacing. */
+  gap: 0.79rem;
   min-width: 0;
 }
 /* Fix #1: keeps the column bottom-pinned while leaving the top reachable when
    content overflows. Prior `justify-content: flex-end` could clip the first row. */
-.historyCol > :first-child { margin-top: auto; }
+.historyCol > :first-child {
+  margin-top: auto;
+}
 
 .historyRow {
   display: grid;
@@ -158,11 +223,17 @@
   animation: rowLanded 700ms ease-out;
 }
 @keyframes rowLanded {
-  from { background-color: rgba(199, 146, 54, 0.10); }
-  to   { background-color: transparent; }
+  from {
+    background-color: rgba(199, 146, 54, 0.1);
+  }
+  to {
+    background-color: transparent;
+  }
 }
 @media (prefers-reduced-motion: reduce) {
-  .historyRow:last-child { animation: none; }
+  .historyRow:last-child {
+    animation: none;
+  }
 }
 
 .historyTime {
@@ -193,7 +264,8 @@
   font-size: 1.3rem;
   font-weight: 400;
   font-optical-sizing: auto;
-  line-height: 1.5;
+  /* Tightened ~10% (1.5 → 1.35) per user request to compress history leading. */
+  line-height: 1.35;
   color: #c0c8d8;
 }
 
@@ -205,7 +277,8 @@
   font-family: var(--font-ui, 'DM Mono', monospace);
   font-size: 1.05rem;
   font-weight: 400;
-  line-height: 1.6;
+  /* Tightened ~10% (1.6 → 1.44) per user request to compress history leading. */
+  line-height: 1.44;
   /* Bumped from #6a7889 (~4.3:1, AA-marginal at this size) for projector headroom. */
   color: #7e8da1;
   letter-spacing: 0.01em;
@@ -226,11 +299,35 @@
   padding-top: 1.25rem;
   border-top: 1px solid #1a2438;
   position: relative;
+  /* The live row is hard-capped at 45% by the board's grid-template-rows. When a
+     single in-flight utterance is long enough to exceed that, scroll instead of
+     hard-clipping: LiveCaption auto-pins this container to the bottom on every
+     text update so the newest words are always shown, while the scrollbar still
+     lets the operator read the start of the sentence (most useful while frozen
+     via Space, when no new deltas yank the scroll back). */
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+/* Match the history's quiet scrollbar treatment. */
+.current::-webkit-scrollbar {
+  width: 6px;
+}
+.current::-webkit-scrollbar-thumb {
+  background: #1e293a;
+  border-radius: 3px;
+}
+.current::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 .target {
   font-family: var(--font-caption, 'Fraunces', 'Noto Sans TC', sans-serif);
-  font-size: clamp(2.75rem, 6.5vw, 5rem);
+  /* Sized down three steps from the original clamp(2.75rem, 6.5vw, 5rem) on user
+     feedback that the live caption was too large/overwhelming — still the
+     dominant element and wall-TV legible, but it leaves more of the board for
+     the history scrollback. */
+  font-size: clamp(2.05rem, 4.4vw, 3.4rem);
   /* 500 reads cleanly at office laptop / wall-TV distance. 300 was too thin
      for live revisions where motion blur erodes character weight. */
   font-weight: 500;
@@ -252,6 +349,18 @@
 .board[data-lang-pair='en→zh-TW'] .target {
   line-height: 1.35;
   letter-spacing: 0;
+}
+
+/* Source text standing in for the not-yet-arrived translation inside the big
+   target area. Dimmer + smaller than real translated text so it clearly reads
+   as provisional original-language content (the 翻譯中… tag beside it names the
+   state), but big enough to be read from projector distance — the point is to
+   keep the board alive during the ~2–3 s the translate model needs. */
+.pendingSource {
+  color: #93a1b5;
+  font-size: 0.72em;
+  font-weight: 450;
+  margin-right: 0.5em;
 }
 
 /* "Translation catching up" placeholder inside the big target area — shown
@@ -316,8 +425,13 @@
   animation: cursorPulse 1.1s ease-in-out infinite;
 }
 @keyframes cursorPulse {
-  0%, 100% { opacity: 0.25; }
-  50%      { opacity: 1; }
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 1;
+  }
 }
 
 /* Source row dims slightly while idle so the eye is drawn to a fresh
@@ -372,15 +486,27 @@
   animation: reconnectSpin 0.9s linear infinite;
 }
 @keyframes reconnectSpin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 @keyframes reconnectIn {
-  from { opacity: 0; transform: translate(-50%, -4px); }
-  to   { opacity: 1; transform: translate(-50%, 0); }
+  from {
+    opacity: 0;
+    transform: translate(-50%, -4px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
 }
 @media (prefers-reduced-motion: reduce) {
-  .reconnectSpinner { animation: none; }
-  .reconnectPill { animation: none; }
+  .reconnectSpinner {
+    animation: none;
+  }
+  .reconnectPill {
+    animation: none;
+  }
 }
 
 /* "↓ N new" pill — appears bottom-right of the board when scroll is paused. */
@@ -404,4 +530,6 @@
   box-shadow: 0 6px 20px rgba(199, 146, 54, 0.25);
   z-index: 2;
 }
-.pill:hover { background: #d6a04a; }
+.pill:hover {
+  background: #d6a04a;
+}

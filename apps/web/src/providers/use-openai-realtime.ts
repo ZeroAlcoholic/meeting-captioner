@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ONLINE_SERVICE_URL } from '../config.js';
-import { settingsStore } from '../settings/use-settings-store.js';
-import { OpenAIRealtimeProvider } from './openai-realtime-provider.js';
+import { settingsStore, useSettingsStore } from '../settings/use-settings-store.js';
+import { OpenAIRealtimeProvider, prewarmOpenAISession, sessionRequestBody } from './openai-realtime-provider.js';
 import { MicrophoneAudioProvider } from './microphone-audio-provider.js';
 import { DisplayMediaAudioProvider } from './display-media-audio-provider.js';
 import { createStoreBoundHandlers } from './coalesce-handlers.js';
@@ -48,6 +48,8 @@ export function useOpenAIRealtime(): UseOpenAIRealtime {
   const [status, setStatus] = useState<ProviderStatus>('idle');
   const [error, setError] = useState<string | null>(null);
   const [apiKeyStatus, setApiKeyStatus] = useState<ApiKeyStatus>('checking');
+  const modeId = useSettingsStore((s) => s.modeId);
+  const onlineProvider = useSettingsStore((s) => s.onlineProvider);
 
   // ── /session/info polling with backoff ───────────────────────────────────────
   useEffect(() => {
@@ -82,6 +84,22 @@ export function useOpenAIRealtime(): UseOpenAIRealtime {
       providerRef.current?.stop();
     };
   }, []);
+
+  // ── Pre-mint the ephemeral token while idle ──────────────────────────────────
+  // The token fetch is the long pole on a WARM start (shared audio context +
+  // parallel mic already removed the others). Mint it ahead of the click — keyed
+  // to the CURRENT settings — so Start consumes it instantly. Single-use + fresh
+  // + key-matched (see WarmTokenCache); any mismatch falls back to a live fetch,
+  // so the worst case is exactly today's behaviour. Hard-gated by the selected
+  // online mode/backend so Full Offline never mints a cloud token while idle.
+  useEffect(() => {
+    if (modeId !== 'online_full' || onlineProvider !== 'openai') return;
+    if (apiKeyStatus !== 'present' || status === 'running') return;
+    const { langPair, includeSourceTranscript, micDistance, audioSource } = settingsStore.getState();
+    // Mirror the live path's effective mic distance (system capture → 'off').
+    const effective = audioSource === 'system' ? 'off' : micDistance;
+    prewarmOpenAISession(SESSION_URL, sessionRequestBody(langPair, includeSourceTranscript, effective));
+  }, [apiKeyStatus, modeId, onlineProvider, status]);
 
   const start = useCallback(async (): Promise<boolean> => {
     setError(null);

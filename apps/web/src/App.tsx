@@ -2,17 +2,29 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { CaptionBoard } from './caption-board/CaptionBoard.js';
 import { SettingsPanel } from './components/SettingsPanel.js';
 import { RealtimePricingPanel } from './components/RealtimePricingPanel.js';
+import { GeminiPricingPanel } from './components/GeminiPricingPanel.js';
 import { MicLevelBar } from './components/MicLevelBar.js';
 import { StartRealButton } from './components/StartRealButton.js';
 import { ExportMenu } from './components/ExportMenu.js';
+import { FieldTestControls } from './components/FieldTestControls.js';
 import { RestoredSessionChip } from './components/RestoredSessionChip.js';
+import {
+  SessionLauncher,
+  ContinueBanner,
+  FailoverBanner,
+  type LauncherOption,
+} from './components/SessionLauncher.js';
+import { computeFailover } from './providers/failover.js';
+import { fieldTestRecorder } from './providers/field-test-recorder.js';
+import { prewarmCapture } from './providers/audio-engine.js';
 import { useOpenAIRealtime } from './providers/use-openai-realtime.js';
 import { useGeminiLive } from './providers/use-gemini-live.js';
 import { useOfflineSTT } from './providers/use-offline-stt.js';
 import { useHybridMode } from './providers/use-hybrid-mode.js';
 import { useFakeReplay } from './providers/use-fake-replay.js';
 import { useSettingsStore } from './settings/use-settings-store.js';
-import { captionStore } from './store/use-caption-store.js';
+import { captionStore, useCaptionStore } from './store/use-caption-store.js';
+import type { SessionMode } from './store/caption-store.js';
 import { IS_ONLINE_ONLY } from './deployment.js';
 
 export function App() {
@@ -23,24 +35,51 @@ export function App() {
   const hybrid = useHybridMode();
   const modeId = useSettingsStore((s) => s.modeId);
   const onlineProvider = useSettingsStore((s) => s.onlineProvider);
+  const setMode = useSettingsStore((s) => s.setMode);
+  const setOnlineProvider = useSettingsStore((s) => s.setOnlineProvider);
   const audioSource = useSettingsStore((s) => s.audioSource);
   const setAudioSource = useSettingsStore((s) => s.setAudioSource);
+  // Persisted session lifecycle — drives crash-continue after a reload.
+  const restoredFromStorage = useCaptionStore((s) => s.restoredFromStorage);
+  const persistedSessionMode = useCaptionStore((s) => s.sessionMode);
+  const persistedSessionPhase = useCaptionStore((s) => s.sessionPhase);
+  const segmentCount = useCaptionStore((s) => s.segments.length);
   const includeSourceTranscript = useSettingsStore((s) => s.includeSourceTranscript);
   const micDistance = useSettingsStore((s) => s.micDistance);
+  // Transport health drives the cross-model failover affordance: a backend that
+  // has exhausted its self-heal retries surfaces state 'failed' (while still
+  // retrying), at which point we offer a one-click switch to the other model.
+  const transportState = useSettingsStore((s) => s.health.transport.state);
+  const transportMessage = useSettingsStore((s) => s.health.transport.message);
   const startSession = useSettingsStore((s) => s.startSession);
   const stopSession = useSettingsStore((s) => s.stopSession);
   const [settingsOpen, setSettingsOpen] = useState(false);
   // Which provider was running when the user hit Pause. Non-null means a
   // session is paused: capture + billing are stopped but the transcript log
   // is preserved so Resume can continue the SAME session without clearing.
-  const [pausedMode, setPausedMode] = useState<'fake' | 'real' | 'gemini' | 'offline' | 'hybrid' | null>(null);
+  const [pausedMode, setPausedMode] = useState<
+    'fake' | 'real' | 'gemini' | 'offline' | 'hybrid' | null
+  >(null);
   // Forwarded to SettingsPanel so its outside-click detector knows to
   // ignore clicks on the ⚙ toggle itself (otherwise close+reopen race).
   const settingsToggleRef = useRef<HTMLButtonElement>(null);
 
+  const markFieldTest = useCallback((label: string) => {
+    if (!fieldTestRecorder.current()) return;
+    fieldTestRecorder.mark(label);
+  }, []);
+
+  const finishFieldTest = useCallback((note: string) => {
+    if (!fieldTestRecorder.current()) return;
+    fieldTestRecorder.finish(note);
+  }, []);
+
   const isRunning =
-    fake.status === 'running' || realtime.status === 'running' || gemini.status === 'running' ||
-    offline.status === 'running' || hybrid.status === 'running';
+    fake.status === 'running' ||
+    realtime.status === 'running' ||
+    gemini.status === 'running' ||
+    offline.status === 'running' ||
+    hybrid.status === 'running';
   const activeError = fake.error ?? realtime.error ?? gemini.error ?? offline.error ?? hybrid.error;
 
   const handleStartFake = () => {
@@ -53,51 +92,71 @@ export function App() {
     // events would append into any restored history with timestamps anchored
     // to the previous sessionStartMs. beginSession() also clears the
     // restoredFromStorage flag so the 📂 chip dismisses.
-    captionStore.getState().beginSession();
+    captionStore.getState().beginSession('fake');
     void fake.start();
   };
 
   // Core real-session bring-up. `continueSession` skips beginSession() so the
   // existing transcript/history is preserved and new events append to it —
   // that's the Resume-after-Pause path. A fresh Start passes false.
-  const startRealCore = useCallback(async (continueSession: boolean): Promise<boolean> => {
-    fake.stop();
-    gemini.stop();
-    offline.stop();
-    hybrid.stop();
-    setPausedMode(null);
-    // Always drain any in-flight session into the cost accumulators before
-    // starting anew. stopSession() is idempotent (no-op when sessionStartAt
-    // is null), so this is safe for both the cold-start and the auto-
-    // restart-on-toggle-change paths. Without this drain, the
-    // toggle-triggered restart would overwrite sessionStartAt and lose
-    // the accumulated minutes from the pre-toggle interval.
-    stopSession();
-    // Reset caption store unless this is the auto-restart path triggered
-    // by a mid-session toggle change, OR an explicit Resume. The signal "are
-    // we currently running a real session?" must come from in-memory
-    // realtime.status, NOT from persisted captionStore fields —
-    // captionStore.sessionId / sessionEndedAt survive a tab reload, so a
-    // cold-reload-then-Start would otherwise be mistaken for an in-flight
-    // restart and skip beginSession(), causing new transcript events to
-    // append onto the previous session's timestamps. realtime.status ===
-    // 'running' is true only when the OpenAI provider is live in *this* tab
-    // session, which is exactly the restart-vs-fresh-start distinction we need.
-    const isAutoRestart = realtime.status === 'running';
-    if (!isAutoRestart && !continueSession) captionStore.getState().beginSession();
-    // Start the cost timer ONLY after the realtime provider reaches the
-    // 'running' state. If start() fails (mic denied, /session error, SDP
-    // exchange refused), it returns false and we never accrue billed time
-    // for a session that never connected — the inflated-elapsed-total bug
-    // Codex flagged.
-    const ok = await realtime.start();
-    if (ok) startSession();
-    return ok;
-  }, [fake, gemini, offline, hybrid, realtime, startSession, stopSession]);
+  const startRealCore = useCallback(
+    async (continueSession: boolean): Promise<boolean> => {
+      fake.stop();
+      gemini.stop();
+      offline.stop();
+      hybrid.stop();
+      setPausedMode(null);
+      // Always drain any in-flight session into the cost accumulators before
+      // starting anew. stopSession() is idempotent (no-op when sessionStartAt
+      // is null), so this is safe for both the cold-start and the auto-
+      // restart-on-toggle-change paths. Without this drain, the
+      // toggle-triggered restart would overwrite sessionStartAt and lose
+      // the accumulated minutes from the pre-toggle interval.
+      stopSession();
+      // Reset caption store unless this is the auto-restart path triggered
+      // by a mid-session toggle change, OR an explicit Resume. The signal "are
+      // we currently running a real session?" must come from in-memory
+      // realtime.status, NOT from persisted captionStore fields —
+      // captionStore.sessionId / sessionEndedAt survive a tab reload, so a
+      // cold-reload-then-Start would otherwise be mistaken for an in-flight
+      // restart and skip beginSession(), causing new transcript events to
+      // append onto the previous session's timestamps. realtime.status ===
+      // 'running' is true only when the OpenAI provider is live in *this* tab
+      // session, which is exactly the restart-vs-fresh-start distinction we need.
+      const isAutoRestart = realtime.status === 'running';
+      if (!isAutoRestart && !continueSession) {
+        captionStore.getState().beginSession('real');
+      }
+      // Start the cost timer ONLY after the realtime provider reaches the
+      // 'running' state. If start() fails (mic denied, /session error, SDP
+      // exchange refused), it returns false and we never accrue billed time
+      // for a session that never connected — the inflated-elapsed-total bug
+      // Codex flagged.
+      const ok = await realtime.start();
+      if (ok) {
+        startSession();
+        markFieldTest('openai running');
+      }
+      return ok;
+    },
+    [
+      fake,
+      gemini,
+      offline,
+      hybrid,
+      realtime,
+      startSession,
+      stopSession,
+      markFieldTest,
+    ],
+  );
 
   // Fresh start (clears history). Wrapped so the onClick MouseEvent never
   // leaks into startRealCore's boolean param.
-  const handleStartReal = useCallback((): Promise<boolean> => startRealCore(false), [startRealCore]);
+  const handleStartReal = useCallback(
+    (): Promise<boolean> => startRealCore(false),
+    [startRealCore],
+  );
 
   // ─── Auto-restart on mid-session source-transcript toggle ─────────────────
   // The upstream OpenAI session config is fixed at /session creation, so a
@@ -157,18 +216,37 @@ export function App() {
     setAudioSource,
   ]);
 
+  // Pre-warm the capture pipeline (shared AudioContext + worklet module compile)
+  // and — ONLINE ONLY — TLS-preconnect the realtime backends, so Start no longer
+  // pays these one-time costs on the critical path. No microphone is touched here
+  // (zero privacy cost); the context stays suspended until a session resumes it.
+  useEffect(() => {
+    prewarmCapture({ online: IS_ONLINE_ONLY || modeId === 'online_full' });
+  }, [modeId]);
+
   // Online realtime via Gemini Live (alternative backend to OpenAI). Fresh
   // start clears history; mirrors handleStartReal's exclusivity. Not billed via
   // the OpenAI cost panel.
-  const handleStartGemini = () => {
+  const handleStartGemini = useCallback(async (): Promise<boolean> => {
     fake.stop();
     realtime.stop();
     offline.stop();
     hybrid.stop();
     setPausedMode(null);
-    captionStore.getState().beginSession();
-    void gemini.start();
-  };
+    captionStore.getState().beginSession('gemini');
+    const ok = await gemini.start();
+    if (ok) {
+      markFieldTest('gemini running');
+    }
+    return ok;
+  }, [
+    fake,
+    realtime,
+    offline,
+    hybrid,
+    gemini,
+    markFieldTest,
+  ]);
 
   const handleStartOffline = () => {
     fake.stop();
@@ -176,7 +254,7 @@ export function App() {
     gemini.stop();
     hybrid.stop();
     setPausedMode(null);
-    captionStore.getState().beginSession();
+    captionStore.getState().beginSession('offline');
     void offline.start();
   };
 
@@ -186,7 +264,7 @@ export function App() {
     gemini.stop();
     offline.stop();
     setPausedMode(null);
-    captionStore.getState().beginSession();
+    captionStore.getState().beginSession('hybrid');
     void hybrid.start();
   };
 
@@ -197,43 +275,179 @@ export function App() {
   // beginSession(), so new events append to the preserved history. This is the
   // "stop without losing the LOG" path the operator needs mid-meeting.
   const handlePause = () => {
-    if (fake.status === 'running') { fake.stop(); setPausedMode('fake'); }
-    else if (realtime.status === 'running') { realtime.stop(); stopSession(); setPausedMode('real'); }
-    else if (gemini.status === 'running') { gemini.stop(); setPausedMode('gemini'); }
-    else if (offline.status === 'running') { offline.stop(); setPausedMode('offline'); }
-    else if (hybrid.status === 'running') { hybrid.stop(); setPausedMode('hybrid'); }
+    if (fake.status === 'running') {
+      fake.stop();
+      setPausedMode('fake');
+    } else if (realtime.status === 'running') {
+      realtime.stop();
+      stopSession();
+      setPausedMode('real');
+    } else if (gemini.status === 'running') {
+      gemini.stop();
+      setPausedMode('gemini');
+    } else if (offline.status === 'running') {
+      offline.stop();
+      setPausedMode('offline');
+    } else if (hybrid.status === 'running') {
+      hybrid.stop();
+      setPausedMode('hybrid');
+    }
     // No beginSession() / clear() / endSession(): history is preserved for Resume.
+    // Mark the persisted phase 'paused' then force a synchronous write so the
+    // just-finalized last utterance is durable the instant capture pauses — and
+    // a reload while paused can offer to continue.
+    captionStore.getState().setSessionPhase('paused');
+    captionStore.getState().flushNow();
+    markFieldTest('pause');
   };
+
+  // Re-start a provider WITHOUT beginSession() so new events append to the
+  // preserved transcript. Shared by Resume (in-tab Pause) and Continue
+  // (crash-recovery after reload). Online modes resume into the CURRENTLY
+  // SELECTED backend — the mid-meeting failover path (backend degrades → Pause/
+  // reload → switch OpenAI↔Gemini → continue the SAME transcript on the other
+  // backend). CLAUDE.md: provider switch must not clear the transcript.
+  const resumeProviderForMode = useCallback(
+    (m: SessionMode) => {
+      if (m === 'real' || m === 'gemini') {
+        const nextMode: SessionMode = onlineProvider === 'gemini' ? 'gemini' : 'real';
+        captionStore.getState().setSessionMode(nextMode);
+        captionStore.getState().flushNow();
+        if (nextMode === 'gemini') {
+          fake.stop();
+          realtime.stop();
+          offline.stop();
+          hybrid.stop();
+          void gemini.start();
+        } else {
+          void startRealCore(true);
+        }
+        return;
+      }
+      if (m === 'offline') {
+        fake.stop();
+        realtime.stop();
+        gemini.stop();
+        hybrid.stop();
+        void offline.start();
+      } else if (m === 'hybrid') {
+        fake.stop();
+        realtime.stop();
+        gemini.stop();
+        offline.stop();
+        void hybrid.start();
+      } else if (m === 'fake') {
+        realtime.stop();
+        gemini.stop();
+        offline.stop();
+        hybrid.stop();
+        void fake.start();
+      }
+    },
+    [fake, realtime, gemini, offline, hybrid, onlineProvider, startRealCore],
+  );
 
   const handleResume = () => {
     const m = pausedMode;
     setPausedMode(null);
-    // Online providers resume into the CURRENTLY SELECTED backend, not
-    // necessarily the one that was paused. This is the mid-meeting failover
-    // path: backend degrades → Pause → switch OpenAI↔Gemini in Settings
-    // (picker unlocks while paused) → Resume continues the SAME transcript
-    // on the other backend. CLAUDE.md: provider switch must not clear the
-    // transcript — neither resume path calls beginSession().
-    if (m === 'real' || m === 'gemini') {
-      if (onlineProvider === 'gemini') {
-        fake.stop(); realtime.stop(); offline.stop(); hybrid.stop();
-        void gemini.start();
-      } else {
-        void startRealCore(true);
-      }
-      return;
-    }
-    // Non-online providers: just re-start without beginSession() so new
-    // segments append to the preserved log. Keep source exclusivity by
-    // stopping the others first (mirrors the fresh-start handlers).
-    if (m === 'offline') { fake.stop(); realtime.stop(); gemini.stop(); hybrid.stop(); void offline.start(); }
-    else if (m === 'hybrid') { fake.stop(); realtime.stop(); gemini.stop(); offline.stop(); void hybrid.start(); }
-    else if (m === 'fake') { realtime.stop(); gemini.stop(); offline.stop(); hybrid.stop(); void fake.start(); }
+    if (!m) return;
+    captionStore.getState().setSessionPhase('running');
+    markFieldTest('resume');
+    resumeProviderForMode(m);
   };
+
+  // Crash-continue: after a reload, the persisted sessionMode/phase says a
+  // session was interrupted (running/paused) with a restored transcript. One
+  // click resumes it on the SAME backend it was recorded on (not whatever the
+  // picker happens to show now) — and syncs the picker so the UI matches.
+  const handleContinue = () => {
+    const m = persistedSessionMode;
+    if (!m) return;
+    captionStore.getState().setSessionPhase('running');
+    if (m === 'gemini') {
+      setOnlineProvider('gemini');
+      fake.stop();
+      realtime.stop();
+      offline.stop();
+      hybrid.stop();
+      void gemini.start();
+    } else if (m === 'real') {
+      setOnlineProvider('openai');
+      fake.stop();
+      gemini.stop();
+      offline.stop();
+      hybrid.stop();
+      void startRealCore(true);
+    } else {
+      resumeProviderForMode(m); // offline / hybrid / fake have a single backend
+    }
+  };
+
+  // ─── Cross-model one-click failover ───────────────────────────────────────
+  // When the active online backend has surfaced a 'failed' transport health
+  // (its own auto-retry is still running in the background), let the operator
+  // jump to the OTHER model in one click — preserving the transcript. This is
+  // the make-it-never-go-dark escape hatch: self-heal first, manual failover
+  // second. Uses startRealCore(true)/gemini.start() (NO beginSession) so the
+  // existing history is kept and new captions append on the new backend.
+  const onlineBackendAvailable = useCallback(
+    (backend: 'openai' | 'gemini'): boolean =>
+      backend === 'openai' ? realtime.apiKeyStatus === 'present' : gemini.available,
+    [realtime.apiKeyStatus, gemini.available],
+  );
+
+  const handleFailover = useCallback(() => {
+    // Derive the live backend exactly as the banner's computeFailover does
+    // (runningBackend), so the action can never switch in a different direction
+    // than the banner shows. If nothing is live, there's nothing to fail over.
+    const from =
+      realtime.status === 'running' ? 'openai' : gemini.status === 'running' ? 'gemini' : null;
+    if (from === null) return;
+    const target = from === 'gemini' ? 'openai' : 'gemini';
+
+    // Do not stop a self-retrying backend unless the destination is actually
+    // startable. Turning a degraded-but-recoverable session into no captions is
+    // worse than leaving the current provider retrying in place.
+    if (!onlineBackendAvailable(target)) return;
+
+    // Preserve the transcript (no beginSession) but record the NEW backend so a
+    // later crash-Continue resumes the model we switched TO, not the failed one.
+    captionStore.getState().setSessionPhase('running');
+    captionStore.getState().setSessionMode(target === 'gemini' ? 'gemini' : 'real');
+    setOnlineProvider(target);
+    if (target === 'gemini') {
+      // Leaving OpenAI: drain its billed minutes before switching.
+      fake.stop();
+      realtime.stop();
+      stopSession();
+      offline.stop();
+      hybrid.stop();
+      void gemini.start();
+    } else {
+      fake.stop();
+      gemini.stop();
+      offline.stop();
+      hybrid.stop();
+      void startRealCore(true); // continueSession — preserves transcript
+    }
+  }, [
+    realtime,
+    gemini,
+    onlineBackendAvailable,
+    setOnlineProvider,
+    fake,
+    offline,
+    hybrid,
+    stopSession,
+    startRealCore,
+  ]);
 
   const handleStop = () => {
     if (fake.status === 'running') fake.stop();
-    if (realtime.status === 'running') { realtime.stop(); stopSession(); }
+    if (realtime.status === 'running') {
+      realtime.stop();
+      stopSession();
+    }
     if (gemini.status === 'running') gemini.stop();
     if (offline.status === 'running') offline.stop();
     if (hybrid.status === 'running') hybrid.stop();
@@ -242,6 +456,10 @@ export function App() {
     // the user can still hit Export after Stop — endSession() is a metadata
     // flag, not a clear.
     captionStore.getState().endSession();
+    finishFieldTest('stopped from app Stop');
+    // Durably write the final transcript synchronously on Stop, closing the
+    // debounce window so a tab-close right after Stop can't drop the last line.
+    captionStore.getState().flushNow();
   };
 
   // In the online-slim distribution, hybrid/offline modes are filtered out of
@@ -265,6 +483,120 @@ export function App() {
     ? `WhisperLive: ${whisperLabel(offline.whisperStatus)}`
     : undefined;
 
+  // ─── Easy-start launcher + crash-continue ─────────────────────────────────
+  const idle = !isRunning && pausedMode === null;
+  const MODE_LABELS: Record<SessionMode, string> = {
+    real: 'OpenAI 即時翻譯',
+    gemini: 'Gemini 即時翻譯',
+    offline: '全離線',
+    hybrid: 'Hybrid 隱私',
+    fake: 'Demo 試播',
+  };
+  // A restored session whose persisted phase says it was still live (or paused)
+  // when the tab went away — offer to continue it.
+  const resumable =
+    idle &&
+    restoredFromStorage &&
+    segmentCount > 0 &&
+    persistedSessionMode !== null &&
+    (persistedSessionPhase === 'running' || persistedSessionPhase === 'paused')
+      ? { count: segmentCount, label: MODE_LABELS[persistedSessionMode] }
+      : null;
+
+  // Each option selects its config (mode/backend) AND starts in one click.
+  const launcherOptions: LauncherOption[] = [];
+  if (isOnlineMode) {
+    launcherOptions.push({
+      id: 'real',
+      label: 'OpenAI',
+      sublabel: '即時翻譯 · WebRTC',
+      icon: '🎙',
+      available: realtime.apiKeyStatus === 'present',
+      reason:
+        realtime.apiKeyStatus === 'no-key'
+          ? '伺服器未設定 OPENAI_API_KEY'
+          : realtime.apiKeyStatus === 'service-down'
+            ? '線上服務無法連線'
+            : '檢查中…',
+      onStart: () => {
+        setMode('online_full');
+        setOnlineProvider('openai');
+        handleStartReal();
+      },
+    });
+    launcherOptions.push({
+      id: 'gemini',
+      label: 'Gemini',
+      sublabel: '即時翻譯 · 原生繁中',
+      icon: '✦',
+      available: gemini.available,
+      reason:
+        gemini.geminiStatus === 'no-key'
+          ? '伺服器未設定 GEMINI_API_KEY'
+          : gemini.geminiStatus === 'service-down'
+            ? '線上服務無法連線'
+            : '檢查中…',
+      onStart: () => {
+        setMode('online_full');
+        setOnlineProvider('gemini');
+        void handleStartGemini();
+      },
+    });
+  }
+  if (!IS_ONLINE_ONLY) {
+    launcherOptions.push({
+      id: 'hybrid',
+      label: 'Hybrid 隱私',
+      sublabel: '本地辨識＋雲端翻譯',
+      icon: '🔀',
+      available: hybrid.hasWhisper,
+      reason: `WhisperLive: ${whisperLabel(hybrid.whisperStatus)}`,
+      onStart: () => {
+        setMode('hybrid_privacy');
+        handleStartHybrid();
+      },
+    });
+    launcherOptions.push({
+      id: 'offline',
+      label: '全離線',
+      sublabel: '不連雲端 · 本地處理',
+      icon: '🖥',
+      available: offline.hasWhisper,
+      reason: `WhisperLive: ${whisperLabel(offline.whisperStatus)}`,
+      onStart: () => {
+        setMode('full_offline');
+        handleStartOffline();
+      },
+    });
+  }
+  launcherOptions.push({
+    id: 'fake',
+    label: 'Demo',
+    sublabel: '試播腳本 · 免音訊',
+    icon: '▶',
+    available: true,
+    onStart: handleStartFake,
+  });
+
+  // Show the full launcher grid only on a fresh idle screen (no transcript yet).
+  // When a session is restored, the transcript stays visible and the slim
+  // ContinueBanner sits above it instead.
+  const showLauncher = idle && segmentCount === 0;
+
+  // Cross-model failover affordance (decision logic in providers/failover.ts).
+  const runningBackend =
+    realtime.status === 'running' ? 'openai' : gemini.status === 'running' ? 'gemini' : null;
+  const failover = computeFailover({
+    isOnlineMode,
+    runningBackend,
+    paused: pausedMode !== null,
+    transportState,
+    availableBackends: {
+      openai: onlineBackendAvailable('openai'),
+      gemini: onlineBackendAvailable('gemini'),
+    },
+  });
+
   return (
     <main className="app-shell">
       <header className="app-header">
@@ -275,23 +607,40 @@ export function App() {
         <div className="app-controls">
           <MicLevelBar visible={isRunning} />
           {!isRunning && <RestoredSessionChip />}
-          <span className="app-status" data-status={
-            fake.status === 'running' ? 'running' :
-            offline.status === 'running' ? 'running' :
-            hybrid.status === 'running' ? 'running' :
-            gemini.status === 'running' ? 'running' :
-            realtime.status === 'running' ? 'running' :
-            pausedMode !== null ? 'paused' : 'idle'
-          }>
-            {fake.status === 'running' ? 'fake' :
-             offline.status === 'running' ? 'offline' :
-             hybrid.status === 'running' ? 'hybrid' :
-             gemini.status === 'running' ? 'gemini' :
-             // Name the backend (not the generic 'running') so the operator
-             // can tell WHICH provider is live — matters after a mid-meeting
-             // Pause → switch-backend → Resume failover.
-             realtime.status === 'running' ? 'openai' :
-             pausedMode !== null ? 'paused' : 'idle'}
+          <span
+            className="app-status"
+            data-status={
+              fake.status === 'running'
+                ? 'running'
+                : offline.status === 'running'
+                  ? 'running'
+                  : hybrid.status === 'running'
+                    ? 'running'
+                    : gemini.status === 'running'
+                      ? 'running'
+                      : realtime.status === 'running'
+                        ? 'running'
+                        : pausedMode !== null
+                          ? 'paused'
+                          : 'idle'
+            }
+          >
+            {fake.status === 'running'
+              ? 'fake'
+              : offline.status === 'running'
+                ? 'offline'
+                : hybrid.status === 'running'
+                  ? 'hybrid'
+                  : gemini.status === 'running'
+                    ? 'gemini'
+                    : // Name the backend (not the generic 'running') so the operator
+                      // can tell WHICH provider is live — matters after a mid-meeting
+                      // Pause → switch-backend → Resume failover.
+                      realtime.status === 'running'
+                      ? 'openai'
+                      : pausedMode !== null
+                        ? 'paused'
+                        : 'idle'}
           </span>
           {/* Audio-source chip is visible in both builds now — the Online
               path supports system audio via getDisplayMedia, so the
@@ -306,14 +655,17 @@ export function App() {
             {audioSource === 'system' ? '🔊' : '🎤'}
           </span>
           {showRealButton && realtime.apiKeyStatus === 'present' && <RealtimePricingPanel />}
+          {showGeminiButton && <GeminiPricingPanel running={gemini.status === 'running'} />}
           <button
             type="button"
             onClick={handleStartFake}
             disabled={isRunning || pausedMode !== null}
             data-testid="start-fake-replay"
-            title={pausedMode !== null
-              ? '會議暫停中 — Demo 會清空目前字幕記錄，請先 Resume 或 Stop'
-              : 'Replay scripted captions — no audio required'}
+            title={
+              pausedMode !== null
+                ? '會議暫停中 — Demo 會清空目前字幕記錄，請先 Resume 或 Stop'
+                : 'Replay scripted captions — no audio required'
+            }
           >
             Demo
           </button>
@@ -329,7 +681,7 @@ export function App() {
           {showGeminiButton && (
             <button
               type="button"
-              onClick={handleStartGemini}
+              onClick={() => void handleStartGemini()}
               disabled={!gemini.available || isRunning}
               title={
                 gemini.geminiStatus === 'no-key'
@@ -354,12 +706,16 @@ export function App() {
               type="button"
               onClick={handleStartHybrid}
               disabled={!hybrid.hasWhisper || isRunning}
-              title={!hybrid.hasWhisper
-                ? `WhisperLive: ${whisperLabel(hybrid.whisperStatus)}`
-                : 'Hybrid Privacy — local STT + online translation'}
+              title={
+                !hybrid.hasWhisper
+                  ? `WhisperLive: ${whisperLabel(hybrid.whisperStatus)}`
+                  : 'Hybrid Privacy — local STT + online translation'
+              }
               data-testid="start-hybrid"
             >
-              {hybrid.hasWhisper ? '🔀 Start Hybrid' : `🔀 Whisper: ${whisperLabel(hybrid.whisperStatus)}`}
+              {hybrid.hasWhisper
+                ? '🔀 Start Hybrid'
+                : `🔀 Whisper: ${whisperLabel(hybrid.whisperStatus)}`}
             </button>
           )}
           {showOfflineButton && (
@@ -370,10 +726,13 @@ export function App() {
               title={offlineButtonTitle}
               data-testid="start-offline"
             >
-              {offline.hasWhisper ? '🖥 Start Offline' : `🖥 Whisper: ${whisperLabel(offline.whisperStatus)}`}
+              {offline.hasWhisper
+                ? '🖥 Start Offline'
+                : `🖥 Whisper: ${whisperLabel(offline.whisperStatus)}`}
             </button>
           )}
           <ExportMenu disabled={isRunning} />
+          <FieldTestControls sessionActive={isRunning} />
           {isRunning && (
             <button
               type="button"
@@ -442,11 +801,23 @@ export function App() {
 
       {audioSource === 'system' && !isRunning && !activeError && (
         <div className="app-hint" role="note" data-testid="system-audio-hint">
-          🔊 Share dialog tip: select <strong>Entire Screen</strong> → tick <strong>Share system audio</strong> → click Share
+          🔊 Share dialog tip: select <strong>Entire Screen</strong> → tick{' '}
+          <strong>Share system audio</strong> → click Share
         </div>
       )}
 
-      <CaptionBoard />
+      {resumable && <ContinueBanner resumable={resumable} onContinue={handleContinue} />}
+
+      {failover.show && (
+        <FailoverBanner
+          fromLabel={failover.fromLabel}
+          toLabel={failover.toLabel}
+          message={transportMessage}
+          onFailover={handleFailover}
+        />
+      )}
+
+      {showLauncher ? <SessionLauncher options={launcherOptions} /> : <CaptionBoard />}
     </main>
   );
 }

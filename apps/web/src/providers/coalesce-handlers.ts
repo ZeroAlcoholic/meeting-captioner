@@ -6,16 +6,26 @@ import type {
 } from '@meeting-audio/contracts';
 import { captionStore } from '../store/use-caption-store.js';
 import { settingsStore } from '../settings/use-settings-store.js';
+import { latencyMonitor } from './latency-monitor.js';
 import type { CaptionProviderHandlers } from './types.js';
 
-// Live partials arrive at audio-frame rate (10–50 Hz for OpenAI Realtime).
-// Coalesce per-character deltas into a single store update every ~50 ms so
-// React paints once per frame instead of once per character — the dominant
-// source of caption-board jank during fast speech.
+// Live partials arrive at audio-frame rate (10–50 Hz for OpenAI Realtime, plus
+// per-character whisper source deltas). Coalesce them into a single store update
+// every ~33 ms (≈30 fps) so React paints a few times per second of speech
+// instead of once per character — the dominant source of caption-board jank
+// during fast speech.
+//
+// 33 ms (was 50 ms): this interval is the fixed display-batching delay on the
+// PRIMARY translated-caption path, so it sits directly on the realtime
+// translation latency budget. The live/final store split makes a partial-rate
+// update re-render only the memo'd LiveCaption (never HistoryStream/persistence),
+// so tightening to 30 fps trims worst-case display latency ~17 ms with
+// negligible render cost. We stay on setTimeout (NOT rAF) deliberately so the
+// caption keeps updating when the tab/monitor is in the background — see flush().
 //
 // Final / revised transcript and final translation events bypass the queue
 // (rare, important, must land within the same tick they arrive).
-const COALESCE_INTERVAL_MS = 50;
+const COALESCE_INTERVAL_MS = 33;
 
 type Scheduler = (cb: () => void) => void;
 
@@ -67,6 +77,9 @@ export function createStoreBoundHandlers(
 
   return {
     onTranscript(e: TranscriptEvent) {
+      // Passive latency telemetry — record TRUE arrival time before coalescing.
+      // One Map op; stats are computed lazily on read (see latency-monitor).
+      latencyMonitor.recordTranscript(e);
       // Only `final` bypasses the queue. `partial` and `revised` are both
       // in-flight and contribute to the same 20 Hz throttle.
       if (e.status === 'final') {
@@ -87,6 +100,7 @@ export function createStoreBoundHandlers(
       ensureScheduled();
     },
     onTranslation(e: TranslationEvent) {
+      latencyMonitor.recordTranslation(e); // arrival-accurate, pre-coalesce
       // `final` translations bypass — `draft` and `refined` are throttled.
       // Same per-segment match rule as transcripts above.
       if (e.status === 'final') {
@@ -100,6 +114,7 @@ export function createStoreBoundHandlers(
       ensureScheduled();
     },
     onHealth(e: HealthEvent) {
+      latencyMonitor.recordHealth(e); // marks bring-up start for TTFC
       settingsStore.getState().applyHealth(e);
     },
     onAudioLevel(e: AudioLevelEvent) {

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ONLINE_SERVICE_URL } from '../config.js';
-import { settingsStore } from '../settings/use-settings-store.js';
-import { GeminiLiveProvider } from './gemini-live-provider.js';
+import { settingsStore, useSettingsStore } from '../settings/use-settings-store.js';
+import { GeminiLiveProvider, prewarmGeminiSession } from './gemini-live-provider.js';
 import { MicrophoneAudioProvider } from './microphone-audio-provider.js';
 import { DisplayMediaAudioProvider } from './display-media-audio-provider.js';
 import { createStoreBoundHandlers } from './coalesce-handlers.js';
@@ -31,6 +31,8 @@ export function useGeminiLive(): UseGeminiLive {
   const [status, setStatus] = useState<ProviderStatus>('idle');
   const [error, setError] = useState<string | null>(null);
   const [geminiStatus, setGeminiStatus] = useState<GeminiStatus>('checking');
+  const modeId = useSettingsStore((s) => s.modeId);
+  const onlineProvider = useSettingsStore((s) => s.onlineProvider);
 
   // Poll /session/info to learn whether the server has a GEMINI_API_KEY.
   useEffect(() => {
@@ -61,6 +63,15 @@ export function useGeminiLive(): UseGeminiLive {
       providerRef.current?.stop();
     };
   }, []);
+
+  // Pre-mint the Gemini token while idle so Start skips the mint RTT (single-use,
+  // fresh-guarded; reconnects mint fresh). Hard-gated by selected online
+  // mode/backend so Full Offline never mints a cloud token while idle.
+  useEffect(() => {
+    if (modeId !== 'online_full' || onlineProvider !== 'gemini') return;
+    if (geminiStatus !== 'available' || status === 'running') return;
+    prewarmGeminiSession(TOKEN_URL);
+  }, [geminiStatus, modeId, onlineProvider, status]);
 
   const start = useCallback(async (): Promise<boolean> => {
     setError(null);

@@ -105,6 +105,27 @@ export function groupParagraphsForSide(opts: GroupOptions): Paragraph[] {
   return out;
 }
 
+// History render cap. A long meeting accumulates thousands of finalized
+// segments; the store keeps them ALL (Export reads the full set straight from
+// the store), but the scrollback only ever needs the most recent window.
+// Rendering thousands of paragraph rows × 2 columns balloons the DOM node count
+// and re-runs paragraph grouping over the whole history on every finalized
+// segment — both grow unbounded across a multi-hour meeting. Capping the
+// RENDERED tail keeps DOM + grouping cost flat while the full transcript stays
+// available for Export. 400 finalized segments ≈ tens of minutes of scrollback,
+// far more than a reader scrolls during a live meeting.
+export const HISTORY_RENDER_SEGMENTS = 400;
+
+/**
+ * Return the most-recent `limit` segments. Returns the SAME array reference when
+ * already within the cap, so React/`useMemo` consumers skip work via reference
+ * equality on the common (short-meeting) path. `limit <= 0` disables the cap.
+ */
+export function tailSegments(segments: CaptionSegment[], limit: number): CaptionSegment[] {
+  if (limit <= 0 || segments.length <= limit) return segments;
+  return segments.slice(segments.length - limit);
+}
+
 /**
  * Format an absolute startMs into a `M:SS` label relative to sessionStartMs.
  * Returns `0:00` if sessionStartMs is null (first paragraph of the session).

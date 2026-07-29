@@ -1,5 +1,6 @@
 import type { HealthEvent } from '@meeting-audio/contracts';
 import type { AudioSource } from './types.js';
+import { getCaptureContext, resumeCaptureContext } from './audio-engine.js';
 
 function now(): string {
   return new Date().toISOString();
@@ -66,7 +67,11 @@ function audioConstraints(micDistance: MicDistance): MediaTrackConstraints {
 
 export class MicrophoneAudioProvider implements AudioSource {
   private stream: MediaStream | null = null;
+  // The shared capture AudioContext (owned by audio-engine, NOT closed here).
   private audioCtx: AudioContext | null = null;
+  // This acquisition's source node — disconnected on release so the next
+  // acquisition rewires cleanly onto the same long-lived context.
+  private sourceNode: MediaStreamAudioSourceNode | null = null;
   analyser: AnalyserNode | null = null;
   // Browsers (Chrome especially) auto-suspend AudioContext when the tab is hidden.
   // We listen for refocus and resume — otherwise the analyser stops emitting and
@@ -83,11 +88,19 @@ export class MicrophoneAudioProvider implements AudioSource {
         audio: audioConstraints(this.micDistance),
         video: false,
       });
-      this.audioCtx = new AudioContext();
-      const source = this.audioCtx.createMediaStreamSource(this.stream);
-      this.analyser = this.audioCtx.createAnalyser();
-      this.analyser.fftSize = 2048;
-      source.connect(this.analyser);
+      // Reuse the shared, pre-warmed capture context instead of constructing a
+      // fresh one per acquisition (the per-start AudioContext rebuild was pure
+      // startup latency). The engine owns its lifecycle; we never close it here.
+      this.audioCtx = getCaptureContext();
+      if (this.audioCtx) {
+        this.sourceNode = this.audioCtx.createMediaStreamSource(this.stream);
+        this.analyser = this.audioCtx.createAnalyser();
+        this.analyser.fftSize = 2048;
+        this.sourceNode.connect(this.analyser);
+        // The context may have been pre-warmed (created suspended) before any
+        // user gesture — resume it now (acquire runs inside the Start click).
+        void resumeCaptureContext();
+      }
 
       this.visibilityHandler = () => {
         if (!document.hidden && this.audioCtx?.state === 'suspended') {
@@ -140,9 +153,14 @@ export class MicrophoneAudioProvider implements AudioSource {
       this.trackEndedHandler = null;
     }
     this.stream?.getTracks().forEach((t) => t.stop());
-    void this.audioCtx?.close();
+    // Detach this acquisition's nodes but DO NOT close the context — it is the
+    // shared, pre-warmed engine context reused by the next session. Closing it
+    // would force a cold rebuild (+ worklet recompile) on the next Start.
+    this.sourceNode?.disconnect?.();
+    this.analyser?.disconnect?.();
     this.stream = null;
     this.audioCtx = null;
+    this.sourceNode = null;
     this.analyser = null;
   }
 }

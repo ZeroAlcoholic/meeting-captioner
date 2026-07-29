@@ -7,10 +7,13 @@ test.describe('scenario switching', () => {
 
     await expect(page.getByTestId('scenario-physical')).toBeChecked();
 
+    // Starting from the header dismisses the panel (outside-click) — re-open it
+    // before touching in-panel controls again.
     await page.getByTestId('start-fake-replay').click();
 
     await expect(page.locator('body')).toContainText('歡迎參加會議。', { timeout: 15_000 });
 
+    await page.getByTestId('settings-toggle').click();
     await page.getByTestId('scenario-hybrid').check();
     await expect(page.getByTestId('scenario-hybrid')).toBeChecked();
 

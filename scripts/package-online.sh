@@ -33,9 +33,13 @@ echo "==> Copying server bundle -> $SERVER_DIST"
 mkdir -p "$SERVER_DIST"
 cp "$REPO_ROOT/services/online/dist/server.bundle.cjs" "$SERVER_DIST/"
 
+# KEEP pcm-worklet.js. It used to be stripped as "offline-only", but the Gemini
+# Live ONLINE backend captures mic/system audio through this worklet
+# (addModule('/pcm-worklet.js')). Removing it 404s the worklet load → Gemini
+# sends no audio → connects but produces zero translation in the shipped build.
+# (OpenAI Realtime uses WebRTC and does not need it, but it must ship for Gemini.)
 echo "==> Copying apps/web/dist -> $STAGE_DIR/web"
 cp -r "$REPO_ROOT/apps/web/dist" "$STAGE_DIR/web"
-rm -f "$STAGE_DIR/web/pcm-worklet.js"
 
 echo "==> Writing launchers + README (no .env — system env only)"
 TPL_DIR="$REPO_ROOT/scripts/release-templates"

@@ -1,6 +1,12 @@
 import type { TranscriptEvent, TranslationEvent } from '@meeting-audio/contracts';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { createCaptionStore } from './caption-store.js';
+import {
+  createCaptionStore,
+  mergeSnapshots,
+  tailPayload,
+  type HydratedSnapshot,
+  type PersistedState,
+} from './caption-store.js';
 
 // In-memory localStorage + minimal window shim. Vitest defaults to node env
 // (no DOM); the new session-boundary / migration tests need both a real
@@ -332,6 +338,30 @@ describe('captionStore persistence migration', () => {
   });
 });
 
+describe('captionStore: legacy phase migration (no spurious crash-continue)', () => {
+  it('legacy v3 payload without sessionPhase hydrates as ended even when sessionEndedAt is null', () => {
+    // Pre-v4 data has no phase. It must NOT be treated as resumable — a reload
+    // of old data should show the restored chip, never a "continue last meeting"
+    // prompt pointing at a long-dead session.
+    const key = 'meeting-audio:captions:test-legacy-phase';
+    localStorage.setItem(
+      key,
+      JSON.stringify({
+        v: 3,
+        segments: [{ segmentId: 's1', provider: 'fake', source: 'fake_replay', mode: 'full_offline', status: 'final', text: 'a', startMs: 0 }],
+        translations: {},
+        sessionStartMs: 0,
+        sessionId: 'old-id',
+        sessionEndedAt: null, // was persisted while "open" — but still not resumable
+        savedAt: '2026-05-01T00:00:00.000Z',
+      }),
+    );
+    const store = createCaptionStore({ persistKey: key });
+    expect(store.getState().sessionPhase).toBe('ended');
+    store.getState().clear();
+  });
+});
+
 describe('captionStore: provider switch without transcript loss', () => {
   it('segments survive a provider restart that does NOT call beginSession (audio-source switch path)', () => {
     // CLAUDE.md: "Mode switching must preserve existing transcript history
@@ -461,5 +491,236 @@ describe('captionStore.sessionStartMs', () => {
     expect(store.getState().sessionStartMs).not.toBeNull();
     api.clear();
     expect(store.getState().sessionStartMs).toBeNull();
+  });
+});
+
+describe('captionStore.flushNow — interruption durability', () => {
+  it('writes synchronously and FOLDS the in-flight livePartial + liveTranslation onto disk', () => {
+    // The whole point: the debounced writer NEVER persists livePartial (it would
+    // churn localStorage at 20 Hz). flushNow is the crash-safety path that must
+    // capture the sentence still being spoken when the page goes away.
+    const key = 'meeting-audio:captions:test-flush-1';
+    localStorage.removeItem(key);
+    const store = createCaptionStore({ persistKey: key });
+    const api = store.getState();
+    api.beginSession();
+    api.applyTranscript(transcript({ segmentId: 'f1', status: 'final', text: 'finalized', startMs: 0 }));
+    // In-flight utterance — partial transcript + draft translation, never finalized.
+    api.applyTranscript(transcript({ segmentId: 'p2', status: 'partial', text: 'still talking', startMs: 1000 }));
+    api.applyTranslation(translation('p2', 'draft', '還在說'));
+
+    api.flushNow(); // synchronous — no debounce wait
+
+    const raw = localStorage.getItem(key);
+    expect(raw).not.toBeNull();
+    const parsed = JSON.parse(raw!);
+    const ids = parsed.segments.map((s: { segmentId: string }) => s.segmentId);
+    expect(ids).toContain('f1'); // finalized segment
+    expect(ids).toContain('p2'); // in-flight utterance folded in
+    expect(parsed.translations['p2']?.targetText).toBe('還在說');
+    store.getState().clear();
+  });
+
+  it('does not duplicate a finalized utterance (no stale livePartial double-write)', () => {
+    const key = 'meeting-audio:captions:test-flush-2';
+    localStorage.removeItem(key);
+    const store = createCaptionStore({ persistKey: key });
+    const api = store.getState();
+    api.applyTranscript(transcript({ segmentId: 's2', status: 'partial', text: 'x', startMs: 100 }));
+    api.applyTranscript(transcript({ segmentId: 's2', status: 'final', text: 'x final', startMs: 100 }));
+    expect(store.getState().livePartial).toBeNull();
+
+    api.flushNow();
+
+    const parsed = JSON.parse(localStorage.getItem(key)!);
+    const ids = parsed.segments.map((s: { segmentId: string }) => s.segmentId);
+    expect(ids.filter((i: string) => i === 's2')).toHaveLength(1);
+    store.getState().clear();
+  });
+
+  it('is a no-op (no throw) when persistence is disabled', () => {
+    const store = createCaptionStore({ persistKey: null });
+    store.getState().applyTranscript(transcript({ segmentId: 's1', status: 'partial', text: 'a', startMs: 0 }));
+    expect(() => store.getState().flushNow()).not.toThrow();
+  });
+});
+
+describe('captionStore: session lifecycle (crash-continue foundation)', () => {
+  it('beginSession(mode) records the mode and phase=running', () => {
+    const store = createCaptionStore({ persistKey: null });
+    store.getState().beginSession('gemini');
+    expect(store.getState().sessionMode).toBe('gemini');
+    expect(store.getState().sessionPhase).toBe('running');
+  });
+
+  it('setSessionPhase flips running ⇄ paused and is a no-op without a session', () => {
+    const store = createCaptionStore({ persistKey: null });
+    store.getState().setSessionPhase('paused'); // no session yet
+    expect(store.getState().sessionPhase).toBeNull();
+    store.getState().beginSession('real');
+    store.getState().setSessionPhase('paused');
+    expect(store.getState().sessionPhase).toBe('paused');
+    store.getState().setSessionPhase('running');
+    expect(store.getState().sessionPhase).toBe('running');
+  });
+
+  it('setSessionMode switches the backend without clearing the transcript (cross-model failover), no-op without a session', () => {
+    const store = createCaptionStore({ persistKey: null });
+    store.getState().setSessionMode('real'); // no session yet → no-op
+    expect(store.getState().sessionMode).toBeNull();
+
+    store.getState().beginSession('gemini');
+    store.getState().applyTranscript({
+      kind: 'transcript', provider: 'gemini-live', mode: 'online_full', source: 'microphone',
+      segmentId: 'g1', status: 'final', text: 'kept across failover', startMs: 1,
+    });
+    expect(store.getState().sessionMode).toBe('gemini');
+
+    // Failover to OpenAI: mode follows, transcript preserved.
+    store.getState().setSessionMode('real');
+    expect(store.getState().sessionMode).toBe('real');
+    expect(store.getState().segments).toHaveLength(1);
+    expect(store.getState().segments[0]!.text).toBe('kept across failover');
+  });
+
+  it('endSession sets phase=ended (and sessionEndedAt)', () => {
+    const store = createCaptionStore({ persistKey: null });
+    store.getState().beginSession('offline');
+    store.getState().endSession();
+    expect(store.getState().sessionPhase).toBe('ended');
+    expect(store.getState().sessionEndedAt).not.toBeNull();
+  });
+
+  it('persists sessionMode + sessionPhase so a reload can offer to continue', () => {
+    const key = 'meeting-audio:captions:test-lifecycle';
+    localStorage.removeItem(key);
+    const store = createCaptionStore({ persistKey: key });
+    store.getState().beginSession('gemini');
+    store.getState().applyTranscript(transcript({ segmentId: 's1', status: 'final', text: 'a', startMs: 0 }));
+    store.getState().setSessionPhase('paused');
+    store.getState().flushNow();
+    const parsed = JSON.parse(localStorage.getItem(key)!) as PersistedState;
+    expect(parsed.sessionMode).toBe('gemini');
+    expect(parsed.sessionPhase).toBe('paused');
+    store.getState().clear();
+  });
+});
+
+describe('captionStore: localStorage tail bounding (IDB holds the full history)', () => {
+  it('flushNow writes at most LS_TAIL_SEGMENTS (2000) newest segments to localStorage', () => {
+    const key = 'meeting-audio:captions:test-tail';
+    localStorage.removeItem(key);
+    const store = createCaptionStore({ persistKey: key });
+    store.getState().beginSession('fake');
+    for (let i = 0; i < 2100; i++) {
+      store.getState().applyTranscript(
+        transcript({ segmentId: `s${i}`, status: 'final', text: `w${i}`, startMs: i * 100 }),
+      );
+    }
+    store.getState().flushNow();
+    const parsed = JSON.parse(localStorage.getItem(key)!) as PersistedState;
+    expect(parsed.segments.length).toBe(2000); // bounded tail
+    // The retained window is the NEWEST 2000 (s100..s2099).
+    expect(parsed.segments[0]!.segmentId).toBe('s100');
+    expect(parsed.segments[parsed.segments.length - 1]!.segmentId).toBe('s2099');
+    store.getState().clear();
+  });
+});
+
+describe('mergeSnapshots — IDB(full) + localStorage(tail) union on crash recovery', () => {
+  const snap = (over: Partial<HydratedSnapshot>): HydratedSnapshot => ({
+    segments: [],
+    translations: {},
+    sessionStartMs: 0,
+    sessionId: null,
+    sessionEndedAt: null,
+    sessionMode: null,
+    sessionPhase: 'ended',
+    savedAtMs: 0,
+    ...over,
+  });
+  const seg = (id: string, startMs: number) => ({
+    segmentId: id, provider: 'fake', source: 'fake_replay' as const,
+    mode: 'full_offline' as const, status: 'final' as const, text: id, startMs,
+  });
+
+  it('unions a fresher localStorage tail (with the in-flight final) onto the fuller IDB base', () => {
+    // IDB: full history captured at the last debounce (s0..s2), older savedAt.
+    const idb = snap({
+      segments: [seg('s0', 0), seg('s1', 100), seg('s2', 200)],
+      savedAtMs: 1000, sessionPhase: 'running', sessionMode: 'gemini',
+    });
+    // localStorage: the synchronous flushNow net, newer savedAt, holds the tail
+    // PLUS the post-debounce in-flight final s3 that never reached IDB.
+    const ls = snap({
+      segments: [seg('s2', 200), seg('s3', 300)],
+      savedAtMs: 2000, sessionPhase: 'paused', sessionMode: 'gemini',
+    });
+    const merged = mergeSnapshots(ls, idb, 20000);
+    expect(merged.segments.map((s) => s.segmentId)).toEqual(['s0', 's1', 's2', 's3']);
+    // Newer base (ls) supplies the scalar session fields.
+    expect(merged.sessionPhase).toBe('paused');
+  });
+
+  it('caps the merged result to maxSegments (newest kept)', () => {
+    const a = snap({ segments: [seg('a', 0), seg('b', 100)], savedAtMs: 1 });
+    const b = snap({ segments: [seg('c', 200), seg('d', 300)], savedAtMs: 2 });
+    const merged = mergeSnapshots(a, b, 3);
+    expect(merged.segments.map((s) => s.segmentId)).toEqual(['b', 'c', 'd']);
+  });
+});
+
+describe('tailPayload', () => {
+  it('returns the same payload when under the tail size', () => {
+    const full: PersistedState = {
+      v: 4, segments: [{ segmentId: 's0', provider: 'f', source: 'fake_replay', mode: 'full_offline', status: 'final', text: 'a', startMs: 0 }],
+      translations: {}, savedAt: '2026-06-11T00:00:00.000Z',
+    };
+    expect(tailPayload(full, 2000)).toBe(full);
+  });
+});
+
+describe('captionStore: emergency flush on page exit', () => {
+  it('registers pagehide / visibilitychange handlers that fold in-flight data to disk', () => {
+    // Simulate a DOM environment with event APIs (the default node test env has
+    // none) so we can capture the handlers the store registers and fire them.
+    const g = globalThis as unknown as {
+      window?: unknown;
+      document?: unknown;
+    };
+    const prevWindow = g.window;
+    const prevDocument = g.document;
+    const captured: Record<string, Array<() => void>> = {};
+    const make = (ns: string) => (type: string, cb: () => void) => {
+      (captured[`${ns}:${type}`] ||= []).push(cb);
+    };
+    g.window = { addEventListener: make('win') };
+    g.document = { addEventListener: make('doc'), visibilityState: 'hidden' };
+    try {
+      const key = 'meeting-audio:captions:test-pagehide';
+      localStorage.removeItem(key);
+      const store = createCaptionStore({ persistKey: key });
+      // Only an in-flight partial exists — the debounced writer would persist
+      // nothing (segments[] ref unchanged), so disk is still empty here.
+      store
+        .getState()
+        .applyTranscript(transcript({ segmentId: 'p1', status: 'partial', text: 'mid sentence', startMs: 0 }));
+      expect(localStorage.getItem(key)).toBeNull();
+
+      const visHandlers = captured['doc:visibilitychange'];
+      expect(visHandlers?.length).toBeGreaterThan(0);
+      expect(captured['win:pagehide']?.length).toBeGreaterThan(0);
+
+      visHandlers![0]!(); // tab hidden → emergency flush
+
+      const raw = localStorage.getItem(key);
+      expect(raw).not.toBeNull();
+      const parsed = JSON.parse(raw!);
+      expect(parsed.segments.map((s: { segmentId: string }) => s.segmentId)).toContain('p1');
+      store.getState().clear();
+    } finally {
+      g.window = prevWindow;
+      g.document = prevDocument;
+    }
   });
 });
