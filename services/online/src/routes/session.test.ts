@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mockConfig = vi.hoisted(() => ({
   OPENAI_API_KEY: undefined as string | undefined,
+  OPENAI_API_KEY_AUDIO: undefined as string | undefined,
   OPENAI_TIMEOUT_MS: 10_000,
   SESSION_RATE_LIMIT_PER_MIN: 30,
   SESSION_RENEW_MS: 25 * 60 * 1000,
@@ -16,6 +17,7 @@ vi.mock('../config.js', () => ({
 }));
 
 import Fastify from 'fastify';
+import { _resetOpenAIKeysForTests } from '../openai-keys.js';
 import { _resetHealthForTests } from './healthz.js';
 import { _resetRateLimitForTests, registerSession } from './session.js';
 
@@ -33,7 +35,9 @@ function stubFetchOk(): void {
 beforeEach(() => {
   _resetRateLimitForTests();
   _resetHealthForTests();
+  _resetOpenAIKeysForTests();
   mockConfig.OPENAI_API_KEY = undefined;
+  mockConfig.OPENAI_API_KEY_AUDIO = undefined;
   mockConfig.OPENAI_TIMEOUT_MS = 10_000;
   mockConfig.SESSION_RATE_LIMIT_PER_MIN = 30;
 });
@@ -293,5 +297,60 @@ describe('POST /session', () => {
     expect(ok2.statusCode).toBe(200);
     expect(ok3.statusCode).toBe(200);
     expect(limited.statusCode).toBe(429);
+  });
+});
+
+describe('POST /session — key failover (domain-restricted primary)', () => {
+  it('falls back to OPENAI_API_KEY_AUDIO when the primary key is rejected 403', async () => {
+    mockConfig.OPENAI_API_KEY = 'sk-restricted-primary';
+    mockConfig.OPENAI_API_KEY_AUDIO = 'sk-private-audio';
+    const mockFn = vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+      const auth = (init.headers as Record<string, string>).Authorization;
+      return Promise.resolve(
+        auth === 'Bearer sk-restricted-primary'
+          ? new Response('{"error":"forbidden"}', { status: 403 })
+          : new Response(JSON.stringify(FAKE_SECRET), { status: 200 }),
+      );
+    });
+    vi.stubGlobal('fetch', mockFn);
+    const app = Fastify({ logger: false });
+    await registerSession(app);
+
+    const res = await app.inject({ method: 'POST', url: '/session' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json<{ client_secret: typeof FAKE_SECRET }>().client_secret).toEqual(FAKE_SECRET);
+    expect(mockFn).toHaveBeenCalledTimes(2);
+
+    // Sticky: the second session request goes straight to the audio key.
+    const res2 = await app.inject({ method: 'POST', url: '/session' });
+    expect(res2.statusCode).toBe(200);
+    expect(mockFn).toHaveBeenCalledTimes(3);
+    const lastAuth = (mockFn.mock.calls[2][1].headers as Record<string, string>).Authorization;
+    expect(lastAuth).toBe('Bearer sk-private-audio');
+  });
+
+  it('still returns a sanitized 401 when both keys are rejected', async () => {
+    mockConfig.OPENAI_API_KEY = 'sk-restricted-primary';
+    mockConfig.OPENAI_API_KEY_AUDIO = 'sk-private-audio';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(() =>
+        Promise.resolve(new Response('{"error":"bad key"}', { status: 401 })),
+      ),
+    );
+    const app = Fastify({ logger: false });
+    await registerSession(app);
+    const res = await app.inject({ method: 'POST', url: '/session' });
+    expect(res.statusCode).toBe(401);
+    expect(res.json<{ error: string }>().error).toBe('Upstream rejected the API key');
+  });
+
+  it('serves sessions with only OPENAI_API_KEY_AUDIO configured', async () => {
+    mockConfig.OPENAI_API_KEY_AUDIO = 'sk-private-audio';
+    stubFetchOk();
+    const app = Fastify({ logger: false });
+    await registerSession(app);
+    const res = await app.inject({ method: 'POST', url: '/session' });
+    expect(res.statusCode).toBe(200);
   });
 });

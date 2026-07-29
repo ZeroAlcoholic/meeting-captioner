@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { config } from '../config.js';
+import { fetchWithOpenAIKeyFailover, hasAnyOpenAIKey } from '../openai-keys.js';
 
 const OPENAI_CHAT_URL = 'https://api.openai.com/v1/chat/completions';
 const TRANSLATE_MODEL = 'gpt-4.1-mini';
@@ -62,7 +63,7 @@ setInterval(() => {
 
 export async function registerTranslate(app: FastifyInstance): Promise<void> {
   app.post('/translate', async (req: FastifyRequest, reply: FastifyReply) => {
-    if (!config.OPENAI_API_KEY) {
+    if (!hasAnyOpenAIKey()) {
       return reply.status(503).send({ error: 'OPENAI_API_KEY not configured on server' });
     }
 
@@ -83,23 +84,28 @@ export async function registerTranslate(app: FastifyInstance): Promise<void> {
 
     let res: Response;
     try {
-      res = await fetch(OPENAI_CHAT_URL, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${config.OPENAI_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: TRANSLATE_MODEL,
-          messages: [
-            { role: 'system', content: systemPrompt(sourceLang, targetLang) },
-            { role: 'user', content: text },
-          ],
-          temperature: 0.1,
-          max_tokens: 300,
-        }),
-        signal: AbortSignal.timeout(config.OPENAI_TIMEOUT_MS),
-      });
+      const outcome = await fetchWithOpenAIKeyFailover(
+        (apiKey) =>
+          fetch(OPENAI_CHAT_URL, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              model: TRANSLATE_MODEL,
+              messages: [
+                { role: 'system', content: systemPrompt(sourceLang, targetLang) },
+                { role: 'user', content: text },
+              ],
+              temperature: 0.1,
+              max_tokens: 300,
+            }),
+            signal: AbortSignal.timeout(config.OPENAI_TIMEOUT_MS),
+          }),
+        req.log,
+      );
+      res = outcome.res;
     } catch (err) {
       const isAbort = err instanceof Error && err.name === 'TimeoutError';
       req.log.warn({ err: err instanceof Error ? err.message : String(err) }, '/translate fetch failed');

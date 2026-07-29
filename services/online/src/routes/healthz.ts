@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { config } from '../config.js';
+import { activeOpenAIKeySlot, hasAnyOpenAIKey } from '../openai-keys.js';
 
 // Version is injected at build time by esbuild's `define` so the release
 // bundle does not depend on a runtime package.json lookup (which fails
@@ -33,7 +33,7 @@ export function _resetHealthForTests(): void {
 
 export async function registerHealthz(app: FastifyInstance): Promise<void> {
   app.get('/healthz', async () => {
-    const apiKey = config.OPENAI_API_KEY ? 'configured' : 'missing';
+    const apiKey = hasAnyOpenAIKey() ? 'configured' : 'missing';
     // ok = the service can plausibly broker a session right now.
     // 'unknown' is treated as ok (no calls made yet); 'degraded' is not.
     const ok = apiKey === 'configured' && openaiReachability !== 'degraded';
@@ -44,6 +44,7 @@ export async function registerHealthz(app: FastifyInstance): Promise<void> {
       timestamp: new Date().toISOString(),
       components: {
         apiKey,
+        openai_key_slot: activeOpenAIKeySlot(),
         openai_reachability: openaiReachability,
         openai_last_change_at: new Date(lastReachabilityChangeMs).toISOString(),
         uptime_sec: Math.round((Date.now() - STARTUP_MS) / 1000),

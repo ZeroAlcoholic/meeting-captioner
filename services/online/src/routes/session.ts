@@ -1,6 +1,11 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { config } from '../config.js';
+import {
+  fetchWithOpenAIKeyFailover,
+  hasAnyOpenAIKey,
+  type OpenAIKeySlot,
+} from '../openai-keys.js';
 import { recordOpenAIReachability } from './healthz.js';
 
 const TRANSLATION_CLIENT_SECRETS_URL =
@@ -87,10 +92,10 @@ export async function registerSession(app: FastifyInstance): Promise<void> {
     // which credentials are present. The UI uses this to enable/grey-out the
     // backend selector so the user never picks an unconfigured provider.
     const availableProviders: string[] = [];
-    if (config.OPENAI_API_KEY) availableProviders.push('openai');
+    if (hasAnyOpenAIKey()) availableProviders.push('openai');
     if (config.GEMINI_API_KEY) availableProviders.push('gemini');
     return {
-      hasApiKey: Boolean(config.OPENAI_API_KEY),
+      hasApiKey: hasAnyOpenAIKey(),
       hasGeminiKey: Boolean(config.GEMINI_API_KEY),
       availableProviders,
       sessionRenewalRecommendedMs: config.SESSION_RENEW_MS,
@@ -99,7 +104,7 @@ export async function registerSession(app: FastifyInstance): Promise<void> {
   });
 
   app.post('/session', async (req: FastifyRequest, reply: FastifyReply) => {
-    if (!config.OPENAI_API_KEY) {
+    if (!hasAnyOpenAIKey()) {
       return reply.status(503).send({ error: 'OPENAI_API_KEY not configured on server' });
     }
 
@@ -147,24 +152,31 @@ export async function registerSession(app: FastifyInstance): Promise<void> {
     }
 
     let res: Response;
+    let keySlot: OpenAIKeySlot | undefined;
     try {
-      res = await fetch(TRANSLATION_CLIENT_SECRETS_URL, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${config.OPENAI_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          session: {
-            model: 'gpt-realtime-translate',
-            audio: {
-              input: audioInput,
-              output: { language: outputLanguage },
+      const outcome = await fetchWithOpenAIKeyFailover(
+        (apiKey) =>
+          fetch(TRANSLATION_CLIENT_SECRETS_URL, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              'Content-Type': 'application/json',
             },
-          },
-        }),
-        signal: AbortSignal.timeout(config.OPENAI_TIMEOUT_MS),
-      });
+            body: JSON.stringify({
+              session: {
+                model: 'gpt-realtime-translate',
+                audio: {
+                  input: audioInput,
+                  output: { language: outputLanguage },
+                },
+              },
+            }),
+            signal: AbortSignal.timeout(config.OPENAI_TIMEOUT_MS),
+          }),
+        req.log,
+      );
+      res = outcome.res;
+      keySlot = outcome.slot;
     } catch (err) {
       const isAbort = err instanceof Error && err.name === 'TimeoutError';
       const message = err instanceof Error ? err.message : String(err);
@@ -181,7 +193,7 @@ export async function registerSession(app: FastifyInstance): Promise<void> {
       // to the browser — it can carry org id, billing detail, or quota numbers.
       const bodyText = await res.text().catch(() => '<unreadable>');
       req.log.warn(
-        { upstream_status: res.status, upstream_body: bodyText.slice(0, 2_000) },
+        { upstream_status: res.status, upstream_body: bodyText.slice(0, 2_000), key_slot: keySlot },
         'OpenAI client_secrets non-2xx',
       );
       recordOpenAIReachability('degraded');
