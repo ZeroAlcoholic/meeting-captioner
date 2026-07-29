@@ -65,6 +65,9 @@ playwright-report/
 playwright/.cache/
 .playwright-mcp/
 
+# --- Local Git worktrees ---
+.worktrees/
+
 # --- Manual testing screenshots (root-level transient artifacts) ---
 /*.png
 
