@@ -34,6 +34,7 @@ const GEMINI_WS_BASE =
   'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained';
 
 const PROVIDER = 'gemini-live';
+const GEMINI_TRANSLATE_MODEL = 'models/gemini-3.5-live-translate-preview';
 
 // ── Receive-side wedge detection (parity with OpenAIRealtimeProvider) ─────────
 // A Gemini WS can stay OPEN while the server silently stops emitting
@@ -98,26 +99,6 @@ export function arrayBufferToBase64(buf: ArrayBuffer): string {
   return btoa(binary);
 }
 
-// ── System instruction (translation is instruction-driven on Gemini) ─────────
-
-function systemInstructionFor(langPair: string): string {
-  if (langPair === 'zh-TW→en') {
-    return (
-      'You are a professional real-time simultaneous interpreter for a business ' +
-      'meeting. Translate everything the speaker says from Chinese into English. ' +
-      'Output only the translation — do not answer questions, do not add commentary ' +
-      'or explanations. Keep pace with the speaker.'
-    );
-  }
-  // Default en → Traditional Chinese (Taiwan).
-  return (
-    'You are a professional real-time simultaneous interpreter for a business ' +
-    'meeting. Translate everything the speaker says from English into Traditional ' +
-    'Chinese (繁體中文，台灣用語). Output only the translation — do not answer ' +
-    'questions, do not add commentary or explanations. Keep pace with the speaker.'
-  );
-}
-
 function langCodes(langPair: string): { source: string; target: string } {
   return langPair === 'zh-TW→en'
     ? { source: 'zh-TW', target: 'en' }
@@ -133,9 +114,10 @@ function translateTargetCode(langPair: string): string {
   return langPair === 'zh-TW→en' ? 'en' : 'zh-Hant';
 }
 
-/** The dedicated live-translation models use translationConfig, not prompting. */
-function isTranslateModel(model: string): boolean {
-  return /translate/i.test(model);
+function assertTranslateModel(model: string): void {
+  if (model !== GEMINI_TRANSLATE_MODEL) {
+    throw new Error(`Unsupported Gemini model: ${model}`);
+  }
 }
 
 // ── Minimal shapes of the Gemini server messages we consume ──────────────────
@@ -330,131 +312,107 @@ export class GeminiLiveProvider implements CaptionProvider {
   }
 
   private connect(token: string, model: string): Promise<void> {
+    assertTranslateModel(model);
+
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(`${GEMINI_WS_BASE}?access_token=${encodeURIComponent(token)}`);
       ws.binaryType = 'arraybuffer';
       this.ws = ws;
 
+      let settled = false;
+      let setupReady = false;
+      const succeed = () => {
+        if (settled) return;
+        settled = true;
+        setupReady = true;
+        clearTimeout(timeout);
+        resolve();
+      };
+      const fail = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        reject(error);
+      };
+      const handleText = (text: string) => {
+        let message: GeminiServerMessage;
+        try {
+          message = JSON.parse(text) as GeminiServerMessage;
+        } catch {
+          return;
+        }
+        this.handleServerObject(message);
+        if (message.setupComplete !== undefined) succeed();
+      };
       const timeout = setTimeout(() => {
+        fail(new Error('Gemini Live WebSocket setup timed out'));
         ws.close();
-        reject(new Error('Gemini Live WebSocket connection timed out'));
       }, 15000);
 
       ws.onopen = () => {
         ws.send(JSON.stringify(this.buildSetup(model)));
-        clearTimeout(timeout);
-        // NOTE: reconnectAttempts is reset on setupComplete (session proven
-        // live), NOT here. A socket that opens but never completes setup (auth/
-        // region reject, or a server that wedges/closes right after open) must
-        // keep climbing the attempt count so the 'failed' health + cross-model
-        // failover affordance can eventually fire — resetting on raw open would
-        // let a connect-then-wedge loop oscillate forever without escalating.
-        resolve();
+        // reconnectAttempts is reset only after setupComplete proves the
+        // session is usable. A raw socket open is not readiness.
       };
 
       ws.onmessage = (ev: MessageEvent) => {
         // Stale-socket guard: after a reconnect swaps this.ws, late events from
-        // the OLD socket must be ignored or they double-process / double-reconnect.
+        // the old socket must not mutate state or settle this connection.
         if (this.ws !== ws) return;
-        // Gemini Live delivers its JSON server messages as BINARY frames
-        // (ArrayBuffer here, since binaryType='arraybuffer'; Blob in some
-        // engines), NOT as text. Decode to UTF-8 before parsing — dropping
-        // non-string frames silently swallows every transcript/translation.
         const data: unknown = ev.data;
         if (typeof data === 'string') {
-          this.tryHandle(data);
+          handleText(data);
         } else if (data instanceof ArrayBuffer) {
-          this.tryHandle(new TextDecoder().decode(data));
+          handleText(new TextDecoder().decode(data));
         } else if (typeof Blob !== 'undefined' && data instanceof Blob) {
           void data
             .text()
-            .then((t) => this.tryHandle(t))
+            .then((text) => {
+              if (this.ws === ws) handleText(text);
+            })
             .catch(() => {});
         }
       };
 
       ws.onerror = () => {
-        clearTimeout(timeout);
-        reject(new Error('Gemini Live WebSocket error'));
+        if (!setupReady) fail(new Error('Gemini Live WebSocket error before setupComplete'));
       };
 
       ws.onclose = () => {
-        if (this.ws !== ws) return; // stale socket — a newer connection owns the session
-        if (this._status !== 'running') return;
-        this.scheduleReconnect();
+        if (this.ws !== ws) return;
+        if (!setupReady) {
+          fail(new Error('Gemini Live WebSocket closed before setupComplete'));
+          return;
+        }
+        if (this._status === 'running') this.scheduleReconnect();
       };
     });
   }
 
   private buildSetup(model: string): Record<string, unknown> {
-    // Common top-level fields for session lifetime controls. Transcription
-    // placement differs by model family below: the dedicated translate model
-    // follows the official Live Translate setup shape inside generationConfig,
-    // while the native-audio fallback keeps the previously live-verified raw
-    // WS top-level placement.
-    const common = {
-      model,
-      // Unlimited duration for long meetings; oldest context is rolled off.
-      contextWindowCompression: { slidingWindow: {} },
-      sessionResumption: this.resumptionHandle ? { handle: this.resumptionHandle } : {},
-    };
+    assertTranslateModel(model);
 
-    if (isTranslateModel(model)) {
-      // Dedicated live-translation model (e.g. gemini-3.5-live-translate-preview):
-      // continuous streaming, purpose-built translation. No systemInstruction /
-      // tools allowed — translation is driven by generationConfig.translationConfig.
-      // Use the official AUDIO response path even though this app discards the
-      // synthesized speech: Live Translate is a speech-to-speech pipeline, and
-      // outputAudioTranscription is the text side channel for that translated
-      // audio. The earlier TEXT-only optimization reduced output-audio cost but
-      // made the stream cadence noticeably slower in field tests.
-      //
-      // IMPORTANT — transcription fields live at setup TOP LEVEL, not inside
-      // generationConfig. Google's Live Translate raw-WS doc page shows them
-      // nested, but the live service rejects that shape with WS close 1007
-      // ("Unknown name inputAudioTranscription at 'setup.generation_config'").
-      // Verified 2026-07-28 against the real service: top-level placement gets
-      // setupComplete across v1alpha/v1beta × raw-key/ephemeral (8/8 matrix);
-      // the nested shape fails 3/3. See docs/PROJECT_DIAGNOSTIC_COMBINED_2026-07-28.md §4.3.
-      return {
-        setup: {
-          ...common,
-          inputAudioTranscription: {},
-          outputAudioTranscription: {},
-          generationConfig: {
-            responseModalities: ['AUDIO'],
-            translationConfig: {
-              targetLanguageCode: translateTargetCode(this.langPair),
-              // false = stay silent when the speaker is already in the target
-              // language (the source transcript still surfaces via inputTranscription).
-              echoTargetLanguage: false,
-            },
-          },
-        },
-      };
-    }
-
-    // Fallback: native-audio model — translation via system instruction.
     return {
       setup: {
-        ...common,
+        model,
+        // Unlimited duration for long meetings; oldest context is rolled off.
+        contextWindowCompression: { slidingWindow: {} },
+        sessionResumption: this.resumptionHandle ? { handle: this.resumptionHandle } : {},
+        // Live Translate rejects these fields under generationConfig. The live
+        // handshake contract requires both at setup top level.
         inputAudioTranscription: {},
         outputAudioTranscription: {},
-        generationConfig: { responseModalities: ['AUDIO'] },
-        systemInstruction: { parts: [{ text: systemInstructionFor(this.langPair) }] },
+        generationConfig: {
+          responseModalities: ['AUDIO'],
+          translationConfig: {
+            targetLanguageCode: translateTargetCode(this.langPair),
+            // Stay silent when the speaker is already in the target language;
+            // inputTranscription still provides the source text.
+            echoTargetLanguage: false,
+          },
+        },
       },
     };
-  }
-
-  /** Parse a decoded JSON frame and route it; tolerate malformed frames. */
-  private tryHandle(text: string): void {
-    let obj: GeminiServerMessage;
-    try {
-      obj = JSON.parse(text) as GeminiServerMessage;
-    } catch {
-      return;
-    }
-    this.handleServerObject(obj);
   }
 
   /**
@@ -519,7 +477,7 @@ export class GeminiLiveProvider implements CaptionProvider {
       // otherwise one live line grows unbounded and history never populates.
       this.maybeFinalizeOnSentence();
     }
-    // Native-audio models DO mark turn ends; honour them too.
+    // Honour explicit turn markers defensively if the service emits them.
     if (sc.turnComplete || sc.generationComplete) this.finalizeTurn();
   }
 
@@ -540,9 +498,9 @@ export class GeminiLiveProvider implements CaptionProvider {
     const { source, target } = this.langs;
     // A finalized translation is only visible if its SEGMENT exists in the
     // store (the board keys translations off segments). In the rare case we
-    // hold target text with no source transcript (native-audio turnComplete
-    // before any inputTranscription), surface the translation text as the
-    // transcript too — an imperfect source column beats an invisible caption.
+    // hold target text with no source transcript (for example, an out-of-order
+    // completion marker), surface the translation text as the transcript too —
+    // an imperfect source column beats an invisible caption.
     const srcOut = this.srcText.trim() ? this.srcText : this.tgtText;
     if (srcOut.trim()) this.handlers.onTranscript(this.transcript('final', srcOut));
     if (this.tgtText.trim()) this.handlers.onTranslation(this.translation('final', source, target));

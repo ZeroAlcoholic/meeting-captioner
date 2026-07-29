@@ -138,7 +138,9 @@ describe('GeminiLiveProvider — message mapping', () => {
     provider.handleServerObject({ serverContent: { outputTranscription: { text: '大家好。' } } });
     expect(translations.filter((t) => t.status === 'final')).toHaveLength(0);
     // Source arrives → next output delta (or source sentence end) can finalize.
-    provider.handleServerObject({ serverContent: { inputTranscription: { text: 'Hello everyone.' } } });
+    provider.handleServerObject({
+      serverContent: { inputTranscription: { text: 'Hello everyone.' } },
+    });
     provider.handleServerObject({ serverContent: { outputTranscription: { text: '' } } });
     // Drive one more output delta to trigger the check with both present.
     provider.handleServerObject({ serverContent: { outputTranscription: { text: ' ' } } });
@@ -309,7 +311,14 @@ class FakeWebSocket {
 }
 
 class FakeAudioWorkletNode {
+  static instances: FakeAudioWorkletNode[] = [];
+
   port = { onmessage: null as ((e: MessageEvent) => void) | null, close: vi.fn() };
+
+  constructor() {
+    FakeAudioWorkletNode.instances.push(this);
+  }
+
   connect(): void {}
   disconnect(): void {}
 }
@@ -347,11 +356,8 @@ function makeActiveMic(): AudioSource {
   } as unknown as AudioSource;
 }
 
-function tokenResponse(): Response {
-  return new Response(
-    JSON.stringify({ token: 'ephemeral', model: 'gemini-3.5-live-translate-preview' }),
-    { status: 200 },
-  );
+function tokenResponse(model = 'models/gemini-3.5-live-translate-preview'): Response {
+  return new Response(JSON.stringify({ token: 'ephemeral', model }), { status: 200 });
 }
 
 describe('GeminiLiveProvider — reconnect + wedge detection (#16)', () => {
@@ -360,6 +366,7 @@ describe('GeminiLiveProvider — reconnect + wedge detection (#16)', () => {
     wsEmitSetup = true;
     wsAutoCloseAfterOpen = false;
     FakeWebSocket.instances = [];
+    FakeAudioWorkletNode.instances = [];
     vi.stubGlobal('WebSocket', FakeWebSocket as unknown as typeof WebSocket);
     vi.stubGlobal('AudioContext', makeFakeAudioContextClass());
     vi.stubGlobal('AudioWorkletNode', FakeAudioWorkletNode as unknown as typeof AudioWorkletNode);
@@ -430,6 +437,91 @@ describe('GeminiLiveProvider — reconnect + wedge detection (#16)', () => {
     provider.stop();
   });
 
+  it('does not start audio capture before setupComplete', async () => {
+    wsEmitSetup = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(tokenResponse())),
+    );
+
+    const { provider } = makeHarness();
+    const start = provider.start();
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
+
+    expect(FakeAudioWorkletNode.instances).toHaveLength(0);
+    FakeWebSocket.instances[0]!.emit({ setupComplete: {} });
+    await start;
+    expect(FakeAudioWorkletNode.instances).toHaveLength(1);
+
+    provider.stop();
+  });
+
+  it('fails without starting capture when the socket closes before setupComplete', async () => {
+    wsEmitSetup = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(tokenResponse())),
+    );
+
+    const { provider, health } = makeHarness();
+    const start = provider.start();
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
+    FakeWebSocket.instances[0]!.close();
+    await start;
+
+    expect(provider.status).toBe('stopped');
+    expect(FakeAudioWorkletNode.instances).toHaveLength(0);
+    expect(health).toContainEqual(
+      expect.objectContaining({ component: 'transport', state: 'api_error' }),
+    );
+  });
+
+  it('fails without starting capture when setupComplete times out', async () => {
+    vi.useFakeTimers();
+    wsEmitSetup = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(tokenResponse())),
+    );
+
+    const { provider, health } = makeHarness();
+    const start = provider.start();
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(15_000);
+    await start;
+
+    expect(provider.status).toBe('stopped');
+    expect(FakeAudioWorkletNode.instances).toHaveLength(0);
+    expect(health).toContainEqual(
+      expect.objectContaining({
+        component: 'transport',
+        state: 'api_error',
+        message: expect.stringMatching(/timed out/i),
+      }),
+    );
+  });
+
+  it('rejects a non-translate Gemini model before opening a socket or audio worklet', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(tokenResponse('models/gemini-2.5-flash-native-audio-preview'))),
+    );
+
+    const { provider, health } = makeHarness();
+    await provider.start();
+
+    expect(provider.status).toBe('stopped');
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    expect(FakeAudioWorkletNode.instances).toHaveLength(0);
+    expect(health).toContainEqual(
+      expect.objectContaining({
+        component: 'transport',
+        state: 'api_error',
+        message: expect.stringMatching(/unsupported Gemini model/i),
+      }),
+    );
+  });
+
   it('persistent reconnect: keeps retrying past 5 attempts and surfaces a failed health state (never gives up / never stop()s)', async () => {
     vi.useFakeTimers();
     // Initial mint OK (so start connects), every subsequent mint fails so each
@@ -469,13 +561,18 @@ describe('GeminiLiveProvider — reconnect + wedge detection (#16)', () => {
     // 0↔1 forever and never surface 'failed' → the cross-model failover banner
     // could never appear. The reset must happen on setupComplete (proven live).
     vi.useFakeTimers();
-    wsEmitSetup = false; // socket opens but never confirms the session…
-    wsAutoCloseAfterOpen = true; // …and drops right after open
     const fetchMock = vi.fn(() => Promise.resolve(tokenResponse()));
     vi.stubGlobal('fetch', fetchMock);
 
     const { provider, health } = makeHarness();
     await provider.start();
+
+    // The initial session was proven live. Every reconnect opens, never reaches
+    // setupComplete, and drops immediately; those failed reconnects must keep
+    // climbing the attempt counter.
+    wsEmitSetup = false;
+    wsAutoCloseAfterOpen = true;
+    FakeWebSocket.instances.at(-1)!.close();
 
     // Drive many connect-then-drop cycles through the capped backoff.
     await vi.advanceTimersByTimeAsync(120_000);
