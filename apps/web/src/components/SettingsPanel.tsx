@@ -237,6 +237,43 @@ function MicDistanceBlock() {
 }
 
 
+function TranscriptRetentionBlock() {
+  const enabled = useSettingsStore((state) => state.transcriptRetentionEnabled);
+  const setEnabled = useSettingsStore((state) => state.setTranscriptRetentionEnabled);
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxWidth: 240 }}>
+      <span style={{ fontSize: 12, opacity: 0.65, textTransform: 'uppercase', letterSpacing: 1 }}>
+        Privacy
+      </span>
+      <label
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: '5px 10px',
+          borderRadius: 4,
+          border: '1px solid #555',
+          color: '#e8e8e8',
+          fontSize: 13,
+          cursor: 'pointer',
+          userSelect: 'none',
+        }}
+      >
+        <input
+          type="checkbox"
+          checked={enabled}
+          onChange={(event) => setEnabled(event.target.checked)}
+          data-testid="toggle-transcript-retention"
+        />
+        本機保存逐字稿
+      </label>
+      <span style={{ fontSize: 11, opacity: 0.65 }}>
+        預設關閉。關閉會立即刪除此瀏覽器已保存的逐字稿；目前畫面內容不會清除。
+      </span>
+    </div>
+  );
+}
+
 export function SettingsPanel({ open, onClose, triggerRef, sessionActive }: SettingsPanelProps) {
   const hasAudioLevel = useSettingsStore((s) => s.audioLevel !== null);
   const panelRef = useRef<HTMLElement>(null);
@@ -281,6 +318,7 @@ export function SettingsPanel({ open, onClose, triggerRef, sessionActive }: Sett
           <OnlineProviderBlock sessionActive={sessionActive ?? false} />
           <MicDistanceBlock />
         </div>
+        <TranscriptRetentionBlock />
         <HealthRow />
       </div>
       {hasAudioLevel && <AudioLevelMeter />}

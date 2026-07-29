@@ -207,6 +207,8 @@ export interface SettingsState {
    * cross-checking the speaker's original words.
    */
   includeSourceTranscript: boolean;
+  /** Persist transcripts locally across reloads. Privacy-safe default: false. */
+  transcriptRetentionEnabled: boolean;
   /** See MicDistance docstring. Default 'meeting' (multi-speaker room). */
   micDistance: MicDistance;
   /** Online realtime backend (mode 'online_full'). Default 'openai'. */
@@ -242,6 +244,7 @@ export interface SettingsState {
   setLangPair: (id: LangPair) => void;
   setAudioSource: (s: OfflineAudioSource) => void;
   setIncludeSourceTranscript: (v: boolean) => void;
+  setTranscriptRetentionEnabled: (v: boolean) => void;
   setMicDistance: (v: MicDistance) => void;
   setOnlineProvider: (v: OnlineProvider) => void;
   applyHealth: (event: HealthEvent) => void;
@@ -268,6 +271,7 @@ interface PersistedPrefs {
   langPair: LangPair;
   audioSource: OfflineAudioSource;
   includeSourceTranscript: boolean;
+  transcriptRetentionEnabled?: boolean;
   micDistance: MicDistance;
   onlineProvider: OnlineProvider;
 }
@@ -321,6 +325,7 @@ export function createSettingsStore(): SettingsStore {
     langPair: hydrated?.langPair ?? DEFAULT_LANG_PAIR,
     audioSource: hydrated?.audioSource ?? 'mic',
     includeSourceTranscript: hydrated?.includeSourceTranscript ?? true,
+    transcriptRetentionEnabled: hydrated?.transcriptRetentionEnabled ?? false,
     micDistance: hydrated?.micDistance ?? 'meeting',
     onlineProvider: hydrated?.onlineProvider ?? 'openai',
     health: defaultHealth(initialTimestamp),
@@ -339,6 +344,7 @@ export function createSettingsStore(): SettingsStore {
     setLangPair: (id) => set({ langPair: id }),
     setAudioSource: (audioSource) => set({ audioSource }),
     setIncludeSourceTranscript: (v) => set({ includeSourceTranscript: v }),
+    setTranscriptRetentionEnabled: (v) => set({ transcriptRetentionEnabled: v }),
     setMicDistance: (v) => set({ micDistance: v }),
     setOnlineProvider: (v) => set({ onlineProvider: v }),
 
@@ -398,6 +404,7 @@ export function createSettingsStore(): SettingsStore {
         langPair: DEFAULT_LANG_PAIR,
         audioSource: 'mic',
         includeSourceTranscript: true,
+        transcriptRetentionEnabled: false,
         micDistance: 'meeting',
         onlineProvider: 'openai',
         health: defaultHealth(new Date().toISOString()),
@@ -421,6 +428,7 @@ export function createSettingsStore(): SettingsStore {
         langPair: state.langPair,
         audioSource: state.audioSource,
         includeSourceTranscript: state.includeSourceTranscript,
+        transcriptRetentionEnabled: state.transcriptRetentionEnabled,
         micDistance: state.micDistance,
         onlineProvider: state.onlineProvider,
       };

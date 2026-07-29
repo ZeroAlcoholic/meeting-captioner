@@ -241,6 +241,15 @@ describe('settingsStore — micDistance + persistence', () => {
     expect(store.getState().micDistance).toBe('meeting');
   });
 
+  it('defaults transcript retention to off and persists explicit opt-in', () => {
+    expect(store.getState().transcriptRetentionEnabled).toBe(false);
+
+    store.getState().setTranscriptRetentionEnabled(true);
+
+    const persisted = JSON.parse(memLs.get('meeting-audio:settings:v1') ?? '{}');
+    expect(persisted.transcriptRetentionEnabled).toBe(true);
+  });
+
   it('setMicDistance accepts "meeting" and persists it', () => {
     store.getState().setMicDistance('meeting');
     expect(store.getState().micDistance).toBe('meeting');
@@ -296,12 +305,14 @@ describe('settingsStore — micDistance + persistence', () => {
         audioSource: 'mic',
         includeSourceTranscript: false,
         micDistance: 'far',
+        transcriptRetentionEnabled: true,
       }),
     );
     const fresh = createSettingsStore().getState();
     expect(fresh.langPair).toBe('zh-TW→en');
     expect(fresh.includeSourceTranscript).toBe(false);
     expect(fresh.micDistance).toBe('far');
+    expect(fresh.transcriptRetentionEnabled).toBe(true);
     // Ephemeral defaults intact.
     expect(fresh.sessionStartAt).toBeNull();
     expect(fresh.translateMinutesAccum).toBe(0);

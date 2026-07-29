@@ -312,6 +312,47 @@ describe('captionStore session boundary', () => {
 });
 
 describe('captionStore persistence migration', () => {
+  it('does not hydrate retained transcript data without explicit opt-in', () => {
+    localStorage.setItem(
+      'meeting-audio:captions:v4',
+      JSON.stringify({
+        v: 4,
+        segments: [
+          {
+            segmentId: 'old',
+            provider: 'fake',
+            source: 'fake_replay',
+            mode: 'full_offline',
+            status: 'final',
+            text: 'must not hydrate',
+            startMs: 0,
+          },
+        ],
+        translations: {},
+        savedAt: '2026-07-29T00:00:00.000Z',
+      }),
+    );
+
+    const store = createCaptionStore();
+
+    expect(store.getState().segments).toEqual([]);
+    expect(localStorage.getItem('meeting-audio:captions:v4')).toBeNull();
+  });
+
+  it('enables and disables retention without clearing in-memory captions', async () => {
+    const store = createCaptionStore();
+    store.getState().applyTranscript(
+      transcript({ segmentId: 'current', status: 'final', text: 'still visible', startMs: 0 }),
+    );
+
+    await store.getState().setTranscriptRetention(true);
+    expect(localStorage.getItem('meeting-audio:captions:v4')).not.toBeNull();
+
+    await store.getState().setTranscriptRetention(false);
+    expect(localStorage.getItem('meeting-audio:captions:v4')).toBeNull();
+    expect(store.getState().segments.map((segment) => segment.segmentId)).toEqual(['current']);
+  });
+
   it('reads legacy v2 payload from meeting-audio:captions:v2 when v3 is missing', () => {
     // Write a v2-shaped payload to the legacy key, leave the v3 key empty.
     localStorage.removeItem('meeting-audio:captions:v3');
@@ -325,7 +366,7 @@ describe('captionStore persistence migration', () => {
         savedAt: '2026-05-19T00:00:00.000Z',
       }),
     );
-    const store = createCaptionStore({});
+    const store = createCaptionStore({ persistenceEnabled: true });
     expect(store.getState().segments).toHaveLength(1);
     expect(store.getState().segments[0]?.text).toBe('legacy');
     expect(store.getState().translations.s1?.targetText).toBe('舊');

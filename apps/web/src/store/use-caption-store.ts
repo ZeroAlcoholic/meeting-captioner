@@ -1,7 +1,16 @@
 import { useSyncExternalStore } from 'react';
+import { settingsStore } from '../settings/use-settings-store.js';
 import { createCaptionStore, type CaptionState, type CaptionStore } from './caption-store.js';
 
-export const captionStore: CaptionStore = createCaptionStore();
+export const captionStore: CaptionStore = createCaptionStore({
+  persistenceEnabled: settingsStore.getState().transcriptRetentionEnabled,
+});
+
+settingsStore.subscribe((state, previous) => {
+  if (state.transcriptRetentionEnabled !== previous.transcriptRetentionEnabled) {
+    void captionStore.getState().setTranscriptRetention(state.transcriptRetentionEnabled);
+  }
+});
 
 // Dev-only debug handle: lets manual/browser-driven checks drive the store
 // (e.g. fill the history pane to exercise auto-scroll) without a live backend.
