@@ -7,6 +7,24 @@
 
 ## Now
 
+### Phase 1 closure — one external verification remains (2026-07-30)
+
+- [x] Gemini setup waits for `setupComplete`, uses only the exact dedicated
+      translate model, and has no silent native-audio fallback (`13f6311`).
+- [x] Transcript retention is opt-in/default-off with race-safe IndexedDB
+      deletion (`c587fc2`).
+- [x] Active sessions lock mode/scenario/backend/language; Stop releases capture
+      and transport before switching (`7dd2362`).
+- [x] Offline MT uses a bounded ordered dispatcher and cannot cap-wait inside
+      the transcript receive loop (`b67d810`).
+- [x] Production offline services are loopback-only and do not use reload
+      (`2adcd78`).
+- [x] Full local release matrix is green; formatting and lint gates are restored
+      (`171c05b`).
+- [ ] With explicit credential authorization, run
+      `pnpm -F @meeting-audio/online probe:upstream-contracts`, inspect the two
+      redacted fixtures, rerun the matrix, and only then mark Phase 1 complete.
+
 **Gemini latency root-cause closure (2026-07-02) complete.**
 
 - Official-docs research settled it: the translate model has NO latency knob
@@ -212,13 +230,9 @@ Commits:
 
 ## Backlog (later phases)
 
-## Backlog (later phases)
-
-- [ ] P5 — Research: Voxtral (Mistral) and Speaches as alternative ASR backends; evaluate streaming support, Windows compatibility, and quality vs distil-large-v3
-- [ ] P5 — Summary pipeline draft / refined / stable
-- [ ] P5 — Optional in-app autosave (opt-in)
-- [ ] P5 — localStorage / IndexedDB settings persistence (P1-D6)
-- [ ] P6 — Long-running memory test harness
-- [ ] P6 — Reconnect / silence / no-audio-track real handling
-- [ ] P7 — Electron packaging
-- [ ] P7 — Sidecar lifecycle (Electron main spawning online + offline)
+- [ ] P5 — Research Voxtral (Mistral) and Speaches as alternative ASR backends;
+      evaluate streaming support, Windows compatibility, and quality versus
+      distil-large-v3.
+- [ ] P5 — Summary pipeline draft / refined / stable.
+- [ ] P7 — Electron packaging.
+- [ ] P7 — Sidecar lifecycle (Electron main spawning online + offline).

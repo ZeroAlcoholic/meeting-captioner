@@ -34,12 +34,12 @@
 - 最大未調校槓桿：**WHL min_chunk/step 從未設定**（內部 ~1s 累積主導 partial 延遲）。
 - 瀏覽器 offline chunk 256ms（Gemini 為 32ms）；MT 無啟動預熱（首句吃 CT2 載入，最多 5s）。
 - S-1 精確化：MT 飽和阻塞時當則訊息 caption 已先送（`asr.py:227-228` 先於 `:233`），阻的是下一則；修法仍是 cap-wait 移出 recv_loop。
-- production 啟動腳本帶 `--reload`（dev 模式），需移除。
+- 原 production 啟動腳本帶 `--reload`（dev 模式）；已於 1.6／`2adcd78` 移除。
 
 ### 最新模型保證現狀
 
 - OpenAI：已硬編鎖死（`session.ts:159/146`）✅
-- Gemini：唯一缺口 `services/online/src/config.ts` 的 `GEMINI_LIVE_MODEL: z.string()` 任意覆寫＋瀏覽器端 native-audio 靜默 fallback（`gemini-live-provider.ts:429-438`）→ 待修（階段 1.2）
+- Gemini：原缺口為 `GEMINI_LIVE_MODEL: z.string()` 任意覆寫＋瀏覽器端 native-audio 靜默 fallback；已於 1.2／`13f6311` 改為 exact model 與 fail-fast。
 
 ## 3. 已完成項（2026-07-29）
 
@@ -66,6 +66,22 @@
 | 1.4 | running 期間鎖 mode/scenario/backend 切換；Stop 保證釋放 mic/WS                                       | O-2、O-12         |
 | 1.5 | MT cap-wait 移出 recv_loop（獨立 dispatcher＋bounded queue＋drop-oldest＋degraded 事件）              | S-1               |
 | 1.6 | 預設綁 127.0.0.1（run_whl.py＋start scripts）；移除 production `--reload`                             | S-3               |
+
+#### 階段 1 收尾狀態（2026-07-30）
+
+| 項目                                     | 證據                                                                       | 狀態               |
+| ---------------------------------------- | -------------------------------------------------------------------------- | ------------------ |
+| 0.2 / 1.1 real upstream golden contracts | probe 與 3 個去敏/shape 測試已備妥；尚未取得憑證使用授權、尚未產生 fixture | ⏳ 未驗證          |
+| 1.1 / 1.2 Gemini setup/model             | `13f6311`；setupComplete/close/timeout、exact model、無 fallback 測試      | ✅ local gate 通過 |
+| 1.3 retention opt-in                     | `c587fc2`；default-off、race-safe clear、UI/E2E                            | ✅ local gate 通過 |
+| 1.4 active-session lock                  | `7dd2362`；mode/scenario/backend/language lock、Stop 資源計數              | ✅ local gate 通過 |
+| 1.5 MT dispatcher                        | `b67d810`；FIFO、drop-oldest、degraded、cancel/no-late-emit                | ✅ local gate 通過 |
+| 1.6 loopback launch                      | `2adcd78`；8 policy tests、Bash syntax                                     | ✅ local gate 通過 |
+| release hygiene                          | `171c05b`；format/lint/Ruff/typecheck/build 與完整測試矩陣                 | ✅ 通過            |
+
+因此目前是「程式實作完成、外部契約證據未完成」，**不得宣告階段 1
+完成**。只有真實 probe 成功、兩份去敏 fixture 經檢查並重跑完整 gate
+後，才能把 0.2/1.1 與整個階段改為完成。
 
 ### 階段 2：即時性強化（2–3 天）
 
@@ -105,7 +121,7 @@ TEXT/AUDIO 費用 A/B（決策只看延遲，併入 2.3）；Electron；summary 
 
 - 1.1 動 fixture 前必須先有 0.2 golden frames，否則重蹈 fixture 反推實作。
 - 2.2 麥克風共用動到雙 provider 生命週期，需 keepalive e2e 回歸。
-- 1.3 是行為變更（現在預設會存），UI 需明確留存開關文案。
+- 1.3 已改為預設不保存；設定文案與測試必須持續鎖住明確 opt-in 與關閉即刪除語意。
 - 4.2 constrained token 有 1011 歷史，需完整矩陣重測。
 
-總估 9–12 個工作天。階段 0＋1 完成＝「兩個最新模型真實可用＋隱私合規」；階段 2 完成＝即時性有量測背書；階段 3–4 完成才談 production ready。
+總估 9–12 個工作天。階段 0＋1 的完成條件仍是「兩個最新模型真實可用＋隱私合規」；目前因 0.2 live probe 未執行，尚未達成。階段 2 完成＝即時性有量測背書；階段 3–4 完成才談 production ready。

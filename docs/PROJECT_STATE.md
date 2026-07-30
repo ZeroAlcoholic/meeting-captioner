@@ -8,6 +8,29 @@
 
 ## Current Phase
 
+### Phase 1 closure — implementation complete; live upstream evidence pending (2026-07-30)
+
+The Phase 1 correctness, privacy, lifecycle, caption-path, and loopback changes
+are implemented and locally verified. The phase is **not yet accepted as
+complete** because the real OpenAI/Gemini upstream contract probe has not been
+authorized or run, so the redacted golden fixtures required by Blueprint 0.2
+and 1.1 do not yet exist.
+
+| Item                         | Current evidence                                                                                                                                                                   | Status                   |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ |
+| 0.2 / 1.1 upstream contracts | `probe-upstream-contracts.ts` and 3 redaction/schema unit tests are ready; live call and `tests/fixtures/upstream-contracts/*.json` are pending explicit credential authorization  | ⏳ pending live evidence |
+| 1.1 / 1.2 Gemini correctness | `13f6311`: exact `models/gemini-3.5-live-translate-preview`, top-level transcription fields, `setupComplete` required before connect, close/timeout fail, no native-audio fallback | ✅ locally verified      |
+| 1.3 transcript privacy       | `c587fc2`: retention is explicit opt-in and defaults off; disabling it serially clears IndexedDB without a late-write race                                                         | ✅ locally verified      |
+| 1.4 session switching        | `7dd2362`: mode/scenario/backend/language are locked while running; Stop releases capture and transports before switching                                                          | ✅ locally verified      |
+| 1.5 caption-path isolation   | `b67d810`: one bounded FIFO MT dispatcher (capacity 10), drop-oldest under pressure, visible `translation:degraded`, cancellation prevents late emits                              | ✅ locally verified      |
+| 1.6 local-only launch        | `2adcd78`: WHL and FastAPI production launchers bind `127.0.0.1`; production reload removed; both launchers share `run_whl.py`                                                     | ✅ locally verified      |
+| Release-gate hygiene         | `171c05b`: Prettier, ESLint, Ruff, duplicate-test collection, and cross-platform EOL gate repaired                                                                                 | ✅ verified              |
+
+Current automated evidence: contracts **19**, online **63**, web **293**,
+offline **81**, Playwright **30**; `pnpm lint`, `pnpm format:check`,
+`pnpm typecheck`, and `pnpm build` exit 0. These checks prove local behavior;
+they do not substitute for the pending live upstream contract probe.
+
 **Gemini latency — root-cause closure + perceived-latency fix** ✅ **COMPLETE** (2026-07-02)
 
 Deep-dive against the current official Live API docs (live-translate page, API
@@ -256,21 +279,22 @@ services/online (Fastify, port 3001)
 
 ## How to Run (P3)
 
+```powershell
+# Production-style local offline stack (WHL + FastAPI, loopback only)
+.\services\offline\start.bat
+```
+
 ```bash
-# Full Offline mode — Terminal 1: start WHL
-cd services/offline
-start.bat            # Windows: opens WHL in separate window, waits 3s, starts uvicorn
-# or:
-WHL_MODEL=distil-large-v3 python -m whisper_live.server --port 9090 --backend faster_whisper
+# Unix-compatible launcher (WHL + FastAPI, loopback only)
+./services/offline/start.sh
+```
 
-# Terminal 2 (if not using start.bat)
-uv run uvicorn app.main:app --port 8000 --reload
-
-# Online Full mode — Terminal 3
-cd services/online && npm run dev
-
-# Web app — Terminal 4
-cd apps/web && npm run dev
+```text
+# Development — run from separate terminals
+cd services/offline && uv run python run_whl.py
+cd services/offline && uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+pnpm -F online dev
+pnpm -F web dev
 ```
 
 ---

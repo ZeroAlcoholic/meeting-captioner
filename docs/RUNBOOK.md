@@ -24,6 +24,77 @@ TL;DR:
 
 ---
 
+## Phase 1 operating rules
+
+### Local-only production launch
+
+The production-style offline launchers bind both services to loopback and do
+not enable Uvicorn reload:
+
+```powershell
+.\services\offline\start.bat
+```
+
+```bash
+./services/offline/start.sh
+```
+
+Expected listeners are `127.0.0.1:9090` (WhisperLiveKit) and
+`127.0.0.1:8000` (FastAPI). A wildcard/LAN bind is not a supported default.
+
+### Transcript retention
+
+**本機保存逐字稿** is off by default. While off, captions remain in memory for
+the current page only and are not restored after reload. Enabling it explicitly
+persists the current snapshot. Turning it off immediately removes the app's
+localStorage/legacy snapshots and serially clears IndexedDB; the captions still
+visible on the current page are not erased. Use Export before reload if the
+meeting must be retained as a file.
+
+### Stop before changing session configuration
+
+While a session is running, mode, scenario, online backend, and language pair
+are locked. Press **Stop**, wait for the stopped state, then change settings and
+start again. Stop releases the active microphone/display track and transport;
+there is no supported in-place provider handoff.
+
+### Offline translation pressure
+
+Offline MT is serialized through a FIFO queue with capacity 10. If translation
+falls behind, the oldest queued translation is dropped so transcript reception
+continues, and the UI receives `translation:degraded`. The current caption
+source text remains available; do not restart WHL merely because this health
+state appears. Reduce input rate or investigate MT/model performance.
+
+### Live upstream contract probe
+
+This release operation uses real server-side credentials and is never implied by
+unit-test success. Obtain explicit authorization before running:
+
+```powershell
+pnpm -F @meeting-audio/online probe:upstream-contracts
+```
+
+Required environment variables: `OPENAI_API_KEY` and `GEMINI_API_KEY`;
+`OPENAI_API_KEY_AUDIO` is an optional OpenAI 401/403 fallback. The probe creates
+an OpenAI translation client secret, creates a one-use Gemini auth token, and
+opens Gemini only long enough to receive `setupComplete`. It sends no audio or
+transcript content.
+
+Success writes:
+
+```text
+tests/fixtures/upstream-contracts/openai-realtime-translate.json
+tests/fixtures/upstream-contracts/gemini-live-translate.json
+```
+
+Inspect both files before commit. They must contain placeholders instead of API
+keys, ephemeral credentials, ids, and unstable timestamps. A failed or
+unauthorized probe is an explicit unverified release operation, not a passing
+Phase 1 result.
+
+---
+
 ## Project KEEPALIVE — manual verification (needs live keys / a real meeting)
 
 Automated coverage (238 web unit + 15 Playwright e2e) cannot exercise a real
@@ -64,7 +135,7 @@ pnpm dev                  # web + online (concurrently)
 pnpm -F web dev           # web only
 pnpm -F online dev        # online only
 cd services/offline
-uv run uvicorn app.main:app --port 8000   # offline only
+uv run uvicorn app.main:app --host 127.0.0.1 --port 8000   # offline dev only
 ```
 
 Open http://localhost:5173.
@@ -85,7 +156,8 @@ cd services/offline && uv run pytest
 ## Lint / Format / Typecheck
 
 ```
-pnpm lint                 # eslint + prettier --check
+pnpm lint                 # eslint
+pnpm format:check         # prettier check (cross-platform EOL aware)
 pnpm format               # prettier --write
 pnpm typecheck            # tsc --noEmit
 cd services/offline && uv run ruff check .
