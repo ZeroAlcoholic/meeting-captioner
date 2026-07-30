@@ -64,10 +64,14 @@ print(f"[run_whl] Resolving local path for {repo_id} (download if not cached)...
 local_path = snapshot_download(repo_id)
 print(f"[run_whl] Model at {local_path}", flush=True)
 print(f"[run_whl] max_connection_time = {MAX_CONN_TIME}s", flush=True)
-print(f"[run_whl] Starting server on :9090 with single_model=True (one shared instance)", flush=True)
+print(
+    "[run_whl] Starting server on 127.0.0.1:9090 with "
+    "single_model=True (one shared instance)",
+    flush=True,
+)
 
 TranscriptionServer().run(
-    host="0.0.0.0",
+    host="127.0.0.1",
     port=9090,
     backend="faster_whisper",
     faster_whisper_custom_model_path=local_path,

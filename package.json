@@ -12,7 +12,7 @@
   "packageManager": "pnpm@9.12.0",
   "scripts": {
     "dev": "concurrently -n web,online -c blue,green \"pnpm -F web dev\" \"pnpm -F online dev\"",
-    "dev:full": "concurrently --kill-others --names web,online,whl,offline -c blue,green,magenta,yellow \"pnpm -F web dev\" \"pnpm -F online dev\" \"python services/offline/run_whl.py\" \"python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --app-dir services/offline\"",
+    "dev:full": "concurrently --kill-others --names web,online,whl,offline -c blue,green,magenta,yellow \"pnpm -F web dev\" \"pnpm -F online dev\" \"cd services/offline && uv run python run_whl.py\" \"cd services/offline && uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload\"",
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "test:e2e": "playwright test --config tests/e2e/playwright.config.ts",

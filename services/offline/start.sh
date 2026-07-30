@@ -18,14 +18,17 @@ fi
 export WHL_MODEL="${WHL_MODEL:-distil-large-v3}"
 
 echo "[offline] Starting WhisperLiveKit (model: $WHL_MODEL) on port 9090..."
-"$PYTHON" -m whisper_live.server --port 9090 --backend faster_whisper &
+"$PYTHON" "$ROOT/run_whl.py" &
 WHL_PID=$!
+
+cleanup() {
+    kill "$WHL_PID" 2>/dev/null || true
+    wait "$WHL_PID" 2>/dev/null || true
+}
+trap cleanup EXIT
 
 echo "[offline] Waiting 3 s for WHL to initialise socket..."
 sleep 3
 
 echo "[offline] Starting offline service on port 8000..."
-"$PYTHON" -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --app-dir "$ROOT"
-
-# Cleanup WHL when uvicorn exits
-kill "$WHL_PID" 2>/dev/null || true
+"$PYTHON" -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --app-dir "$ROOT"
