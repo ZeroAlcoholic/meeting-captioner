@@ -15,6 +15,7 @@ from . import translation as mt
 from .events import health_event
 from .postprocess import to_traditional
 from .stabilizer import SegmentStabilizer
+from .translation_dispatcher import TranslationDispatcher
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +66,7 @@ class ASRSession:
     def __init__(
         self,
         lang_pair: str = "en→zh-TW",
-        on_model_ready: "Callable[[], None] | None" = None,
+        on_model_ready: Callable[[], None] | None = None,
         translate_enabled: bool = True,
     ) -> None:
         self._language = LANG_PAIR_TO_STT.get(lang_pair, "en")
@@ -81,10 +82,17 @@ class ASRSession:
         self._audio_q: asyncio.Queue[bytes] = asyncio.Queue(maxsize=500)
         # Events produced for browser (large buffer — browser reads them promptly)
         self._event_q: asyncio.Queue[dict | None] = asyncio.Queue(maxsize=1000)
-        # Bounded set of in-flight translation tasks. CT2 executor is single-thread;
-        # without a cap, a slow MT pass lets segments pile up and starve the event loop.
-        self._pending_translates: set[asyncio.Task] = set()
-        self._max_pending_translates = 10
+        # MT is serialized behind a bounded, non-blocking queue so slow translation
+        # never stalls WhisperLive transcript reception.
+        self._translation_dispatcher = (
+            TranslationDispatcher(
+                self._do_translate,
+                capacity=10,
+                on_error=self._handle_translation_error,
+            )
+            if translate_enabled
+            else None
+        )
         # Tracks audio frames silently dropped on QueueFull — surfaced via degraded health.
         self._audio_drops = 0
 
@@ -93,6 +101,8 @@ class ASRSession:
     async def run(self) -> None:
         """Connect to WHL and process until closed. Call as an asyncio task."""
         await self._put(health_event(component="transport", state="connecting"))
+        if self._translation_dispatcher is not None:
+            self._translation_dispatcher.start()
         try:
             async with websockets.connect(
                 WHL_WS_URL, open_timeout=WHL_CONNECT_TIMEOUT
@@ -105,7 +115,9 @@ class ASRSession:
                             "task": "transcribe",
                             "model": WHL_MODEL,
                             "use_vad": True,
-                            "initial_prompt": _INITIAL_PROMPTS.get(self._language, _INITIAL_PROMPTS["en"]),
+                            "initial_prompt": _INITIAL_PROMPTS.get(
+                                self._language, _INITIAL_PROMPTS["en"]
+                            ),
                             "vad_parameters": _VAD_PARAMETERS,
                         }
                     )
@@ -150,7 +162,10 @@ class ASRSession:
                     health_event(component="transport", state="failed", message=str(exc))
                 )
         finally:
+            self._closed = True
             self._ready.clear()
+            if self._translation_dispatcher is not None:
+                await self._translation_dispatcher.close(drain=False)
             await self._put(health_event(component="transport", state="stopped"))
             await self._put(health_event(component="audio", state="stopped"))
             await self._put(None)  # sentinel — tells consumer loop to exit
@@ -187,6 +202,8 @@ class ASRSession:
 
     async def close(self) -> None:
         self._closed = True
+        if self._translation_dispatcher is not None:
+            await self._translation_dispatcher.close(drain=False)
         # Drain audio queue so _audio_forward_loop unblocks
         while not self._audio_q.empty():
             self._audio_q.get_nowait()
@@ -226,17 +243,20 @@ class ASRSession:
                         seg["text"] = to_traditional(seg["text"])
                 for ev in transcript_events:
                     await self._put(ev)
-                # Fire-and-forget translation so recv_loop never blocks on CTranslate2.
-                # Bounded — if too many are in flight, await one before scheduling more.
-                for seg in to_translate:
-                    if len(self._pending_translates) >= self._max_pending_translates:
-                        done, _ = await asyncio.wait(
-                            self._pending_translates, return_when=asyncio.FIRST_COMPLETED
-                        )
-                        self._pending_translates -= done
-                    task = asyncio.create_task(self._do_translate(seg))
-                    self._pending_translates.add(task)
-                    task.add_done_callback(self._pending_translates.discard)
+                if self._translation_dispatcher is not None:
+                    for seg in to_translate:
+                        dropped = self._translation_dispatcher.enqueue(seg)
+                        if dropped:
+                            await self._put(
+                                health_event(
+                                    component="translation",
+                                    state="degraded",
+                                    message=(
+                                        "Offline translation queue saturated: "
+                                        f"{dropped} oldest segment dropped"
+                                    ),
+                                )
+                            )
 
     async def _do_translate(self, seg: dict) -> None:
         """Fire-and-forget translation task — runs outside recv_loop.
@@ -254,25 +274,33 @@ class ASRSession:
                 return
         elif len(text.split()) < MIN_WORDS_TO_TRANSLATE:
             return
-        try:
-            translation_ev = await mt.translate(
-                segment_id=seg["segment_id"],
-                text=text,
-                source_language=self._language,
-                target_language="zh-TW" if self._language == "en" else "en",
-                source_confidence=seg.get("confidence"),
-            )
-            if translation_ev is not None:
-                await self._put(translation_ev)
-        except Exception:
-            logger.exception("Translation failed for segment %s", seg["segment_id"])
+        if self._closed:
+            return
+        translation_ev = await mt.translate(
+            segment_id=seg["segment_id"],
+            text=text,
+            source_language=self._language,
+            target_language="zh-TW" if self._language == "en" else "en",
+            source_confidence=seg.get("confidence"),
+        )
+        if translation_ev is not None and not self._closed:
+            await self._put(translation_ev)
+
+    @staticmethod
+    def _handle_translation_error(exc: Exception, seg: dict) -> None:
+        logger.error(
+            "Translation failed for segment %s: %s",
+            seg.get("segment_id"),
+            exc,
+            exc_info=True,
+        )
 
     async def _audio_forward_loop(self, ws: websockets.WebSocketClientProtocol) -> None:
         # WHL ignores audio received before SERVER_READY — wait first so buffered
         # audio captured during model-load is flushed to WHL after it's ready.
         try:
             await asyncio.wait_for(self._ready.wait(), timeout=WHL_CONNECT_TIMEOUT)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return
         while not self._closed:
             try:

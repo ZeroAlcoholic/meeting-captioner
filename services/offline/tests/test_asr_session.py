@@ -6,7 +6,7 @@ directly via AsyncMock so no network or model is required.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -137,7 +137,6 @@ async def test_on_model_ready_callback_fires_on_server_ready() -> None:
     The session must NOT fire it for other message types.
     """
     import asyncio
-    from unittest.mock import MagicMock, patch
 
     callback = MagicMock()
     session = ASRSession(lang_pair="en→zh-TW", on_model_ready=callback)
@@ -228,3 +227,58 @@ async def test_do_translate_passes_none_confidence_when_absent():
         await session._do_translate(_make_seg("Hello world, how are you?"))
     call_kwargs = mock.call_args.kwargs
     assert call_kwargs["source_confidence"] is None
+
+
+# ── translation dispatcher integration ───────────────────────────────────────
+
+
+def test_translate_disabled_does_not_create_dispatcher() -> None:
+    session = ASRSession(lang_pair="en→zh-TW", translate_enabled=False)
+
+    assert session._translation_dispatcher is None
+
+
+@pytest.mark.asyncio
+async def test_recv_loop_reports_degraded_health_when_translation_is_dropped() -> None:
+    session = ASRSession(lang_pair="en→zh-TW")
+    session._stabilizer.feed = MagicMock(
+        return_value=([], [_make_seg("newest", seg_id="seg-new")])
+    )
+
+    class _DroppingDispatcher:
+        def enqueue(self, seg: dict) -> int:
+            assert seg["segment_id"] == "seg-new"
+            return 1
+
+    session._translation_dispatcher = _DroppingDispatcher()  # type: ignore[assignment]
+
+    class _FakeWS:
+        def __aiter__(self):
+            self._done = False
+            return self
+
+        async def __anext__(self) -> str:
+            if self._done:
+                raise StopAsyncIteration
+            self._done = True
+            return '{"segments": [{"text": "newest"}]}'
+
+    await session._recv_loop(_FakeWS())  # type: ignore[arg-type]
+
+    event = session._event_q.get_nowait()
+    assert event["kind"] == "health"
+    assert event["component"] == "translation"
+    assert event["state"] == "degraded"
+    assert "dropped" in event["message"]
+
+
+@pytest.mark.asyncio
+async def test_closed_session_does_not_emit_late_translation_result() -> None:
+    session = ASRSession(lang_pair="en→zh-TW")
+    session._closed = True
+    translation = {"kind": "translation", "sourceSegmentId": "seg-500"}
+
+    with patch("app.pipeline.asr.mt.translate", AsyncMock(return_value=translation)):
+        await session._do_translate(_make_seg("Hello world"))
+
+    assert session._event_q.empty()
