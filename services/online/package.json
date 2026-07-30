@@ -8,9 +8,10 @@
     "build": "tsc -p tsconfig.json",
     "bundle": "node build-bundle.mjs",
     "probe:upstream-contracts": "tsx scripts/probe-upstream-contracts.ts",
+    "verify:upstream-contracts": "tsx scripts/probe-upstream-contracts.ts --verify-only",
     "start": "node dist/server.js",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc -p tsconfig.scripts.json"
   },
   "dependencies": {
     "@fastify/compress": "^8.3.1",

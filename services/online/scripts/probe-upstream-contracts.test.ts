@@ -1,8 +1,12 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   assertRedacted,
   redactOpenAIResponse,
   validateGeminiGolden,
+  verifyFixtureDirectory,
 } from './probe-upstream-contracts.js';
 
 describe('upstream contract probe redaction', () => {
@@ -66,5 +70,62 @@ describe('upstream contract probe redaction', () => {
         model: 'models/gemini-2.5-flash-native-audio-preview',
       }),
     ).toThrowError('invalid Gemini golden contract');
+  });
+
+  it('reads and validates both stored fixtures instead of trusting probe completion', async () => {
+    const fixtureDir = await mkdtemp(path.join(tmpdir(), 'meeting-audio-contracts-'));
+    const openAI = {
+      provider: 'openai',
+      model: 'gpt-realtime-translate',
+      response: { value: '<ephemeral-token>' },
+    };
+    const gemini = {
+      provider: 'gemini',
+      model: 'models/gemini-3.5-live-translate-preview',
+      clientFrame: {
+        setup: {
+          model: 'models/gemini-3.5-live-translate-preview',
+          contextWindowCompression: { slidingWindow: {} },
+          sessionResumption: {},
+          inputAudioTranscription: {},
+          outputAudioTranscription: {},
+          generationConfig: {
+            responseModalities: ['AUDIO'],
+            translationConfig: {
+              targetLanguageCode: 'zh-Hant',
+              echoTargetLanguage: false,
+            },
+          },
+        },
+      },
+      serverFrame: { setupComplete: {} },
+    };
+
+    try {
+      await expect(verifyFixtureDirectory(fixtureDir)).rejects.toThrowError(
+        'missing upstream contract fixture',
+      );
+
+      await writeFile(
+        path.join(fixtureDir, 'openai-realtime-translate.json'),
+        JSON.stringify(openAI),
+      );
+      await writeFile(path.join(fixtureDir, 'gemini-live-translate.json'), JSON.stringify(gemini));
+
+      await expect(verifyFixtureDirectory(fixtureDir)).resolves.toEqual({
+        openAI,
+        gemini,
+      });
+
+      await writeFile(
+        path.join(fixtureDir, 'gemini-live-translate.json'),
+        JSON.stringify({ ...gemini, model: 'models/native-audio-fallback' }),
+      );
+      await expect(verifyFixtureDirectory(fixtureDir)).rejects.toThrowError(
+        'invalid Gemini golden contract',
+      );
+    } finally {
+      await rm(fixtureDir, { recursive: true, force: true });
+    }
   });
 });

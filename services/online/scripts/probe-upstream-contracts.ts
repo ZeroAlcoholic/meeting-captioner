@@ -1,4 +1,4 @@
-import { mkdir, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -9,6 +9,8 @@ const GEMINI_WS_URL =
 const OPENAI_MODEL = 'gpt-realtime-translate';
 const GEMINI_MODEL = 'models/gemini-3.5-live-translate-preview';
 const REQUEST_TIMEOUT_MS = 15_000;
+const OPENAI_FIXTURE = 'openai-realtime-translate.json';
+const GEMINI_FIXTURE = 'gemini-live-translate.json';
 
 type JsonRecord = Record<string, unknown>;
 
@@ -136,6 +138,37 @@ export function validateOpenAIGolden(value: unknown): OpenAIGoldenContract {
     throw new Error('invalid OpenAI golden contract');
   }
   return value as unknown as OpenAIGoldenContract;
+}
+
+async function readJsonFixture(filePath: string): Promise<unknown> {
+  let contents: string;
+  try {
+    contents = await readFile(filePath, 'utf8');
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error(`missing upstream contract fixture: ${path.basename(filePath)}`);
+    }
+    throw error;
+  }
+  try {
+    return JSON.parse(contents) as unknown;
+  } catch {
+    throw new Error(`invalid JSON fixture: ${path.basename(filePath)}`);
+  }
+}
+
+export async function verifyFixtureDirectory(fixtureDir: string): Promise<{
+  openAI: OpenAIGoldenContract;
+  gemini: GeminiGoldenContract;
+}> {
+  const [openAIValue, geminiValue] = await Promise.all([
+    readJsonFixture(path.join(fixtureDir, OPENAI_FIXTURE)),
+    readJsonFixture(path.join(fixtureDir, GEMINI_FIXTURE)),
+  ]);
+  return {
+    openAI: validateOpenAIGolden(openAIValue),
+    gemini: validateGeminiGolden(geminiValue),
+  };
 }
 
 async function fetchJson(
@@ -280,6 +313,17 @@ async function writeAtomic(filePath: string, value: unknown): Promise<void> {
   await rename(temporary, filePath);
 }
 
+function storedFixtureDirectory(): string {
+  const scriptDir = path.dirname(fileURLToPath(import.meta.url));
+  const repositoryRoot = path.resolve(scriptDir, '../../..');
+  return path.join(repositoryRoot, 'tests/fixtures/upstream-contracts');
+}
+
+export async function verifyStoredFixtures(): Promise<void> {
+  await verifyFixtureDirectory(storedFixtureDirectory());
+  process.stdout.write('Verified stored OpenAI and Gemini upstream contracts.\n');
+}
+
 export async function runProbe(): Promise<void> {
   const openAIKey = process.env.OPENAI_API_KEY;
   const openAIAudioKey = process.env.OPENAI_API_KEY_AUDIO;
@@ -292,11 +336,10 @@ export async function runProbe(): Promise<void> {
     probeGemini(geminiKey),
   ]);
 
-  const scriptDir = path.dirname(fileURLToPath(import.meta.url));
-  const repositoryRoot = path.resolve(scriptDir, '../../..');
-  const fixtureDir = path.join(repositoryRoot, 'tests/fixtures/upstream-contracts');
-  await writeAtomic(path.join(fixtureDir, 'openai-realtime-translate.json'), openAIGolden);
-  await writeAtomic(path.join(fixtureDir, 'gemini-live-translate.json'), geminiGolden);
+  const fixtureDir = storedFixtureDirectory();
+  await writeAtomic(path.join(fixtureDir, OPENAI_FIXTURE), openAIGolden);
+  await writeAtomic(path.join(fixtureDir, GEMINI_FIXTURE), geminiGolden);
+  await verifyFixtureDirectory(fixtureDir);
   process.stdout.write('Recorded redacted OpenAI and Gemini upstream contracts.\n');
 }
 
@@ -306,7 +349,8 @@ function isMainModule(): boolean {
 }
 
 if (isMainModule()) {
-  runProbe().catch((error: unknown) => {
+  const operation = process.argv.includes('--verify-only') ? verifyStoredFixtures : runProbe;
+  operation().catch((error: unknown) => {
     const message = error instanceof Error ? error.message : 'unknown upstream probe failure';
     process.stderr.write(`${message}\n`);
     process.exitCode = 1;
