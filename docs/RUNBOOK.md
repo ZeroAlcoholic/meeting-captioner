@@ -73,6 +73,7 @@ unit-test success. Obtain explicit authorization before running:
 
 ```powershell
 pnpm -F @meeting-audio/online probe:upstream-contracts
+pnpm -F @meeting-audio/online verify:upstream-contracts
 ```
 
 Required environment variables: `OPENAI_API_KEY` and `GEMINI_API_KEY`;
@@ -91,7 +92,10 @@ tests/fixtures/upstream-contracts/gemini-live-translate.json
 Inspect both files before commit. They must contain placeholders instead of API
 keys, ephemeral credentials, ids, and unstable timestamps. A failed or
 unauthorized probe is an explicit unverified release operation, not a passing
-Phase 1 result.
+Phase 1 result. The second command reads both fixtures back through the exact
+contract validators and exits non-zero if either file is missing, malformed, or
+records a non-dedicated model; it is required in addition to manual secret
+inspection.
 
 ---
 

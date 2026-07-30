@@ -144,19 +144,20 @@ Run: `pnpm -F @meeting-audio/web test` (unit incl. T1/T2) and
 
 ## Phase 1 closure verification (2026-07-30)
 
-| Requirement                                   | Automated evidence                                                                                 |
-| --------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| Gemini exact model/setup/ack/no fallback      | `gemini-live-provider.test.ts`, online config/route tests                                          |
-| Retention default-off and race-safe disable   | `caption-persistence.test.ts`, caption-store/settings tests, retention-aware E2E                   |
-| Stop-before-switch and resource release       | `mode-switch.spec.ts`, `scenario-switch.spec.ts`, `online-keepalive.spec.ts` capture/peer counters |
-| MT backpressure outside caption receive loop  | `test_translation_dispatcher.py`, `test_asr_session.py`                                            |
-| Loopback-only production launch               | `test_launch_policy.py`, `bash -n services/offline/start.sh`                                       |
-| Normalized event boundary and bounded history | provider conformance/property/soak tests                                                           |
+| Requirement                                   | Automated evidence                                                                                   |
+| --------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Gemini exact model/setup/ack/no fallback      | `gemini-live-provider.test.ts`, online config/route tests                                            |
+| Retention default-off and race-safe disable   | `caption-persistence.test.ts`, caption-store/settings tests, retention-aware E2E                     |
+| Stop-before-switch and resource release       | `mode-switch.spec.ts`, `scenario-switch.spec.ts`, `online-keepalive.spec.ts` capture/peer counters   |
+| MT backpressure outside caption receive loop  | `test_translation_dispatcher.py`, `test_asr_session.py`                                              |
+| Loopback-only production launch               | `test_launch_policy.py`, `bash -n services/offline/start.sh`                                         |
+| Normalized event boundary and bounded history | provider conformance/property/soak tests                                                             |
+| Recorded upstream fixture integrity           | `probe-upstream-contracts.test.ts`, `verify:upstream-contracts` (fails closed when files are absent) |
 
 Release matrix last run on 2026-07-30:
 
 ```text
-pnpm test              # contracts 19, online 63, web 293
+pnpm test              # contracts 19, online 65, web 293
 pnpm test:e2e          # Playwright 30
 pnpm lint              # 0 errors, 0 warnings
 pnpm format:check      # pass
@@ -169,9 +170,12 @@ cd services/offline && uv run ruff check . # pass
 The live-key operation remains separate from CI. Run
 `pnpm -F @meeting-audio/online probe:upstream-contracts` only with explicit
 credential authorization. Acceptance requires both redacted files under
-`tests/fixtures/upstream-contracts/` and a manual check that no source API key,
-ephemeral token, session id, or unstable timestamp remains. As of this entry,
-the probe is **not run**, so Phase 1 is not yet accepted.
+`tests/fixtures/upstream-contracts/`, a passing
+`pnpm -F @meeting-audio/online verify:upstream-contracts`, and a manual check
+that no source API key, ephemeral token, session id, or unstable timestamp
+remains. The verifier reads both stored artifacts and fails if either file is
+missing or violates the exact model/schema contract. As of this entry, the
+probe is **not run**, so Phase 1 is not yet accepted.
 
 ---
 
