@@ -97,14 +97,14 @@ Open `http://localhost:8787` in Chrome or Edge.
 
 ## Troubleshooting
 
-| Symptom | Fix |
-|---------|-----|
-| `🔑 No API Key` chip in the UI | `OPENAI_API_KEY` missing from this process's env. Set it (see Setup), then restart. |
-| `OPENAI_API_KEY: MISSING` in console | Same as above — and remember `setx` only affects NEW terminals. |
-| `⚠ Online Service Down` chip | Server didn't start — check the launcher console output. |
-| `Microphone permission denied` | Allow mic in your browser's site settings, then reload. |
-| `Upstream rate-limited` | OpenAI hit a 429 — wait 30 s and retry. |
-| Black caption board for >10 s | Click **Retry**; if it persists, restart the server. |
+| Symptom                                       | Fix                                                                                             |
+| --------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `🔑 No API Key` chip in the UI                | `OPENAI_API_KEY` missing from this process's env. Set it (see Setup), then restart.             |
+| `OPENAI_API_KEY: MISSING` in console          | Same as above — and remember `setx` only affects NEW terminals.                                 |
+| `⚠ Online Service Down` chip                  | Server didn't start — check the launcher console output.                                        |
+| `Microphone permission denied`                | Allow mic in your browser's site settings, then reload.                                         |
+| `Upstream rate-limited`                       | OpenAI hit a 429 — wait 30 s and retry.                                                         |
+| Black caption board for >10 s                 | Click **Retry**; if it persists, restart the server.                                            |
 | Want to access from another device on the LAN | Set `ONLINE_HOST=0.0.0.0` in your env. **WARNING:** no auth; only do this on a trusted network. |
 
 ## Verifying the install

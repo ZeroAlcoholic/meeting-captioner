@@ -26,7 +26,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app import __version__
 from app.capture import wasapi_loopback as _wasapi
 from app.pipeline import translation as _mt
-from app.pipeline.asr import ASRSession, WHL_MODEL, WHL_WS_URL
+from app.pipeline.asr import WHL_MODEL, WHL_WS_URL, ASRSession
 from app.pipeline.postprocess import _GLOSSARY
 
 _WHL_HOST = "127.0.0.1"
@@ -65,7 +65,7 @@ async def _probe_whl_once() -> bool:
             await writer.drain()
             try:
                 await asyncio.wait_for(reader.read(64), timeout=0.2)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
         finally:
             writer.close()
@@ -109,7 +109,7 @@ async def _run_model_ready_probe() -> None:
                             return
                     except json.JSONDecodeError:
                         pass
-    except (asyncio.CancelledError, asyncio.TimeoutError):
+    except (TimeoutError, asyncio.CancelledError):
         pass
     except Exception:
         logger.debug("WHL readiness probe failed", exc_info=True)
@@ -292,7 +292,11 @@ async def ws_pipeline(ws: WebSocket) -> None:
         global _whl_model_ready
         _whl_model_ready = True
 
-    session = ASRSession(lang_pair=lang_pair, on_model_ready=_mark_model_ready, translate_enabled=translate_enabled)
+    session = ASRSession(
+        lang_pair=lang_pair,
+        on_model_ready=_mark_model_ready,
+        translate_enabled=translate_enabled,
+    )
 
     # Start background task: connect to WHL + produce events
     asr_task = asyncio.create_task(session.run())

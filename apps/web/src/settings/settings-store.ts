@@ -207,6 +207,8 @@ export interface SettingsState {
    * cross-checking the speaker's original words.
    */
   includeSourceTranscript: boolean;
+  /** Persist transcripts locally across reloads. Privacy-safe default: false. */
+  transcriptRetentionEnabled: boolean;
   /** See MicDistance docstring. Default 'meeting' (multi-speaker room). */
   micDistance: MicDistance;
   /** Online realtime backend (mode 'online_full'). Default 'openai'. */
@@ -242,6 +244,7 @@ export interface SettingsState {
   setLangPair: (id: LangPair) => void;
   setAudioSource: (s: OfflineAudioSource) => void;
   setIncludeSourceTranscript: (v: boolean) => void;
+  setTranscriptRetentionEnabled: (v: boolean) => void;
   setMicDistance: (v: MicDistance) => void;
   setOnlineProvider: (v: OnlineProvider) => void;
   applyHealth: (event: HealthEvent) => void;
@@ -268,6 +271,7 @@ interface PersistedPrefs {
   langPair: LangPair;
   audioSource: OfflineAudioSource;
   includeSourceTranscript: boolean;
+  transcriptRetentionEnabled?: boolean;
   micDistance: MicDistance;
   onlineProvider: OnlineProvider;
 }
@@ -305,22 +309,19 @@ export function createSettingsStore(): SettingsStore {
   // If a previous full-build session left an offline mode persisted but the
   // current build is online-only, fall back to defaults — otherwise the user
   // would land on a disabled (greyed-out) selection they couldn't easily fix.
-  const isEnabled = (
-    list: { id: string; enabled: boolean }[],
-    id: string | undefined,
-  ): boolean => Boolean(id && list.find((o) => o.id === id)?.enabled);
+  const isEnabled = (list: { id: string; enabled: boolean }[], id: string | undefined): boolean =>
+    Boolean(id && list.find((o) => o.id === id)?.enabled);
   const safeScenario = isEnabled(SCENARIO_OPTIONS, hydrated?.scenarioId)
     ? hydrated!.scenarioId!
     : DEFAULT_SCENARIO;
-  const safeMode = isEnabled(MODE_OPTIONS, hydrated?.modeId)
-    ? hydrated!.modeId!
-    : DEFAULT_MODE;
+  const safeMode = isEnabled(MODE_OPTIONS, hydrated?.modeId) ? hydrated!.modeId! : DEFAULT_MODE;
   const store = createStore<SettingsState>((set) => ({
     scenarioId: safeScenario,
     modeId: safeMode,
     langPair: hydrated?.langPair ?? DEFAULT_LANG_PAIR,
     audioSource: hydrated?.audioSource ?? 'mic',
     includeSourceTranscript: hydrated?.includeSourceTranscript ?? true,
+    transcriptRetentionEnabled: hydrated?.transcriptRetentionEnabled ?? false,
     micDistance: hydrated?.micDistance ?? 'meeting',
     onlineProvider: hydrated?.onlineProvider ?? 'openai',
     health: defaultHealth(initialTimestamp),
@@ -339,6 +340,7 @@ export function createSettingsStore(): SettingsStore {
     setLangPair: (id) => set({ langPair: id }),
     setAudioSource: (audioSource) => set({ audioSource }),
     setIncludeSourceTranscript: (v) => set({ includeSourceTranscript: v }),
+    setTranscriptRetentionEnabled: (v) => set({ transcriptRetentionEnabled: v }),
     setMicDistance: (v) => set({ micDistance: v }),
     setOnlineProvider: (v) => set({ onlineProvider: v }),
 
@@ -371,9 +373,7 @@ export function createSettingsStore(): SettingsStore {
 
     stopSession: () =>
       set((state) => {
-        const elapsedMin = state.sessionStartAt
-          ? (Date.now() - state.sessionStartAt) / 60_000
-          : 0;
+        const elapsedMin = state.sessionStartAt ? (Date.now() - state.sessionStartAt) / 60_000 : 0;
         const wasBilingual = state.activeSessionBilingual === true;
         return {
           translateMinutesAccum: state.translateMinutesAccum + elapsedMin,
@@ -398,6 +398,7 @@ export function createSettingsStore(): SettingsStore {
         langPair: DEFAULT_LANG_PAIR,
         audioSource: 'mic',
         includeSourceTranscript: true,
+        transcriptRetentionEnabled: false,
         micDistance: 'meeting',
         onlineProvider: 'openai',
         health: defaultHealth(new Date().toISOString()),
@@ -421,6 +422,7 @@ export function createSettingsStore(): SettingsStore {
         langPair: state.langPair,
         audioSource: state.audioSource,
         includeSourceTranscript: state.includeSourceTranscript,
+        transcriptRetentionEnabled: state.transcriptRetentionEnabled,
         micDistance: state.micDistance,
         onlineProvider: state.onlineProvider,
       };

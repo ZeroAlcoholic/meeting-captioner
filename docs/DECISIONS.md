@@ -1,6 +1,6 @@
 # DECISIONS.md
 
-> Architectural decisions, with the *why*. Decisions are append-only;
+> Architectural decisions, with the _why_. Decisions are append-only;
 > if a decision is reversed, add a new entry that supersedes the old one
 > rather than editing history.
 
@@ -40,7 +40,7 @@ projector-readable text), no runtime style cost.
 **Date:** P0
 **Status:** Accepted
 **Context:** Provider Abstraction (CLAUDE.md) requires UI to consume
-*normalized* events. We need both compile-time TS types and runtime
+_normalized_ events. We need both compile-time TS types and runtime
 validation at provider boundaries.
 **Decision:** Use **zod** in `packages/contracts` to define schemas, then
 infer TS types from the schemas.
@@ -131,3 +131,20 @@ GitHub (private), GitLab, Gitea, self-hosted, or no remote.
 no value yet and forces an unnecessary platform/account decision now.
 **How to apply later:** when the user is ready, set up `git remote add
 origin <url>` and `git push -u origin main`. No code changes required.
+
+---
+
+## D11 — Phase 1 privacy and caption-path defaults
+
+**Date:** 2026-07-30
+**Status:** Accepted
+**Context:** Session switching, transcript persistence, slow offline MT, and
+wildcard service binds could preserve audio/data longer than intended or block
+caption reception.
+**Decision:** Transcript retention is explicit opt-in and defaults off; active
+session configuration is immutable until Stop; offline MT uses one bounded FIFO
+queue with drop-oldest rather than waiting in the transcript receive loop; local
+production launchers bind WHL/FastAPI to `127.0.0.1` and do not use reload.
+**Why:** These defaults mechanically preserve privacy, resource ownership, and
+the non-blocking caption-path invariant. Any future relaxation requires an
+explicit product decision plus tests; it must not appear as a silent fallback.

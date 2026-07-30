@@ -31,7 +31,6 @@ async function startOpenAI(page: import('@playwright/test').Page): Promise<void>
   await expect.poll(() => mock.oaiReady(), { timeout: 10_000 }).toBe(true);
 }
 
-
 async function selectOnlineMeetingSystemAudio(
   page: import('@playwright/test').Page,
   provider: 'openai' | 'gemini' = 'openai',
@@ -52,10 +51,15 @@ test.describe('KEEPALIVE — online reliability (mock backend)', () => {
     await mock.oaiInput('Quarterly revenue grew strongly.');
     await mock.oaiOutput('本季營收強勁成長。');
 
-    await expect(page.getByTestId('caption-current')).toContainText('Quarterly revenue grew strongly.', {
+    await expect(page.getByTestId('caption-current')).toContainText(
+      'Quarterly revenue grew strongly.',
+      {
+        timeout: 5_000,
+      },
+    );
+    await expect(page.getByTestId('caption-target')).toContainText('本季營收強勁成長。', {
       timeout: 5_000,
     });
-    await expect(page.getByTestId('caption-target')).toContainText('本季營收強勁成長。', { timeout: 5_000 });
 
     // Completion event commits the segment into history.
     await mock.oaiComplete();
@@ -64,13 +68,53 @@ test.describe('KEEPALIVE — online reliability (mock backend)', () => {
     // The background latency monitor must have observed the real event pipeline
     // (the monitor is real; only the transport is mocked). Confirms it's wired
     // and recording so a real-key session leaves numbers behind.
-    const summary = await page.evaluate(
-      () => (window as unknown as { __latency: { summary(): Array<{ provider: string; samples: number; ttfcMs: number | null }> } }).__latency.summary(),
+    const summary = await page.evaluate(() =>
+      (
+        window as unknown as {
+          __latency: {
+            summary(): Array<{ provider: string; samples: number; ttfcMs: number | null }>;
+          };
+        }
+      ).__latency.summary(),
     );
     expect(summary.length).toBeGreaterThan(0);
     expect(summary[0]!.provider).toBe('openai-realtime');
     expect(summary[0]!.samples).toBeGreaterThan(0);
     expect(typeof summary[0]!.ttfcMs).toBe('number');
+  });
+
+  test('running locks session configuration and Stop releases transport plus capture', async ({
+    page,
+  }) => {
+    await startOpenAI(page);
+    await mock.oaiInput('Configuration stays fixed while running.');
+    await mock.oaiOutput('執行期間設定保持固定。');
+    await mock.oaiComplete();
+    await expect(page.locator('body')).toContainText('執行期間設定保持固定。', {
+      timeout: 5_000,
+    });
+
+    expect(await mock.activeCaptureTracks()).toBe(1);
+    expect(await mock.oaiOpenPeers()).toBe(1);
+
+    await page.getByTestId('settings-toggle').click();
+    await expect(page.getByTestId('mode-full_offline')).toBeDisabled();
+    await expect(page.getByTestId('scenario-hybrid')).toBeDisabled();
+    await expect(page.getByTestId('online-provider-gemini')).toBeDisabled();
+    await expect(page.getByTestId('lang-zh-TW→en')).toBeDisabled();
+
+    await page.getByTestId('stop-fake-replay').click();
+    await expect.poll(() => mock.activeCaptureTracks()).toBe(0);
+    await expect.poll(() => mock.oaiOpenPeers()).toBe(0);
+
+    await page.getByTestId('settings-toggle').click();
+    await expect(page.getByTestId('mode-full_offline')).toBeEnabled();
+    await expect(page.getByTestId('scenario-hybrid')).toBeEnabled();
+    await expect(page.getByTestId('online-provider-gemini')).toBeEnabled();
+    await expect(page.getByTestId('lang-zh-TW→en')).toBeEnabled();
+    await page.getByTestId('online-provider-gemini').click();
+
+    await expect(page.locator('body')).toContainText('執行期間設定保持固定。');
   });
 
   test('startup shows a connecting/listening cue instead of a blank board', async ({ page }) => {
@@ -88,7 +132,9 @@ test.describe('KEEPALIVE — online reliability (mock backend)', () => {
     // The first delta replaces the cue with the live caption.
     await expect.poll(() => mock.oaiReady(), { timeout: 10_000 }).toBe(true);
     await mock.oaiOutput('第一句翻譯。');
-    await expect(page.getByTestId('caption-target')).toContainText('第一句翻譯。', { timeout: 5_000 });
+    await expect(page.getByTestId('caption-target')).toContainText('第一句翻譯。', {
+      timeout: 5_000,
+    });
     await expect(empty).toBeHidden();
   });
 
@@ -116,8 +162,15 @@ test.describe('KEEPALIVE — online reliability (mock backend)', () => {
     expect(mock.geminiSessionCalls()).toBe(0);
   });
 
-  test('paused online backend switch persists the resumed backend', async ({ page }) => {
-    await startOpenAI(page);
+  test('paused online backend switch persists the resumed backend when retention is opted in', async ({
+    page,
+  }) => {
+    await page.goto('/');
+    await page.getByTestId('settings-toggle').click();
+    await page.getByTestId('toggle-transcript-retention').check();
+    await page.keyboard.press('Escape');
+    await page.getByTestId('start-real').click();
+    await expect.poll(() => mock.oaiReady(), { timeout: 10_000 }).toBe(true);
     await mock.oaiOutput('暫停前。');
     await mock.oaiComplete();
     await expect(page.locator('body')).toContainText('暫停前。', { timeout: 5_000 });
@@ -129,13 +182,15 @@ test.describe('KEEPALIVE — online reliability (mock backend)', () => {
     await page.getByTestId('resume-session').click();
 
     await expect.poll(() => mock.geminiOpenSockets(), { timeout: 10_000 }).toBeGreaterThan(0);
-    const sessionMode = await page.evaluate(() =>
-      JSON.parse(localStorage.getItem('meeting-audio:captions:v4') ?? '{}').sessionMode,
+    const sessionMode = await page.evaluate(
+      () => JSON.parse(localStorage.getItem('meeting-audio:captions:v4') ?? '{}').sessionMode,
     );
     expect(sessionMode).toBe('gemini');
   });
 
-  test('OpenAI online-meeting scenario uses display capture, not microphone capture', async ({ page }) => {
+  test('OpenAI online-meeting scenario uses display capture, not microphone capture', async ({
+    page,
+  }) => {
     await selectOnlineMeetingSystemAudio(page, 'openai');
     await expect(page.getByTestId('start-real')).toBeEnabled();
 
@@ -148,10 +203,14 @@ test.describe('KEEPALIVE — online reliability (mock backend)', () => {
 
     await mock.oaiInput('Breaking news from London.');
     await mock.oaiOutput('來自倫敦的突發新聞。');
-    await expect(page.getByTestId('caption-target')).toContainText('來自倫敦的突發新聞。', { timeout: 5_000 });
+    await expect(page.getByTestId('caption-target')).toContainText('來自倫敦的突發新聞。', {
+      timeout: 5_000,
+    });
   });
 
-  test('system-audio Online run records field-test history only after pressing Test', async ({ page }) => {
+  test('system-audio Online run records field-test history only after pressing Test', async ({
+    page,
+  }) => {
     await selectOnlineMeetingSystemAudio(page, 'openai');
     await expect(page.getByTestId('start-real')).toBeEnabled();
     await expect(page.getByTestId('field-test-toggle')).toBeEnabled();
@@ -165,20 +224,24 @@ test.describe('KEEPALIVE — online reliability (mock backend)', () => {
     await mock.oaiInput('Automatic field recording is active.');
     await mock.oaiOutput('自動現場測試記錄已啟用。');
     await mock.oaiComplete();
-    await expect(page.getByTestId('caption-target')).toContainText('自動現場測試記錄已啟用。', { timeout: 5_000 });
+    await expect(page.getByTestId('caption-target')).toContainText('自動現場測試記錄已啟用。', {
+      timeout: 5_000,
+    });
 
     await page.getByTestId('stop-fake-replay').click();
 
     const history = await page.evaluate(() =>
-      (window as unknown as {
-        __fieldTest: {
-          history(): Array<{
-            label: string;
-            settings: { onlineProvider: string; audioSource: string };
-            runSummary: Array<{ provider: string; samples: number }>;
-          }>;
-        };
-      }).__fieldTest.history(),
+      (
+        window as unknown as {
+          __fieldTest: {
+            history(): Array<{
+              label: string;
+              settings: { onlineProvider: string; audioSource: string };
+              runSummary: Array<{ provider: string; samples: number }>;
+            }>;
+          };
+        }
+      ).__fieldTest.history(),
     );
     expect(history).toHaveLength(1);
     expect(history[0]!.label).toContain('OpenAI manual');
@@ -188,7 +251,9 @@ test.describe('KEEPALIVE — online reliability (mock backend)', () => {
     expect(history[0]!.runSummary[0]!.samples).toBeGreaterThan(0);
   });
 
-  test('Gemini online-meeting scenario uses display capture, not microphone capture', async ({ page }) => {
+  test('Gemini online-meeting scenario uses display capture, not microphone capture', async ({
+    page,
+  }) => {
     await selectOnlineMeetingSystemAudio(page, 'gemini');
     await expect(page.getByTestId('start-gemini')).toBeEnabled();
 
@@ -206,7 +271,9 @@ test.describe('KEEPALIVE — online reliability (mock backend)', () => {
     await expect(page.locator('body')).toContainText('市場今天開高。', { timeout: 5_000 });
   });
 
-  test('idle pre-mint: token fetched before Start and consumed without a second fetch', async ({ page }) => {
+  test('idle pre-mint: token fetched before Start and consumed without a second fetch', async ({
+    page,
+  }) => {
     await page.goto('/');
     // Once apiKeyStatus resolves to present, the hook pre-mints a token while idle.
     await expect.poll(() => mock.oaiSessionCalls(), { timeout: 10_000 }).toBeGreaterThan(0);
@@ -220,10 +287,14 @@ test.describe('KEEPALIVE — online reliability (mock backend)', () => {
 
     // And captions still flow on the pre-minted session.
     await mock.oaiOutput('預鑄字幕。');
-    await expect(page.getByTestId('caption-target')).toContainText('預鑄字幕。', { timeout: 5_000 });
+    await expect(page.getByTestId('caption-target')).toContainText('預鑄字幕。', {
+      timeout: 5_000,
+    });
   });
 
-  test('session.closed triggers zero-gap renewal — mic reused, history preserved', async ({ page }) => {
+  test('session.closed triggers zero-gap renewal — mic reused, history preserved', async ({
+    page,
+  }) => {
     await startOpenAI(page);
 
     await mock.oaiInput('First utterance before renewal.');
@@ -249,10 +320,14 @@ test.describe('KEEPALIVE — online reliability (mock backend)', () => {
     await expect(page.locator('body')).toContainText('續期前的第一句話。');
     await mock.oaiInput('Second utterance after renewal.');
     await mock.oaiOutput('續期後的第二句話。');
-    await expect(page.getByTestId('caption-target')).toContainText('續期後的第二句話。', { timeout: 5_000 });
+    await expect(page.getByTestId('caption-target')).toContainText('續期後的第二句話。', {
+      timeout: 5_000,
+    });
   });
 
-  test('repeated renewals stay zero-gap — mic acquired once, status never blanks', async ({ page }) => {
+  test('repeated renewals stay zero-gap — mic acquired once, status never blanks', async ({
+    page,
+  }) => {
     await startOpenAI(page);
     const RENEWALS = 5;
 
@@ -281,7 +356,9 @@ test.describe('KEEPALIVE — online reliability (mock backend)', () => {
       // The post-renewal session still captions.
       await mock.oaiInput(`Point number ${i}.`);
       await mock.oaiOutput(`第 ${i} 點。`);
-      await expect(page.getByTestId('caption-target')).toContainText(`第 ${i} 點。`, { timeout: 5_000 });
+      await expect(page.getByTestId('caption-target')).toContainText(`第 ${i} 點。`, {
+        timeout: 5_000,
+      });
     }
 
     expect(await mock.oaiPeerCount()).toBe(RENEWALS + 1);
@@ -290,7 +367,9 @@ test.describe('KEEPALIVE — online reliability (mock backend)', () => {
     await expect(page.locator('body')).toContainText('開場致詞。');
   });
 
-  test('OpenAI failure keeps retrying without failover when Gemini is unavailable', async ({ page }) => {
+  test('OpenAI failure keeps retrying without failover when Gemini is unavailable', async ({
+    page,
+  }) => {
     mock.setAvailableProviders(['openai']);
     await startOpenAI(page);
 
@@ -307,7 +386,9 @@ test.describe('KEEPALIVE — online reliability (mock backend)', () => {
     expect(await mock.geminiOpenSockets()).toBe(0);
   });
 
-  test('OpenAI renewal failure surfaces failover banner → switch to Gemini keeps transcript', async ({ page }) => {
+  test('OpenAI renewal failure surfaces failover banner → switch to Gemini keeps transcript', async ({
+    page,
+  }) => {
     // Initial connect succeeds (incl. the idle pre-mint).
     await startOpenAI(page);
 

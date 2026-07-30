@@ -17,6 +17,11 @@ import { registerGemini } from './routes/gemini.js';
 // plain JSON logs (also more parseable for log shipping). Source-run
 // (`pnpm dev`) defaults to pretty.
 function buildLoggerConfig() {
+  // Test suites create and close many Fastify instances in one process.
+  // Starting pino-pretty for each instance installs a process.exit listener
+  // that the transport does not remove on app.close(), producing a real
+  // listener leak and noisy test output. Production/dev logging is unchanged.
+  if (process.env.NODE_ENV === 'test') return false;
   const format = (process.env.LOG_FORMAT ?? 'pretty').toLowerCase();
   if (format === 'json') return { level: 'info' };
   return {
@@ -76,7 +81,11 @@ export async function buildApp(): Promise<FastifyInstance> {
           return reply.code(404).send({ error: 'Not found' });
         }
         const urlPath = req.url.split('?', 1)[0] ?? req.url;
-        if (urlPath.startsWith('/session') || urlPath.startsWith('/healthz') || urlPath.startsWith('/translate')) {
+        if (
+          urlPath.startsWith('/session') ||
+          urlPath.startsWith('/healthz') ||
+          urlPath.startsWith('/translate')
+        ) {
           return reply.code(404).send({ error: 'Not found' });
         }
         const lastSegment = urlPath.split('/').pop() ?? '';

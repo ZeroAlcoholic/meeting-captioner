@@ -42,7 +42,9 @@ import torch
 try:
     from faster_whisper import WhisperModel
 except ImportError:
-    raise SystemExit("faster-whisper not installed. Run: pip install faster-whisper")
+    raise SystemExit(
+        "faster-whisper not installed. Run: pip install faster-whisper"
+    ) from None
 
 try:
     import jiwer

@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ONLINE_SERVICE_URL } from '../config.js';
 import { settingsStore, useSettingsStore } from '../settings/use-settings-store.js';
-import { OpenAIRealtimeProvider, prewarmOpenAISession, sessionRequestBody } from './openai-realtime-provider.js';
+import {
+  OpenAIRealtimeProvider,
+  prewarmOpenAISession,
+  sessionRequestBody,
+} from './openai-realtime-provider.js';
 import { MicrophoneAudioProvider } from './microphone-audio-provider.js';
 import { DisplayMediaAudioProvider } from './display-media-audio-provider.js';
 import { createStoreBoundHandlers } from './coalesce-handlers.js';
@@ -95,10 +99,14 @@ export function useOpenAIRealtime(): UseOpenAIRealtime {
   useEffect(() => {
     if (modeId !== 'online_full' || onlineProvider !== 'openai') return;
     if (apiKeyStatus !== 'present' || status === 'running') return;
-    const { langPair, includeSourceTranscript, micDistance, audioSource } = settingsStore.getState();
+    const { langPair, includeSourceTranscript, micDistance, audioSource } =
+      settingsStore.getState();
     // Mirror the live path's effective mic distance (system capture → 'off').
     const effective = audioSource === 'system' ? 'off' : micDistance;
-    prewarmOpenAISession(SESSION_URL, sessionRequestBody(langPair, includeSourceTranscript, effective));
+    prewarmOpenAISession(
+      SESSION_URL,
+      sessionRequestBody(langPair, includeSourceTranscript, effective),
+    );
   }, [apiKeyStatus, modeId, onlineProvider, status]);
 
   const start = useCallback(async (): Promise<boolean> => {
@@ -125,7 +133,8 @@ export function useOpenAIRealtime(): UseOpenAIRealtime {
     statusUnsubRef.current?.();
     statusUnsubRef.current = null;
 
-    const { langPair, includeSourceTranscript, micDistance, audioSource } = settingsStore.getState();
+    const { langPair, includeSourceTranscript, micDistance, audioSource } =
+      settingsStore.getState();
     const handlers = createStoreBoundHandlers();
     // Intercept health failure events so audio-layer errors (mic permission
     // denied, device disconnect) and transport errors surface in the React

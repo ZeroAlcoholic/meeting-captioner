@@ -132,7 +132,14 @@ export function useHybridMode() {
     };
 
     // translate: false — offline service does STT only; browser handles MT
-    const provider = new OfflineSTTProvider(WS_URL, hybridHandlers, undefined, langPair, audioSource, false);
+    const provider = new OfflineSTTProvider(
+      WS_URL,
+      hybridHandlers,
+      undefined,
+      langPair,
+      audioSource,
+      false,
+    );
     providerRef.current = provider;
     setStatus('running');
 

@@ -9,7 +9,12 @@ import type {
 } from '@meeting-audio/contracts';
 import { MicrophoneAudioProvider } from './microphone-audio-provider.js';
 import { WarmTokenCache } from './token-prewarm.js';
-import type { AudioSource, CaptionProvider, CaptionProviderHandlers, ProviderStatus } from './types.js';
+import type {
+  AudioSource,
+  CaptionProvider,
+  CaptionProviderHandlers,
+  ProviderStatus,
+} from './types.js';
 
 // gpt-realtime-translate only outputs 'zh' (Simplified). Convert to Traditional Chinese (Taiwan).
 const s2tw = Converter({ from: 'cn', to: 'tw' });
@@ -133,11 +138,7 @@ const warmKey = (url: string, body: SessionRequestBody): string => `${url}|${JSO
  * (see WarmTokenCache). Online-only caller (the hook gates on apiKeyStatus).
  */
 export function prewarmOpenAISession(url: string, body: SessionRequestBody): void {
-  void warmSession.prewarm(
-    warmKey(url, body),
-    () => postSession(url, body),
-    sessionExpiryMs,
-  );
+  void warmSession.prewarm(warmKey(url, body), () => postSession(url, body), sessionExpiryMs);
 }
 
 /** Test hook: drop any pre-warmed token so it can't leak across tests. */
@@ -254,7 +255,11 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
     if (this._status === s) return;
     this._status = s;
     for (const fn of this.statusListeners) {
-      try { fn(s); } catch { /* listener errors must not corrupt provider state */ }
+      try {
+        fn(s);
+      } catch {
+        /* listener errors must not corrupt provider state */
+      }
     }
   }
 
@@ -338,15 +343,15 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       const token = await tokenPromise;
       if (token.ok === false) {
         conn.pc.close();
-        throw token.error instanceof Error
-          ? token.error
-          : new Error('Session token fetch failed');
+        throw token.error instanceof Error ? token.error : new Error('Session token fetch failed');
       }
       const sessionData = token.value;
-      if (sessionData === null || aborted()) { conn.pc.close(); return; }
+      if (sessionData === null || aborted()) {
+        conn.pc.close();
+        return;
+      }
       const { client_secret } = sessionData;
-      this.renewDelayMs =
-        sessionData.session_renewal_recommended_ms ?? DEFAULT_SESSION_RENEW_MS;
+      this.renewDelayMs = sessionData.session_renewal_recommended_ms ?? DEFAULT_SESSION_RENEW_MS;
 
       // Guard against an already-expired or imminently-expiring token.
       // expires_at is Unix seconds; if less than 60 s remain, skip SDP
@@ -360,7 +365,11 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
         const remainingMs = client_secret.expires_at * 1000 - Date.now();
         if (remainingMs < 60_000) {
           conn.pc.close(); // discard the un-exchanged peer; renewSession rebuilds
-          this.emitHealth('transport', 'reconnecting', 'Session token near expiry — refreshing before connect');
+          this.emitHealth(
+            'transport',
+            'reconnecting',
+            'Session token near expiry — refreshing before connect',
+          );
           void this.renewSession();
           return;
         }
@@ -451,9 +460,15 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
     stream.getAudioTracks().forEach((track) => pc.addTrack(track, stream));
 
     const offer = await pc.createOffer();
-    if (aborted()) { pc.close(); return null; }
+    if (aborted()) {
+      pc.close();
+      return null;
+    }
     await pc.setLocalDescription(offer); // ICE candidate gathering starts here
-    if (aborted()) { pc.close(); return null; }
+    if (aborted()) {
+      pc.close();
+      return null;
+    }
     return { pc, dc, offerSdp: offer.sdp ?? '' };
   }
 
@@ -502,7 +517,10 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
     if (conn === null) return null;
     try {
       const ok = await this.exchangeSdp(conn.pc, conn.offerSdp, secretValue);
-      if (!ok) { conn.pc.close(); return null; }
+      if (!ok) {
+        conn.pc.close();
+        return null;
+      }
       return { pc: conn.pc, dc: conn.dc };
     } catch (err) {
       conn.pc.close();
@@ -677,9 +695,7 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
     // Format "30 sec" for sub-minute delays, "N min" for the rest. Operator
     // confidence drops if we report "auto-retry in 0 min" for a 30 s delay.
     const humanDelay =
-      delay < 60_000
-        ? `${Math.round(delay / 1000)} sec`
-        : `${Math.round(delay / 60_000)} min`;
+      delay < 60_000 ? `${Math.round(delay / 1000)} sec` : `${Math.round(delay / 60_000)} min`;
     const detail = reason ? `${reason}; ` : '';
     this.emitHealth(
       'transport',
@@ -728,7 +744,11 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       this.emitHealth('transport', 'reconnecting', 'Peer connection failed — rebuilding session');
       void this.renewSession();
     } else if (state === 'disconnected') {
-      this.emitHealth('transport', 'reconnecting', 'Peer connection disconnected — waiting for recovery');
+      this.emitHealth(
+        'transport',
+        'reconnecting',
+        'Peer connection disconnected — waiting for recovery',
+      );
     }
   }
 

@@ -11,6 +11,7 @@
 P1 left the UI shell complete: ScenarioPicker, ModeSelector, HealthRow, AudioLevelMeter all driven by fake events. P2 wires a real mic → OpenAI Realtime path so "Start Real" produces live English captions with Traditional Chinese translation.
 
 **CLAUDE.md non-negotiables:**
+
 - API key stays server-side — browser receives ephemeral `client_secret` only
 - Caption path is sacred — real provider failure is visible via HealthRow, fake replay remains available
 - Mode switch must not clear transcript history
@@ -47,14 +48,14 @@ Server (services/online)
 
 ## 3. Event Mapping
 
-| OpenAI Realtime event | Normalized event |
-|---|---|
-| `conversation.item.input_audio_transcription.delta` | TranscriptEvent { status:'partial' } |
-| `conversation.item.input_audio_transcription.completed` | TranscriptEvent { status:'final' } |
-| `input_audio_buffer.committed` | track lastInputItemId for translation correlation |
-| `response.text.delta` | TranslationEvent { status:'draft', targetText:accumulated } |
-| `response.text.done` | TranslationEvent { status:'final' } |
-| `error` | HealthEvent { state:'api_error' } |
+| OpenAI Realtime event                                   | Normalized event                                            |
+| ------------------------------------------------------- | ----------------------------------------------------------- |
+| `conversation.item.input_audio_transcription.delta`     | TranscriptEvent { status:'partial' }                        |
+| `conversation.item.input_audio_transcription.completed` | TranscriptEvent { status:'final' }                          |
+| `input_audio_buffer.committed`                          | track lastInputItemId for translation correlation           |
+| `response.text.delta`                                   | TranslationEvent { status:'draft', targetText:accumulated } |
+| `response.text.done`                                    | TranslationEvent { status:'final' }                         |
+| `error`                                                 | HealthEvent { state:'api_error' }                           |
 
 ---
 
@@ -90,15 +91,15 @@ docs/
 
 ## 5. Confirmed Decisions (P2-D)
 
-| # | Topic | Decision |
-|---|---|---|
-| P2-D1 | OpenAI SDK | Use `openai` npm package in services/online only |
-| P2-D2 | Translation method | Model `response.text` events (zh-TW only); Whisper for English transcript |
-| P2-D3 | App integration | Two independent hooks (fake + realtime), mutually exclusive start |
-| P2-D4 | Key availability check | GET /session/info on hook mount; drives button visibility |
-| P2-D5 | Silence detection | 5s no speech_started → emit audio:silence_detected (non-fatal) |
-| P2-D6 | ICE reconnect | disconnected → 3s → restartIce; failed → emit failed, fallback available |
-| P2-D7 | Caption clear on Start Real | clear() on start (same as Start Fake) |
+| #     | Topic                       | Decision                                                                  |
+| ----- | --------------------------- | ------------------------------------------------------------------------- |
+| P2-D1 | OpenAI SDK                  | Use `openai` npm package in services/online only                          |
+| P2-D2 | Translation method          | Model `response.text` events (zh-TW only); Whisper for English transcript |
+| P2-D3 | App integration             | Two independent hooks (fake + realtime), mutually exclusive start         |
+| P2-D4 | Key availability check      | GET /session/info on hook mount; drives button visibility                 |
+| P2-D5 | Silence detection           | 5s no speech_started → emit audio:silence_detected (non-fatal)            |
+| P2-D6 | ICE reconnect               | disconnected → 3s → restartIce; failed → emit failed, fallback available  |
+| P2-D7 | Caption clear on Start Real | clear() on start (same as Start Fake)                                     |
 
 ---
 
@@ -125,10 +126,10 @@ docs/
 
 ## 8. After P2
 
-| Phase | Focus |
-|---|---|
+| Phase  | Focus                                                                       |
+| ------ | --------------------------------------------------------------------------- |
 | **P3** | WhisperLiveKit spike + WASAPI loopback (PyAudioWPatch) + OfflineSTTProvider |
-| P4 | Argos Translate + Traditional Chinese post-process + glossary |
-| P5 | Summary draft / refined / stable pipeline |
-| P6 | Reliability + long-running memory stability |
-| P7 | Electron packaging |
+| P4     | Argos Translate + Traditional Chinese post-process + glossary               |
+| P5     | Summary draft / refined / stable pipeline                                   |
+| P6     | Reliability + long-running memory stability                                 |
+| P7     | Electron packaging                                                          |

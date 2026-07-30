@@ -1,11 +1,11 @@
 import type { CaptionSegment, CaptionTranslation } from '../store/caption-store.js';
 
 export interface Paragraph {
-  id: string;            // segmentId of the FIRST segment in the paragraph
-  text: string;          // merged text for this side
-  startMs: number;       // startMs of the first segment
-  endMs: number;         // endMs (or startMs) of the last segment
-  confLow: boolean;      // true if any constituent segment had confidence < threshold
+  id: string; // segmentId of the FIRST segment in the paragraph
+  text: string; // merged text for this side
+  startMs: number; // startMs of the first segment
+  endMs: number; // endMs (or startMs) of the last segment
+  confLow: boolean; // true if any constituent segment had confidence < threshold
 }
 
 // Sentence terminators per language. ZH includes 「。！？…」, EN includes `.!?…`.

@@ -67,10 +67,12 @@ Use three separated layers:
 Use this unless there is a documented decision to change:
 
 Desktop / Deployment:
+
 - Electron for stable packaged desktop distribution
 - Local web app is acceptable during MVP development
 
 Renderer:
+
 - Vite
 - React
 - TypeScript
@@ -78,12 +80,14 @@ Renderer:
 - no large UI framework unless explicitly justified
 
 Online service:
+
 - Node.js 20+
 - Fastify
 - server-side OpenAI session endpoints
 - no OpenAI API key in browser code
 
 Offline service:
+
 - Python 3.11+
 - WhisperLiveKit first
 - custom FastAPI + faster-whisper only if needed
@@ -91,6 +95,7 @@ Offline service:
 - Argos Translate for offline MVP translation
 
 Testing:
+
 - Playwright for real browser verification
 - Vitest for frontend logic
 - pytest for offline engine
@@ -262,9 +267,11 @@ Never:
 - silently store meeting transcripts persistently
 
 Default retention:
+
 - in-memory only
 
 Allowed retention:
+
 - explicit user export
 - later local-only autosave after user opt-in
 
@@ -530,12 +537,14 @@ Do not jump to packaging before the local web MVP is stable.
 ## Reference Project Positioning
 
 WhisperLiveKit:
+
 - use as first offline STT backend candidate
 - use as streaming STT architecture reference
 - wrap behind our provider abstraction
 - do not let it dictate the UI
 
 jt-live-whisper:
+
 - use as product/audio-source reference
 - use for Windows WASAPI loopback behavior reference
 - use for local-first subtitle workflow reference
@@ -543,6 +552,7 @@ jt-live-whisper:
 - exclude China-origin model options
 
 OpenTransLive:
+
 - use as broadcast/session/audience-view reference
 - useful later for QR/mobile/multi-view event mode
 - not the core caption engine

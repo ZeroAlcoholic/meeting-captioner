@@ -7,12 +7,12 @@
 
 ## Scenarios (UI presets)
 
-| Scenario | Sources | Policy | UI default |
-|----------|---------|--------|------------|
-| **Physical Meeting** | microphone | exclusive | mic only |
-| **Online Meeting Caption Box** | browser tab audio / browser system audio / Windows loopback | exclusive | tab audio (web) or loopback (desktop) |
-| **Hybrid Meeting** | remote meeting audio + local mic | separate_tracks | both, separate streams |
-| **Advanced Manual** | user picks | exclusive / separate_tracks / mixed | (none) |
+| Scenario                       | Sources                                                     | Policy                              | UI default                            |
+| ------------------------------ | ----------------------------------------------------------- | ----------------------------------- | ------------------------------------- |
+| **Physical Meeting**           | microphone                                                  | exclusive                           | mic only                              |
+| **Online Meeting Caption Box** | browser tab audio / browser system audio / Windows loopback | exclusive                           | tab audio (web) or loopback (desktop) |
+| **Hybrid Meeting**             | remote meeting audio + local mic                            | separate_tracks                     | both, separate streams                |
+| **Advanced Manual**            | user picks                                                  | exclusive / separate_tracks / mixed | (none)                                |
 
 ### Why scenarios
 

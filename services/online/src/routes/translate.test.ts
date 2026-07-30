@@ -55,7 +55,13 @@ describe('POST /translate', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/translate',
-      payload: { segmentId: 's1', text: 'Hello', sourceLang: 'en', targetLang: 'zh-TW', extra: true },
+      payload: {
+        segmentId: 's1',
+        text: 'Hello',
+        sourceLang: 'en',
+        targetLang: 'zh-TW',
+        extra: true,
+      },
     });
     expect(res.statusCode).toBe(400);
   });
@@ -93,11 +99,14 @@ describe('POST /translate', () => {
 
   it('returns 502 when OpenAI returns a non-2xx response', async () => {
     mockConfig.OPENAI_API_KEY = 'sk-test';
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-      ok: false,
-      status: 500,
-      text: async () => 'internal error',
-    }));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 500,
+        text: async () => 'internal error',
+      }),
+    );
     const app = await makeApp();
     const res = await app.inject({
       method: 'POST',
@@ -121,7 +130,9 @@ describe('POST /translate', () => {
       url: '/translate',
       payload: { segmentId: 's2', text: '要保人', sourceLang: 'zh', targetLang: 'en' },
     });
-    const reqBody = JSON.parse((mockFetch.mock.calls[0] as [string, RequestInit])[1].body as string);
+    const reqBody = JSON.parse(
+      (mockFetch.mock.calls[0] as [string, RequestInit])[1].body as string,
+    );
     expect(reqBody.messages[0].content).toContain('English');
     expect(reqBody.messages[0].content).not.toContain('Traditional Chinese');
   });

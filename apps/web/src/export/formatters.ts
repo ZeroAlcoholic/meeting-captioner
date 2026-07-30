@@ -54,7 +54,10 @@ function resolveSrtRange(
   }
   const next = segments[index + 1];
   if (next && next.startMs > seg.startMs) {
-    return { start: startElapsed, end: Math.max(startElapsed + 1, elapsedMs(next.startMs, sessionStartMs) - 1) };
+    return {
+      start: startElapsed,
+      end: Math.max(startElapsed + 1, elapsedMs(next.startMs, sessionStartMs) - 1),
+    };
   }
   return { start: startElapsed, end: startElapsed + 2000 };
 }
@@ -184,19 +187,32 @@ export function buildExport(
   opts?: ExportOptions,
 ): ExportArtifact {
   const stampSource = meta.sessionStartMs ?? Date.now();
-  const stamp = new Date(stampSource)
-    .toISOString()
-    .replace(/[:.]/g, '-')
-    .replace(/Z$/, '');
+  const stamp = new Date(stampSource).toISOString().replace(/[:.]/g, '-').replace(/Z$/, '');
   const base = `meeting-${stamp}`;
   switch (format) {
     case 'txt':
-      return { filename: `${base}.txt`, mime: 'text/plain;charset=utf-8', body: toPlainText(meta, opts) };
+      return {
+        filename: `${base}.txt`,
+        mime: 'text/plain;charset=utf-8',
+        body: toPlainText(meta, opts),
+      };
     case 'srt':
-      return { filename: `${base}.srt`, mime: 'application/x-subrip;charset=utf-8', body: toSrt(meta, opts) };
+      return {
+        filename: `${base}.srt`,
+        mime: 'application/x-subrip;charset=utf-8',
+        body: toSrt(meta, opts),
+      };
     case 'md':
-      return { filename: `${base}.md`, mime: 'text/markdown;charset=utf-8', body: toMarkdown(meta, opts) };
+      return {
+        filename: `${base}.md`,
+        mime: 'text/markdown;charset=utf-8',
+        body: toMarkdown(meta, opts),
+      };
     case 'json':
-      return { filename: `${base}.json`, mime: 'application/json;charset=utf-8', body: toJson(meta) };
+      return {
+        filename: `${base}.json`,
+        mime: 'application/json;charset=utf-8',
+        body: toJson(meta),
+      };
   }
 }

@@ -1,4 +1,5 @@
 import type { Page } from '@playwright/test';
+import geminiGolden from '../fixtures/upstream-contracts/gemini-live-translate.json' with { type: 'json' };
 
 /**
  * In-browser mock backend for the two online realtime providers, plus a Node
@@ -29,9 +30,21 @@ import type { Page } from '@playwright/test';
 
 const INIT_SCRIPT = `
 (function () {
+  var geminiSetupComplete = ${JSON.stringify(geminiGolden.serverFrame)};
   var mock = {
     getUserMediaCalls: 0,
     getDisplayMediaCalls: 0,
+    streams: [],
+    activeTrackCount: function () {
+      var count = 0;
+      for (var i = 0; i < this.streams.length; i++) {
+        var tracks = this.streams[i].getTracks();
+        for (var j = 0; j < tracks.length; j++) {
+          if (tracks[j].readyState === 'live') count++;
+        }
+      }
+      return count;
+    },
     audioAmplitude: 0.05, // ~ -29 dBFS RMS → counts as "audio active"
     oai: {
       pcs: [],
@@ -48,6 +61,13 @@ const INIT_SCRIPT = `
         return false;
       },
       dcCount: function () { return this.dcs.length; },
+      openPeerCount: function () {
+        var count = 0;
+        for (var i = 0; i < this.pcs.length; i++) {
+          if (this.pcs[i].connectionState !== 'closed') count++;
+        }
+        return count;
+      },
       ready: function () {
         for (var i = this.dcs.length - 1; i >= 0; i--) {
           if (this.dcs[i].readyState === 'open' && this.dcs[i].onmessage) return true;
@@ -92,13 +112,15 @@ const INIT_SCRIPT = `
     var audioTracks = [audioTrack];
     var videoTracks = kind === 'display' ? [videoTrack] : [];
     var tracks = audioTracks.concat(videoTracks);
-    return {
+    var stream = {
       id: 'fake-stream',
       getTracks: function () { return tracks; },
       getAudioTracks: function () { return audioTracks; },
       getVideoTracks: function () { return videoTracks; },
       addTrack: function () {}, removeTrack: function () {},
     };
+    mock.streams.push(stream);
+    return stream;
   }
   var md = {
     getUserMedia: function () { mock.getUserMediaCalls++; return Promise.resolve(fakeStream('user')); },
@@ -210,7 +232,7 @@ const INIT_SCRIPT = `
     // so the happy-path session goes "connected" without per-test plumbing.
     if (mock.gemini.autoSetup && typeof data === 'string' && data.indexOf('"setup"') !== -1) {
       var self = this;
-      setTimeout(function () { self._emit({ setupComplete: {} }); }, 0);
+      setTimeout(function () { self._emit(geminiSetupComplete); }, 0);
     }
   };
   FakeWS.prototype._emit = function (obj) {
@@ -250,6 +272,10 @@ export interface OnlineMockController {
   displayMediaAcquisitions(): Promise<number>;
   /** Number of OpenAI data channels created (one per peer build). */
   oaiPeerCount(): Promise<number>;
+  /** Number of OpenAI peers that have not been closed. */
+  oaiOpenPeers(): Promise<number>;
+  /** Number of currently-live mock media tracks. */
+  activeCaptureTracks(): Promise<number>;
   /** True once the active DataChannel is open AND wired (safe to emit events). */
   oaiReady(): Promise<boolean>;
   /** How many times the /session broker has been hit (for pre-mint assertions). */
@@ -292,12 +318,21 @@ export async function installOnlineMocks(page: Page): Promise<OnlineMockControll
   );
   await page.route(/\/session\/gemini$/, (route) => {
     state.geminiSessionCalls += 1;
-    return route.fulfill({ json: { token: 'gemini-mock-token', model: 'gemini-3.5-live-translate-preview' } });
+    return route.fulfill({
+      json: {
+        token: 'gemini-mock-token',
+        model: 'models/gemini-3.5-live-translate-preview',
+      },
+    });
   });
   await page.route(/\/session$/, (route) => {
     state.oaiSessionCalls += 1;
     if (state.oaiSessionFailing) {
-      return route.fulfill({ status: 500, contentType: 'text/plain', body: 'mock /session failure' });
+      return route.fulfill({
+        status: 500,
+        contentType: 'text/plain',
+        body: 'mock /session failure',
+      });
     }
     return route.fulfill({
       json: {
@@ -318,13 +353,21 @@ export async function installOnlineMocks(page: Page): Promise<OnlineMockControll
   return {
     oaiEmit: (obj) => page.evaluate((o) => window.__mock.oai.emit(o), obj),
     oaiInput: async (delta) => {
-      await page.evaluate((d) => window.__mock.oai.emit({ type: 'session.input_transcript.delta', delta: d }), delta);
+      await page.evaluate(
+        (d) => window.__mock.oai.emit({ type: 'session.input_transcript.delta', delta: d }),
+        delta,
+      );
     },
     oaiOutput: async (delta) => {
-      await page.evaluate((d) => window.__mock.oai.emit({ type: 'session.output_transcript.delta', delta: d }), delta);
+      await page.evaluate(
+        (d) => window.__mock.oai.emit({ type: 'session.output_transcript.delta', delta: d }),
+        delta,
+      );
     },
     oaiComplete: async () => {
-      await page.evaluate(() => window.__mock.oai.emit({ type: 'response.output_audio_transcript.done' }));
+      await page.evaluate(() =>
+        window.__mock.oai.emit({ type: 'response.output_audio_transcript.done' }),
+      );
     },
     oaiClosed: async () => {
       await page.evaluate(() => window.__mock.oai.emit({ type: 'session.closed' }));
@@ -335,13 +378,17 @@ export async function installOnlineMocks(page: Page): Promise<OnlineMockControll
     oaiSessionCalls: () => state.oaiSessionCalls,
     geminiSessionCalls: () => state.geminiSessionCalls,
     oaiAddedTrackKinds: () => page.evaluate(() => window.__mock.oai.addedTrackKinds.slice()),
-    micAcquisitions: () => page.evaluate(() => window.__mock.getUserMediaCalls + window.__mock.getDisplayMediaCalls),
+    micAcquisitions: () =>
+      page.evaluate(() => window.__mock.getUserMediaCalls + window.__mock.getDisplayMediaCalls),
     userMediaAcquisitions: () => page.evaluate(() => window.__mock.getUserMediaCalls),
     displayMediaAcquisitions: () => page.evaluate(() => window.__mock.getDisplayMediaCalls),
     oaiPeerCount: () => page.evaluate(() => window.__mock.oai.dcCount()),
+    oaiOpenPeers: () => page.evaluate(() => window.__mock.oai.openPeerCount()),
+    activeCaptureTracks: () => page.evaluate(() => window.__mock.activeTrackCount()),
     oaiReady: () => page.evaluate(() => window.__mock.oai.ready()),
     geminiSend: (obj) => page.evaluate((o) => window.__mock.gemini.send(o), obj),
-    geminiServerContent: (sc) => page.evaluate((s) => window.__mock.gemini.send({ serverContent: s }), sc),
+    geminiServerContent: (sc) =>
+      page.evaluate((s) => window.__mock.gemini.send({ serverContent: s }), sc),
     geminiClose: () => page.evaluate(() => window.__mock.gemini.close()),
     geminiOpenSockets: () => page.evaluate(() => window.__mock.gemini.openCount()),
     setAvailableProviders: (providers) => {
@@ -359,11 +406,13 @@ export async function installOnlineMocks(page: Page): Promise<OnlineMockControll
 interface MockGlobal {
   getUserMediaCalls: number;
   getDisplayMediaCalls: number;
+  activeTrackCount(): number;
   audioAmplitude: number;
   oai: {
     addedTrackKinds: Array<string | undefined>;
     emit(obj: Record<string, unknown>): boolean;
     dcCount(): number;
+    openPeerCount(): number;
     ready(): boolean;
   };
   gemini: { send(obj: Record<string, unknown>): boolean; close(): boolean; openCount(): number };

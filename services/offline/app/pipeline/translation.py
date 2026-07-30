@@ -15,7 +15,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .events import translation_event
-from .postprocess import apply_source_glossary, process as postprocess_zh, restore_placeholders
+from .postprocess import apply_source_glossary, restore_placeholders
+from .postprocess import process as postprocess_zh
 
 logger = logging.getLogger(__name__)
 
@@ -136,7 +137,7 @@ async def translate(
     loop = asyncio.get_running_loop()
     try:
         ok = await _run_in_executor_with_timeout(loop, _load_once, direction)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.error("MT model load timed out (direction=%s)", direction)
         return None
     if not ok:
@@ -168,8 +169,12 @@ async def translate(
             target_language=target_language,
             source_confidence=source_confidence,
         )
-    except asyncio.TimeoutError:
-        logger.error("Translation timed out (>%.1fs) for segment %s", _TRANSLATE_TIMEOUT_S, segment_id)
+    except TimeoutError:
+        logger.error(
+            "Translation timed out (>%.1fs) for segment %s",
+            _TRANSLATE_TIMEOUT_S,
+            segment_id,
+        )
         return None
     except Exception:
         logger.exception("Translation error for segment %s", segment_id)

@@ -8,13 +8,37 @@ import { LatencyMonitor } from './latency-monitor.js';
 function health(state: HealthEvent['state']): HealthEvent {
   return { kind: 'health', component: 'transport', state, timestamp: '2026-06-14T00:00:00.000Z' };
 }
-function transcript(provider: string, segmentId: string, status: TranscriptEvent['status']): TranscriptEvent {
-  return { kind: 'transcript', provider, mode: 'online_full', source: 'microphone', segmentId, status, text: 'x', startMs: 0 };
-}
-function translation(provider: string, sourceSegmentId: string, status: TranslationEvent['status']): TranslationEvent {
+function transcript(
+  provider: string,
+  segmentId: string,
+  status: TranscriptEvent['status'],
+): TranscriptEvent {
   return {
-    kind: 'translation', provider, mode: 'online_full', sourceSegmentId, status,
-    sourceText: 'x', targetText: 'y', sourceLanguage: 'en', targetLanguage: 'zh-Hant',
+    kind: 'transcript',
+    provider,
+    mode: 'online_full',
+    source: 'microphone',
+    segmentId,
+    status,
+    text: 'x',
+    startMs: 0,
+  };
+}
+function translation(
+  provider: string,
+  sourceSegmentId: string,
+  status: TranslationEvent['status'],
+): TranslationEvent {
+  return {
+    kind: 'translation',
+    provider,
+    mode: 'online_full',
+    sourceSegmentId,
+    status,
+    sourceText: 'x',
+    targetText: 'y',
+    sourceLanguage: 'en',
+    targetLanguage: 'zh-Hant',
     updatedAt: '2026-06-14T00:00:00.000Z',
   };
 }

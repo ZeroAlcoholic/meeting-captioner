@@ -11,6 +11,7 @@
 ## 1. Context
 
 P0 left `apps/web` at "click Start Fake Replay → see captions". Missing:
+
 - No scenario picker (CLAUDE.md L181-199 mandates scenario-based)
 - No mode selector (CLAUDE.md L146-156: Online Full / Hybrid Privacy / Full Offline)
 - `HealthEvent` schema existed but nothing surfaced it
@@ -24,17 +25,17 @@ P1 builds the UI shell so P2 (OpenAI Realtime) and P3 (WhisperLiveKit + WASAPI l
 
 ## 2. Scope
 
-| In | Out |
-|----|-----|
-| settings store (scenario / mode / health / audioLevel) | localStorage persistence (P5/P6) |
-| ScenarioPicker (4 presets, Advanced disabled) | Real audio source switching (P2/P3) |
-| ModeSelector (3 modes) | Real provider switching (P2/P3) |
-| HealthRow (6 components, 13-state color map) | Real health source (P2/P3) |
-| AudioLevelMeter (RMS bar + peak marker + dB) | Real microphone / Web Audio capture (P2) |
-| FakeReplayProvider extended for health + audio_level | Any real OpenAI / Whisper / Argos |
-| App.tsx refactor: collapsible SettingsPanel + CaptionBoard | Glossary, retention, language settings |
-| Vitest for store transitions | Long-running stability tests (P6) |
-| Playwright: scenario switch, mode switch, health surface | |
+| In                                                         | Out                                      |
+| ---------------------------------------------------------- | ---------------------------------------- |
+| settings store (scenario / mode / health / audioLevel)     | localStorage persistence (P5/P6)         |
+| ScenarioPicker (4 presets, Advanced disabled)              | Real audio source switching (P2/P3)      |
+| ModeSelector (3 modes)                                     | Real provider switching (P2/P3)          |
+| HealthRow (6 components, 13-state color map)               | Real health source (P2/P3)               |
+| AudioLevelMeter (RMS bar + peak marker + dB)               | Real microphone / Web Audio capture (P2) |
+| FakeReplayProvider extended for health + audio_level       | Any real OpenAI / Whisper / Argos        |
+| App.tsx refactor: collapsible SettingsPanel + CaptionBoard | Glossary, retention, language settings   |
+| Vitest for store transitions                               | Long-running stability tests (P6)        |
+| Playwright: scenario switch, mode switch, health surface   |                                          |
 
 ---
 
@@ -93,15 +94,15 @@ tests/e2e/
 
 ## 5. Confirmed Decisions (P1-D)
 
-| # | Topic | Decision |
-|---|-------|----------|
-| P1-D1 | settings vs caption store | Separate stores |
-| P1-D2 | Caption preserved on mode/scenario switch | Yes (CLAUDE.md hard rule) |
-| P1-D3 | Advanced scenario in P1 | Disabled with "(Available in P2/P3)" hint |
-| P1-D4 | AudioLevelMeter source | Fake events only (no mic permission yet) |
-| P1-D5 | Settings panel default | Collapsed |
-| P1-D6 | localStorage persistence | Not in P1 |
-| P1-D7 | Health dot click | `title` tooltip (state + message) |
+| #     | Topic                                     | Decision                                  |
+| ----- | ----------------------------------------- | ----------------------------------------- |
+| P1-D1 | settings vs caption store                 | Separate stores                           |
+| P1-D2 | Caption preserved on mode/scenario switch | Yes (CLAUDE.md hard rule)                 |
+| P1-D3 | Advanced scenario in P1                   | Disabled with "(Available in P2/P3)" hint |
+| P1-D4 | AudioLevelMeter source                    | Fake events only (no mic permission yet)  |
+| P1-D5 | Settings panel default                    | Collapsed                                 |
+| P1-D6 | localStorage persistence                  | Not in P1                                 |
+| P1-D7 | Health dot click                          | `title` tooltip (state + message)         |
 
 ---
 
@@ -126,11 +127,11 @@ tests/e2e/
 
 ## 8. After P1
 
-| Phase | Focus |
-|-------|-------|
+| Phase  | Focus                                                                                                                                      |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | **P2** | OpenAI Realtime mic path: real `/session` (issues client_secret), browser WebRTC, MicrophoneAudioProvider, real Health/Level from provider |
-| P3 | WhisperLiveKit spike + WASAPI loopback (PyAudioWPatch) + OfflineSTTProvider |
-| P4 | Argos Translate + Traditional Chinese post-process + glossary |
-| P5 | Summary draft / refined / stable pipeline |
-| P6 | Reliability + long-running memory stability |
-| P7 | Electron packaging |
+| P3     | WhisperLiveKit spike + WASAPI loopback (PyAudioWPatch) + OfflineSTTProvider                                                                |
+| P4     | Argos Translate + Traditional Chinese post-process + glossary                                                                              |
+| P5     | Summary draft / refined / stable pipeline                                                                                                  |
+| P6     | Reliability + long-running memory stability                                                                                                |
+| P7     | Electron packaging                                                                                                                         |

@@ -25,11 +25,13 @@ Decision criteria (to be evaluated during P3 spike):
 ## Hard Rules (from CLAUDE.md)
 
 Forbidden pattern (do **not** implement):
+
 ```
 audio chunk → transcribe independently → render
 ```
 
 Required pattern:
+
 ```
 audio stream → VAD → rolling buffer → streaming policy → partial / revised / final
 ```
@@ -43,6 +45,7 @@ Whatever backend ships, it must expose itself to the UI as an
 (see [`ARCHITECTURE.md`](ARCHITECTURE.md) §4).
 
 Required methods (sketch):
+
 - `start(audioSource)`
 - `stop()`
 - `health(): HealthEvent`
@@ -54,7 +57,7 @@ Required methods (sketch):
 
 - Initial benchmark target: Whisper **small** (~500 MB) for English.
 - Stretch: medium / large-v3 if laptop hardware allows.
-- Model files live under `models/` (gitignored). Bootstrap will *not*
+- Model files live under `models/` (gitignored). Bootstrap will _not_
   download them automatically — manual step in RUNBOOK.
 
 ---

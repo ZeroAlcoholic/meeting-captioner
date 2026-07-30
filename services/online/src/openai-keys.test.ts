@@ -123,14 +123,10 @@ describe('fetchWithOpenAIKeyFailover', () => {
     mockConfig.OPENAI_API_KEY = 'sk-primary';
     mockConfig.OPENAI_API_KEY_AUDIO = 'sk-audio';
     // First call: primary 403 → audio ok → sticky audio.
-    await fetchWithOpenAIKeyFailover(async (key) =>
-      key === 'sk-primary' ? resp(403) : resp(200),
-    );
+    await fetchWithOpenAIKeyFailover(async (key) => (key === 'sk-primary' ? resp(403) : resp(200)));
     expect(activeOpenAIKeySlot()).toBe('audio');
     // Later the audio key is revoked → 401 → retried with primary, which now works.
-    const makeRequest = vi.fn(async (key: string) =>
-      key === 'sk-audio' ? resp(401) : resp(200),
-    );
+    const makeRequest = vi.fn(async (key: string) => (key === 'sk-audio' ? resp(401) : resp(200)));
     const { res, slot } = await fetchWithOpenAIKeyFailover(makeRequest);
     expect(res.status).toBe(200);
     expect(slot).toBe('primary');

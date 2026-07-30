@@ -1,0 +1,25 @@
+{
+  "provider": "gemini",
+  "model": "models/gemini-3.5-live-translate-preview",
+  "clientFrame": {
+    "setup": {
+      "model": "models/gemini-3.5-live-translate-preview",
+      "contextWindowCompression": {
+        "slidingWindow": {}
+      },
+      "sessionResumption": {},
+      "inputAudioTranscription": {},
+      "outputAudioTranscription": {},
+      "generationConfig": {
+        "responseModalities": ["AUDIO"],
+        "translationConfig": {
+          "targetLanguageCode": "zh-Hant",
+          "echoTargetLanguage": false
+        }
+      }
+    }
+  },
+  "serverFrame": {
+    "setupComplete": {}
+  }
+}

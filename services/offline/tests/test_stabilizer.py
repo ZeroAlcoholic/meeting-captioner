@@ -108,7 +108,10 @@ def test_stuck_partial_force_promoted_after_deadline():
     partials = [e for e in events if e["status"] == "partial"]
     assert len(finals) == 1, "deadline must force a final"
     assert finals[0]["text"] == "Talking continuously even more"
-    assert partials == [], "must NOT also emit a partial for the just-promoted segment (would ghost-rewrite livePartial)"
+    assert partials == [], (
+        "must NOT also emit a partial for the just-promoted segment "
+        "(would ghost-rewrite livePartial)"
+    )
     assert len(to_translate) == 1
 
 
@@ -126,7 +129,14 @@ def test_force_promoted_then_whl_completed_emits_continuation_slice():
     # t=13: deadline crossed, partial promoted to final (slice v1).
     with patch("app.pipeline.stabilizer.time.monotonic", return_value=13.0):
         events1, to_translate1 = s.feed(
-            [{"start": 0.0, "end": 13.0, "text": "Hello world this is the first half", "completed": False}],
+            [
+                {
+                    "start": 0.0,
+                    "end": 13.0,
+                    "text": "Hello world this is the first half",
+                    "completed": False,
+                }
+            ],
         )
     finals_v1 = [e for e in events1 if e["status"] == "final"]
     assert len(finals_v1) == 1

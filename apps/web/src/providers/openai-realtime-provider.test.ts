@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AudioLevelEvent, HealthEvent, TranscriptEvent, TranslationEvent } from '@meeting-audio/contracts';
+import type {
+  AudioLevelEvent,
+  HealthEvent,
+  TranscriptEvent,
+  TranslationEvent,
+} from '@meeting-audio/contracts';
 import type { CaptionProviderHandlers } from './types.js';
 import { OpenAIRealtimeProvider } from './openai-realtime-provider.js';
 
@@ -73,18 +78,27 @@ function makeFakeAnalyser() {
 
 function makeFakeAudioContext(analyser: AnalyserNode) {
   return class {
-    createMediaStreamSource() { return { connect() {} }; }
-    createAnalyser() { return analyser; }
-    close() { return Promise.resolve(); }
+    createMediaStreamSource() {
+      return { connect() {} };
+    }
+    createAnalyser() {
+      return analyser;
+    }
+    close() {
+      return Promise.resolve();
+    }
   } as unknown as typeof AudioContext;
 }
 
 function mockFetch(clientSecretValue = 'test-ephemeral-token') {
   vi.stubGlobal(
     'fetch',
-    vi.fn()
+    vi
+      .fn()
       .mockResolvedValueOnce(
-        new Response(JSON.stringify({ client_secret: { value: clientSecretValue } }), { status: 200 }),
+        new Response(JSON.stringify({ client_secret: { value: clientSecretValue } }), {
+          status: 200,
+        }),
       )
       .mockResolvedValueOnce(new Response('mock-answer-sdp', { status: 200 })),
   );
@@ -281,7 +295,9 @@ describe('OpenAIRealtimeProvider', () => {
     await provider.start();
     fireDCMessage(JSON.stringify({ type: 'session.input_transcript.delta', delta: 'Hello ' }));
     fireDCMessage(JSON.stringify({ type: 'session.input_transcript.delta', delta: 'world.' }));
-    fireDCMessage(JSON.stringify({ type: 'session.output_transcript.delta', delta: '你好，世界。' }));
+    fireDCMessage(
+      JSON.stringify({ type: 'session.output_transcript.delta', delta: '你好，世界。' }),
+    );
 
     // only partial/draft so far
     expect(transcripts.filter((t) => t.status === 'final')).toHaveLength(0);
@@ -335,9 +351,7 @@ describe('OpenAIRealtimeProvider', () => {
     // Pump a delta every 500 ms for 13 s — well under the 1 s debounce so
     // the segmentFlushTimer would NEVER fire on its own.
     for (let i = 0; i < 26; i++) {
-      fireDCMessage(
-        JSON.stringify({ type: 'session.input_transcript.delta', delta: `word${i} ` }),
-      );
+      fireDCMessage(JSON.stringify({ type: 'session.input_transcript.delta', delta: `word${i} ` }));
       await vi.advanceTimersByTimeAsync(500);
     }
 
@@ -406,7 +420,11 @@ describe('OpenAIRealtimeProvider', () => {
   it('zh-TW→en langPair emits correct source/target language metadata', async () => {
     mockFetch();
     const { handlers, translations } = makeHandlers();
-    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers, 'zh-TW→en');
+    const provider = new OpenAIRealtimeProvider(
+      'http://localhost:8787/session',
+      handlers,
+      'zh-TW→en',
+    );
 
     await provider.start();
     fireDCMessage(JSON.stringify({ type: 'session.output_transcript.delta', delta: 'hello' }));
@@ -444,7 +462,8 @@ describe('OpenAIRealtimeProvider', () => {
   it('initial SDP exchange failure closes the provisional peer connection', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn()
+      vi
+        .fn()
         .mockResolvedValueOnce(
           new Response(JSON.stringify({ client_secret: { value: 'tok' } }), { status: 200 }),
         )
@@ -457,7 +476,9 @@ describe('OpenAIRealtimeProvider', () => {
 
     expect(provider.status).toBe('stopped');
     expect(fakePCClose).toHaveBeenCalledTimes(1);
-    expect(healthEvents.find((e) => e.component === 'transport' && e.state === 'api_error')).toBeDefined();
+    expect(
+      healthEvents.find((e) => e.component === 'transport' && e.state === 'api_error'),
+    ).toBeDefined();
   });
 
   it('stop() called between fetch and SDP exchange short-circuits cleanly (no NPE, no misleading api_error)', async () => {
@@ -466,10 +487,13 @@ describe('OpenAIRealtimeProvider', () => {
     // stop. We block the SDP fetch on a never-resolving promise, call stop()
     // mid-flight, then resolve to let start() see status !== 'running'.
     let resolveSdp: ((r: Response) => void) | null = null;
-    const sdpPromise = new Promise<Response>((r) => { resolveSdp = r; });
+    const sdpPromise = new Promise<Response>((r) => {
+      resolveSdp = r;
+    });
     vi.stubGlobal(
       'fetch',
-      vi.fn()
+      vi
+        .fn()
         .mockResolvedValueOnce(
           new Response(JSON.stringify({ client_secret: { value: 'tok' } }), { status: 200 }),
         )
@@ -510,9 +534,7 @@ describe('OpenAIRealtimeProvider', () => {
     await provider.start();
 
     expect(provider.status).toBe('stopped');
-    const audioFails = healthEvents.filter(
-      (e) => e.component === 'audio' && e.state === 'failed',
-    );
+    const audioFails = healthEvents.filter((e) => e.component === 'audio' && e.state === 'failed');
     const transportFails = healthEvents.filter(
       (e) => e.component === 'transport' && e.state === 'api_error',
     );
@@ -618,7 +640,10 @@ describe('OpenAIRealtimeProvider', () => {
       // Initial bring-up: /session (renew in 1s) + SDP.
       .mockResolvedValueOnce(
         new Response(
-          JSON.stringify({ client_secret: { value: 'tok1' }, session_renewal_recommended_ms: 1000 }),
+          JSON.stringify({
+            client_secret: { value: 'tok1' },
+            session_renewal_recommended_ms: 1000,
+          }),
           { status: 200 },
         ),
       )
@@ -626,7 +651,10 @@ describe('OpenAIRealtimeProvider', () => {
       // Renewal: fresh /session + SDP.
       .mockResolvedValueOnce(
         new Response(
-          JSON.stringify({ client_secret: { value: 'tok2' }, session_renewal_recommended_ms: 1000 }),
+          JSON.stringify({
+            client_secret: { value: 'tok2' },
+            session_renewal_recommended_ms: 1000,
+          }),
           { status: 200 },
         ),
       )
@@ -891,7 +919,9 @@ describe('OpenAIRealtimeProvider', () => {
     const { handlers } = makeHandlers();
     const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
     // Subscriber throws every time.
-    provider.onStatus(() => { throw new Error('subscriber blew up'); });
+    provider.onStatus(() => {
+      throw new Error('subscriber blew up');
+    });
     // Despite the throw, start() / stop() must still complete and the
     // _status getter must reflect the correct terminal state.
     await provider.start();
@@ -910,7 +940,8 @@ describe('OpenAIRealtimeProvider', () => {
     // The fake analyser returns 0.05 amplitude ≈ -26 dB, above the default
     // 'meeting' threshold of -48 dB, so every 100ms tick counts as audio-active.
     vi.useFakeTimers();
-    const fetchMock = vi.fn()
+    const fetchMock = vi
+      .fn()
       // Initial bring-up: /session OK + SDP OK
       .mockResolvedValueOnce(
         new Response(JSON.stringify({ client_secret: { value: 'tok' } }), { status: 200 }),
@@ -932,10 +963,7 @@ describe('OpenAIRealtimeProvider', () => {
     await Promise.resolve();
 
     const degraded = healthEvents.find(
-      (e) =>
-        e.component === 'transport' &&
-        e.state === 'degraded' &&
-        e.message?.includes('Wedged'),
+      (e) => e.component === 'transport' && e.state === 'degraded' && e.message?.includes('Wedged'),
     );
     expect(degraded).toBeDefined();
     expect(degraded?.message).toMatch(/no DC events while audio active/);
@@ -947,7 +975,8 @@ describe('OpenAIRealtimeProvider', () => {
 
   it('stale-data detector resets on each DC event — no false positive while events flow', async () => {
     vi.useFakeTimers();
-    const fetchMock = vi.fn()
+    const fetchMock = vi
+      .fn()
       .mockResolvedValueOnce(
         new Response(JSON.stringify({ client_secret: { value: 'tok' } }), { status: 200 }),
       )
@@ -1004,7 +1033,8 @@ describe('OpenAIRealtimeProvider', () => {
     const nearlyExpired = Math.floor(Date.now() / 1000) + 30; // 30 s from now
     vi.stubGlobal(
       'fetch',
-      vi.fn()
+      vi
+        .fn()
         // Initial /session — token expires in 30 s (< 60 s threshold)
         .mockResolvedValueOnce(
           new Response(
@@ -1025,9 +1055,9 @@ describe('OpenAIRealtimeProvider', () => {
     // transport:connected must NOT appear (SDP was never attempted).
     // audio:connected from mic acquisition is still expected and OK.
     expect(healthEvents.some((e) => e.state === 'reconnecting')).toBe(true);
-    expect(
-      healthEvents.some((e) => e.component === 'transport' && e.state === 'connected'),
-    ).toBe(false);
+    expect(healthEvents.some((e) => e.component === 'transport' && e.state === 'connected')).toBe(
+      false,
+    );
 
     provider.stop();
   });
@@ -1036,7 +1066,8 @@ describe('OpenAIRealtimeProvider', () => {
     const validToken = Math.floor(Date.now() / 1000) + 3600; // 1 h from now
     vi.stubGlobal(
       'fetch',
-      vi.fn()
+      vi
+        .fn()
         .mockResolvedValueOnce(
           new Response(
             JSON.stringify({ client_secret: { value: 'tok', expires_at: validToken } }),
@@ -1063,7 +1094,7 @@ describe('OpenAIRealtimeProvider', () => {
     vi.useFakeTimers();
 
     const silentBuf = new Float32Array(2048).fill(0.0001); // ~-80 dB: silent
-    const activeBuf = new Float32Array(2048).fill(0.05);   // ~-26 dB: active
+    const activeBuf = new Float32Array(2048).fill(0.05); // ~-26 dB: active
     let currentBuf = activeBuf;
 
     const silentAnalyser = {
@@ -1096,9 +1127,6 @@ describe('OpenAIRealtimeProvider', () => {
     currentBuf = activeBuf;
     await vi.advanceTimersByTimeAsync(200);
 
-    const resumeEvents = healthEvents.filter(
-      (e) => e.component === 'audio' && e.state === 'connected',
-    );
     // At least one connected after silence_detected. (lastIndexOf on a mapped
     // states array keeps this ES2022-lib clean — Array.findLastIndex is ES2023.)
     const states = healthEvents.map((e) => e.state);

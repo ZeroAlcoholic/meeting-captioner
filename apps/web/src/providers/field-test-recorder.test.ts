@@ -27,7 +27,10 @@ function settings(provider = 'openai'): FieldTestSettingsSnapshot {
   };
 }
 
-function latency(samples: LatencySample[], summary: ProviderSummary[] = []): {
+function latency(
+  samples: LatencySample[],
+  summary: ProviderSummary[] = [],
+): {
   summary(): ProviderSummary[];
   export(): { sessionProvider: string | null; ttfcMs: number | null; samples: LatencySample[] };
 } {
@@ -93,7 +96,6 @@ describe('FieldTestRecorder', () => {
     expect(() => recorder.start('two')).not.toThrow();
   });
 
-
   it('startTimed auto-finishes and persists the run', () => {
     vi.useFakeTimers();
     let now = 10_000;
@@ -117,7 +119,6 @@ describe('FieldTestRecorder', () => {
     expect(recorder.history()[0]!.finishNote).toContain('auto-finished');
     expect(recorder.history()[0]!.samples).toHaveLength(1);
   });
-
 
   it('notifies subscribers when recorder state changes', () => {
     let now = 1;

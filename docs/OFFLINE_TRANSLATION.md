@@ -31,6 +31,7 @@
 (see [`ARCHITECTURE.md`](ARCHITECTURE.md) §4).
 
 Required methods (sketch):
+
 - `translate(sourceSegment) → TranslationEvent`
 - `health(): HealthEvent`
 - `setGlossary(terms)`

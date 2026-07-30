@@ -7,7 +7,36 @@
 
 ## Now
 
+### Phase 1 closure — complete (2026-07-30)
+
+- [x] Gemini setup waits for `setupComplete`, uses only the exact dedicated
+      translate model, and has no silent native-audio fallback (`13f6311`).
+- [x] Transcript retention is opt-in/default-off with race-safe IndexedDB
+      deletion (`c587fc2`).
+- [x] Active sessions lock mode/scenario/backend/language; Stop releases capture
+      and transport before switching (`7dd2362`).
+- [x] Offline MT uses a bounded ordered dispatcher and cannot cap-wait inside
+      the transcript receive loop (`b67d810`).
+- [x] Production offline services are loopback-only and do not use reload
+      (`2adcd78`).
+- [x] Full local release matrix is green; formatting and lint gates are restored
+      (`171c05b`).
+- [x] The live probe is statically checked and generated fixtures are read back
+      through a fail-closed verifier (`3089e3d`, `3e6a30d`).
+- [x] With explicit credential authorization, the minimal OpenAI/Gemini live
+      probe passed; two redacted fixtures were inspected and verified, the
+      provider unit/E2E mock consume their golden frames, and the full release
+      matrix was rerun (`b8029e6`).
+- [x] External review (Codex) caught one residual defect in the new Gemini setup
+      path: teardown before `setupComplete` left the handshake promise pending
+      behind the stale-socket guard, so its 15 s timer emitted a phantom
+      setup-timeout `api_error` (and, on the reconnect ladder, a `reconnecting`
+      state) onto whatever session was running by then. Fixed with a teardown
+      sentinel that settles the handshake; both regression tests were confirmed
+      to fail before the fix.
+
 **Gemini latency root-cause closure (2026-07-02) complete.**
+
 - Official-docs research settled it: the translate model has NO latency knob
   (translationConfig = targetLanguageCode + echoTargetLanguage only; no TEXT
   modality / speed / thinking / effective VAD). ~2–3 s lag is structural
@@ -22,6 +51,7 @@
   translate model variant (watch the models page).
 
 **Gemini per-utterance latency fix (2026-06-29) complete.**
+
 - Reverted Gemini Live Translate from the earlier cost-saving `TEXT` modality to
   the official speed-first `AUDIO` response modality, while still using
   `outputAudioTranscription` for text captions and discarding synthesized audio.
@@ -35,6 +65,7 @@
 
 **Project KEEPALIVE — 永續雙模型字幕強化 (2026-06-12) complete.**
 Dual-model reliability/continuity: 多元模型 · 不會斷 · 可接續.
+
 - **#16** Gemini wedge detection + persistent reconnect (parity with OpenAI).
 - **#7** OpenAI zero-gap renewal (make-before-break, mic-stream reuse).
 - **#21** Cross-model one-click failover (`FailoverBanner`, transcript preserved).
@@ -51,6 +82,7 @@ Dual-model reliability/continuity: 多元模型 · 不會斷 · 可接續.
 
 **KEEPALIVE test-engineering (T0 → T1 → T2, 2026-06-12) complete.** The
 previously manual-only reliability checks are now automated:
+
 - **T0** mock-backend fault-injection e2e — `tests/e2e/online-mock.ts` (in-browser
   mock for both providers, no key) + `online-keepalive.spec.ts` (5 tests):
   zero-gap renewal (mic reused once), repeated renewals never blank,
@@ -67,6 +99,7 @@ previously manual-only reliability checks are now automated:
 
 **Easy-start launcher + crash-continue + IDB capacity (2026-06-11) complete.**
 Single-session focus, easy to start different settings.
+
 - **Easy-start launcher**: `SessionLauncher` empty-state grid — one-click start
   for OpenAI/Gemini/Hybrid/Offline/Demo, each selecting its config + starting
   (no Settings detour); availability-aware.
@@ -78,10 +111,11 @@ Single-session focus, easy to start different settings.
   load-time merge; persist v3 → v4.
 - 220 web tests (+8), typecheck + build clean, full crash-continue lifecycle
   browser-verified. See `PROJECT_STATE.md` "Easy-start launcher + crash-continue
-  + IndexedDB capacity".
+  - IndexedDB capacity".
 - Follow-up: multi-session history browser (deferred per user — single-session).
 
 **Robustness pass (2026-06-11) complete.** Following durability hardening:
+
 - **Offline/Hybrid wall-clock timeline rebase** — fixes the documented P6
   follow-up. WHL connection-relative `startMs` (resets to 0/connection) is now
   shifted onto wall-clock per connection in `offline-stt-provider.ts`. Fixes (a)
@@ -99,13 +133,15 @@ safety for the transcript log (summary deferred per user). Added
 `captionStore.flushNow()` — synchronous localStorage write that folds the
 in-flight `livePartial`/`liveTranslation` onto disk; wired to `pagehide` /
 `visibilitychange→hidden` and to graceful Stop/Pause. Closes the debounce-window
-+ unfinalized-utterance loss on crash / tab-close. 210 web tests, typecheck +
-build clean. See `PROJECT_STATE.md` "Transcript durability hardening".
-Follow-up candidates: IndexedDB backup for >5 MB / multi-session history;
-explicit "continue after crash" (Resume survives reload).
+
+- unfinalized-utterance loss on crash / tab-close. 210 web tests, typecheck +
+  build clean. See `PROJECT_STATE.md` "Transcript durability hardening".
+  Follow-up candidates: IndexedDB backup for >5 MB / multi-session history;
+  explicit "continue after crash" (Resume survives reload).
 
 **Field-feedback pass (2026-06-08) complete.** Three reported issues fixed —
 see `PROJECT_STATE.md` "Field-feedback pass":
+
 - Online speaker-switch recognition → new default `'meeting'` acoustic profile
   (browser DSP off + OpenAI far_field). **Needs real-meeting verification.**
 - No Pause → added Pause/Resume that preserves the transcript log (no clear).
@@ -119,6 +155,7 @@ thread-safety fix, UUID segment IDs, healthz `model_loading` state,
 `OFFLINE_CORS_ORIGIN` env var. 50 Python + all TS tests green.
 
 P3 complete. **CaptionBoard v3 (UX overhaul)** delivered out-of-band on top of P3.5:
+
 - Split paragraph streams (ZH and EN each grouped by their own punctuation)
 - Per-paragraph elapsed-time gutter (M:SS, derived from first segment's startMs)
 - Live caption weight 300 → 500 (readable at 1.5–3m office distance)
@@ -162,6 +199,7 @@ Full offline pipeline: WHL + CTranslate2 MT + WASAPI loopback + frontend source 
 See [`PROJECT_STATE.md`](PROJECT_STATE.md).
 
 Commits:
+
 - `9929d52` — fix(offline): distil-large-v3 model, min-words filter, language-aware prompt, glossary pipeline
 - `779c213` — refactor(offline): WHL as independent process + structured /healthz + startup scripts
 - `44cc3f6` — feat(offline): WASAPI system audio loopback — source selector + capture pipeline
@@ -202,13 +240,9 @@ Commits:
 
 ## Backlog (later phases)
 
-## Backlog (later phases)
-
-- [ ] P5 — Research: Voxtral (Mistral) and Speaches as alternative ASR backends; evaluate streaming support, Windows compatibility, and quality vs distil-large-v3
-- [ ] P5 — Summary pipeline draft / refined / stable
-- [ ] P5 — Optional in-app autosave (opt-in)
-- [ ] P5 — localStorage / IndexedDB settings persistence (P1-D6)
-- [ ] P6 — Long-running memory test harness
-- [ ] P6 — Reconnect / silence / no-audio-track real handling
-- [ ] P7 — Electron packaging
-- [ ] P7 — Sidecar lifecycle (Electron main spawning online + offline)
+- [ ] P5 — Research Voxtral (Mistral) and Speaches as alternative ASR backends;
+      evaluate streaming support, Windows compatibility, and quality versus
+      distil-large-v3.
+- [ ] P5 — Summary pipeline draft / refined / stable.
+- [ ] P7 — Electron packaging.
+- [ ] P7 — Sidecar lifecycle (Electron main spawning online + offline).

@@ -28,6 +28,6 @@ echo.
 call npx --yes concurrently --kill-others --names whl,api ^
   --prefix-colors magenta.bold,yellow.bold ^
   "%PYTHON_VENV% %ROOT%\run_whl.py" ^
-  "%PYTHON_CONDA% -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --app-dir %ROOT%"
+  "%PYTHON_CONDA% -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --app-dir %ROOT%"
 
 endlocal

@@ -14,13 +14,13 @@
 
 ## 檔案說明
 
-| 檔案 | 用途 |
-|---|---|
-| `01_ARCHITECTURE_DECISION.md` | 決策摘要：三種候選架構、主推方案、取捨。 |
-| `02_IMPLEMENTATION_SPEC.md` | 工程規格：模組切分、事件格式、服務邊界、模型策略。 |
-| `03_BENCHMARK_ACCEPTANCE.md` | 驗收與測試：ASR/MT/延遲/字幕穩定度指標。 |
-| `04_CLAUDE_CODE_PROMPT.md` | 可直接丟給 Claude Code / Codex 的重構 prompt。 |
-| `05_REFERENCES.md` | 參考資料與來源連結。 |
+| 檔案                          | 用途                                               |
+| ----------------------------- | -------------------------------------------------- |
+| `01_ARCHITECTURE_DECISION.md` | 決策摘要：三種候選架構、主推方案、取捨。           |
+| `02_IMPLEMENTATION_SPEC.md`   | 工程規格：模組切分、事件格式、服務邊界、模型策略。 |
+| `03_BENCHMARK_ACCEPTANCE.md`  | 驗收與測試：ASR/MT/延遲/字幕穩定度指標。           |
+| `04_CLAUDE_CODE_PROMPT.md`    | 可直接丟給 Claude Code / Codex 的重構 prompt。     |
+| `05_REFERENCES.md`            | 參考資料與來源連結。                               |
 
 ## 最終建議
 

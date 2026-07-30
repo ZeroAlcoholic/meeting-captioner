@@ -46,7 +46,7 @@ export function SessionLauncher({ options }: SessionLauncherProps) {
               <span className="launcher-option-icon">{o.icon}</span>
               <span className="launcher-option-label">{o.label}</span>
               <span className="launcher-option-sub">
-                {o.available ? o.sublabel : o.reason ?? '尚未就緒'}
+                {o.available ? o.sublabel : (o.reason ?? '尚未就緒')}
               </span>
             </button>
           ))}

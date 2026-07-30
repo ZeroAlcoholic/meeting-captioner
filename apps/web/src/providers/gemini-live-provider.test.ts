@@ -5,6 +5,7 @@ import type {
   TranscriptEvent,
   TranslationEvent,
 } from '@meeting-audio/contracts';
+import geminiGolden from '../../../../tests/fixtures/upstream-contracts/gemini-live-translate.json' with { type: 'json' };
 import type { AudioSource } from './types.js';
 import {
   GeminiLiveProvider,
@@ -32,7 +33,12 @@ function makeHandlers() {
 function makeProvider(langPair = 'en→zh-TW') {
   const h = makeHandlers();
   // No real mic needed: handleServerObject never touches audio capture.
-  const provider = new GeminiLiveProvider('http://localhost/session/gemini', h.handlers, undefined, langPair);
+  const provider = new GeminiLiveProvider(
+    'http://localhost/session/gemini',
+    h.handlers,
+    undefined,
+    langPair,
+  );
   return { provider, ...h };
 }
 
@@ -48,7 +54,12 @@ describe('GeminiLiveProvider — message mapping', () => {
     provider.handleServerObject({ serverContent: { inputTranscription: { text: 'Hello' } } });
     provider.handleServerObject({ serverContent: { inputTranscription: { text: ' world' } } });
     expect(transcripts).toHaveLength(2);
-    expect(transcripts[0]).toMatchObject({ status: 'partial', text: 'Hello', provider: 'gemini-live', mode: 'online_full' });
+    expect(transcripts[0]).toMatchObject({
+      status: 'partial',
+      text: 'Hello',
+      provider: 'gemini-live',
+      mode: 'online_full',
+    });
     expect(transcripts[1]).toMatchObject({ status: 'partial', text: 'Hello world' });
     // Same turn → same segment id.
     expect(transcripts[0]!.segmentId).toBe(transcripts[1]!.segmentId);
@@ -104,7 +115,9 @@ describe('GeminiLiveProvider — message mapping', () => {
     // text. The provider decodes UTF-8 → JSON before routing. This guards the
     // bug where `typeof ev.data !== 'string'` silently dropped every frame.
     const { provider, translations } = makeProvider('en→zh-TW');
-    const json = JSON.stringify({ serverContent: { inputTranscription: { text: 'hi' }, outputTranscription: { text: '嗨' } } });
+    const json = JSON.stringify({
+      serverContent: { inputTranscription: { text: 'hi' }, outputTranscription: { text: '嗨' } },
+    });
     const buf = new TextEncoder().encode(json).buffer;
     const decoded = JSON.parse(new TextDecoder().decode(buf));
     provider.handleServerObject(decoded);
@@ -116,10 +129,14 @@ describe('GeminiLiveProvider — message mapping', () => {
     // A translation ending in a sentence terminator (。！？) WITH matching source
     // text must auto-finalize so history populates and the live line is bounded.
     const { provider, transcripts, translations } = makeProvider('en→zh-TW');
-    provider.handleServerObject({ serverContent: { inputTranscription: { text: 'Hello everyone.' } } });
+    provider.handleServerObject({
+      serverContent: { inputTranscription: { text: 'Hello everyone.' } },
+    });
     provider.handleServerObject({ serverContent: { outputTranscription: { text: '大家好。' } } });
     // No turnComplete sent — finalize must have fired on the 。
-    expect(translations.some((t) => t.status === 'final' && t.targetText === '大家好。')).toBe(true);
+    expect(translations.some((t) => t.status === 'final' && t.targetText === '大家好。')).toBe(
+      true,
+    );
     expect(transcripts.some((t) => t.status === 'final')).toBe(true);
     // Next sentence (source + translation) becomes a NEW segment id.
     const firstFinal = translations.find((t) => t.status === 'final')!;
@@ -138,7 +155,9 @@ describe('GeminiLiveProvider — message mapping', () => {
     provider.handleServerObject({ serverContent: { outputTranscription: { text: '大家好。' } } });
     expect(translations.filter((t) => t.status === 'final')).toHaveLength(0);
     // Source arrives → next output delta (or source sentence end) can finalize.
-    provider.handleServerObject({ serverContent: { inputTranscription: { text: 'Hello everyone.' } } });
+    provider.handleServerObject({
+      serverContent: { inputTranscription: { text: 'Hello everyone.' } },
+    });
     provider.handleServerObject({ serverContent: { outputTranscription: { text: '' } } });
     // Drive one more output delta to trigger the check with both present.
     provider.handleServerObject({ serverContent: { outputTranscription: { text: ' ' } } });
@@ -188,8 +207,12 @@ describe('GeminiLiveProvider — message mapping', () => {
 
   it('does not split a sentence at a decimal point ("3." mid-number)', () => {
     const { provider, translations } = makeProvider('zh-TW→en');
-    provider.handleServerObject({ serverContent: { inputTranscription: { text: '營收成長三點五個百分點。' } } });
-    provider.handleServerObject({ serverContent: { outputTranscription: { text: 'Revenue grew by 3.' } } });
+    provider.handleServerObject({
+      serverContent: { inputTranscription: { text: '營收成長三點五個百分點。' } },
+    });
+    provider.handleServerObject({
+      serverContent: { outputTranscription: { text: 'Revenue grew by 3.' } },
+    });
     // "3." must NOT finalize — the rest of the number is still streaming.
     expect(translations.filter((t) => t.status === 'final')).toHaveLength(0);
     provider.handleServerObject({ serverContent: { outputTranscription: { text: '5 percent.' } } });
@@ -224,7 +247,11 @@ describe('GeminiLiveProvider — message mapping', () => {
     const { provider, translations } = makeProvider('zh-TW→en');
     provider.handleServerObject({ serverContent: { inputTranscription: { text: '你好' } } });
     provider.handleServerObject({ serverContent: { outputTranscription: { text: 'Hello' } } });
-    expect(translations.at(-1)).toMatchObject({ sourceLanguage: 'zh-TW', targetLanguage: 'en', targetText: 'Hello' });
+    expect(translations.at(-1)).toMatchObject({
+      sourceLanguage: 'zh-TW',
+      targetLanguage: 'en',
+      targetText: 'Hello',
+    });
   });
 });
 
@@ -309,7 +336,14 @@ class FakeWebSocket {
 }
 
 class FakeAudioWorkletNode {
+  static instances: FakeAudioWorkletNode[] = [];
+
   port = { onmessage: null as ((e: MessageEvent) => void) | null, close: vi.fn() };
+
+  constructor() {
+    FakeAudioWorkletNode.instances.push(this);
+  }
+
   connect(): void {}
   disconnect(): void {}
 }
@@ -347,11 +381,8 @@ function makeActiveMic(): AudioSource {
   } as unknown as AudioSource;
 }
 
-function tokenResponse(): Response {
-  return new Response(
-    JSON.stringify({ token: 'ephemeral', model: 'gemini-3.5-live-translate-preview' }),
-    { status: 200 },
-  );
+function tokenResponse(model = 'models/gemini-3.5-live-translate-preview'): Response {
+  return new Response(JSON.stringify({ token: 'ephemeral', model }), { status: 200 });
 }
 
 describe('GeminiLiveProvider — reconnect + wedge detection (#16)', () => {
@@ -360,6 +391,7 @@ describe('GeminiLiveProvider — reconnect + wedge detection (#16)', () => {
     wsEmitSetup = true;
     wsAutoCloseAfterOpen = false;
     FakeWebSocket.instances = [];
+    FakeAudioWorkletNode.instances = [];
     vi.stubGlobal('WebSocket', FakeWebSocket as unknown as typeof WebSocket);
     vi.stubGlobal('AudioContext', makeFakeAudioContextClass());
     vi.stubGlobal('AudioWorkletNode', FakeAudioWorkletNode as unknown as typeof AudioWorkletNode);
@@ -401,33 +433,159 @@ describe('GeminiLiveProvider — reconnect + wedge detection (#16)', () => {
 
     const setupFrame = FakeWebSocket.instances.at(-1)!.sent[0];
     expect(setupFrame).toBeTruthy();
-    const setup = JSON.parse(setupFrame!) as {
-      setup: {
-        inputAudioTranscription?: unknown;
-        outputAudioTranscription?: unknown;
-        generationConfig?: {
-          responseModalities?: string[];
-          inputAudioTranscription?: unknown;
-          outputAudioTranscription?: unknown;
-          translationConfig?: { targetLanguageCode?: string; echoTargetLanguage?: boolean };
-        };
-      };
-    };
-
-    // Transcription fields MUST be at setup top level — the live service
-    // rejects the generationConfig-nested shape with WS close 1007 (verified
-    // 2026-07-28, 8/8 handshake matrix; see diagnostic report §4.3). This
-    // assertion guards against regressing to the doc-page nested shape.
-    expect(setup.setup.inputAudioTranscription).toEqual({});
-    expect(setup.setup.outputAudioTranscription).toEqual({});
-    expect(setup.setup.generationConfig).toMatchObject({
-      responseModalities: ['AUDIO'],
-      translationConfig: { targetLanguageCode: 'zh-Hant', echoTargetLanguage: false },
-    });
-    expect(setup.setup.generationConfig).not.toHaveProperty('inputAudioTranscription');
-    expect(setup.setup.generationConfig).not.toHaveProperty('outputAudioTranscription');
+    // Exact equality keeps the provider request anchored to the setup frame
+    // accepted by the real upstream probe. This also guards the top-level
+    // transcription placement and dedicated translate-model identity.
+    expect(JSON.parse(setupFrame!)).toEqual(geminiGolden.clientFrame);
 
     provider.stop();
+  });
+
+  it('does not start audio capture before setupComplete', async () => {
+    wsEmitSetup = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(tokenResponse())),
+    );
+
+    const { provider } = makeHarness();
+    const start = provider.start();
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
+
+    expect(FakeAudioWorkletNode.instances).toHaveLength(0);
+    FakeWebSocket.instances[0]!.emit({ setupComplete: {} });
+    await start;
+    expect(FakeAudioWorkletNode.instances).toHaveLength(1);
+
+    provider.stop();
+  });
+
+  it('fails without starting capture when the socket closes before setupComplete', async () => {
+    wsEmitSetup = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(tokenResponse())),
+    );
+
+    const { provider, health } = makeHarness();
+    const start = provider.start();
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
+    FakeWebSocket.instances[0]!.close();
+    await start;
+
+    expect(provider.status).toBe('stopped');
+    expect(FakeAudioWorkletNode.instances).toHaveLength(0);
+    expect(health).toContainEqual(
+      expect.objectContaining({ component: 'transport', state: 'api_error' }),
+    );
+  });
+
+  it('fails without starting capture when setupComplete times out', async () => {
+    vi.useFakeTimers();
+    wsEmitSetup = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(tokenResponse())),
+    );
+
+    const { provider, health } = makeHarness();
+    const start = provider.start();
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(15_000);
+    await start;
+
+    expect(provider.status).toBe('stopped');
+    expect(FakeAudioWorkletNode.instances).toHaveLength(0);
+    expect(health).toContainEqual(
+      expect.objectContaining({
+        component: 'transport',
+        state: 'api_error',
+        message: expect.stringMatching(/timed out/i),
+      }),
+    );
+  });
+
+  it('stop() during the setup handshake settles it silently — no phantom timeout later', async () => {
+    vi.useFakeTimers();
+    wsEmitSetup = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(tokenResponse())),
+    );
+
+    const { provider, health } = makeHarness();
+    const start = provider.start();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+
+    // User presses Stop while the handshake is still open.
+    provider.stop();
+    await start;
+
+    // Well past the 15 s setup deadline: the abandoned handshake must be dead,
+    // not sitting on a timer that fires an api_error onto the next session.
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(provider.status).toBe('stopped');
+    expect(FakeAudioWorkletNode.instances).toHaveLength(0);
+    expect(health.filter((e) => e.state === 'api_error')).toHaveLength(0);
+    expect(health.filter((e) => e.state === 'failed')).toHaveLength(0);
+    expect(health).toContainEqual(
+      expect.objectContaining({ component: 'transport', state: 'stopped' }),
+    );
+  });
+
+  it('stop() during a RECONNECT handshake does not re-arm the ladder or emit reconnecting', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(tokenResponse())),
+    );
+
+    const { provider, health } = makeHarness();
+    await provider.start();
+    expect(FakeWebSocket.instances).toHaveLength(1);
+
+    // Drop the live socket so the reconnect ladder arms, then let it dial out
+    // with setupComplete withheld so the new handshake stays open.
+    wsEmitSetup = false;
+    FakeWebSocket.instances[0]!.close();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+
+    const healthBefore = health.length;
+    provider.stop();
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    // No third socket, and nothing after the stop pair claims the transport is
+    // reconnecting or broken.
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    const after = health.slice(healthBefore);
+    expect(after.filter((e) => e.state === 'reconnecting')).toHaveLength(0);
+    expect(after.filter((e) => e.state === 'api_error')).toHaveLength(0);
+    expect(after.filter((e) => e.state === 'failed')).toHaveLength(0);
+  });
+
+  it('rejects a non-translate Gemini model before opening a socket or audio worklet', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(tokenResponse('models/gemini-2.5-flash-native-audio-preview'))),
+    );
+
+    const { provider, health } = makeHarness();
+    await provider.start();
+
+    expect(provider.status).toBe('stopped');
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    expect(FakeAudioWorkletNode.instances).toHaveLength(0);
+    expect(health).toContainEqual(
+      expect.objectContaining({
+        component: 'transport',
+        state: 'api_error',
+        message: expect.stringMatching(/unsupported Gemini model/i),
+      }),
+    );
   });
 
   it('persistent reconnect: keeps retrying past 5 attempts and surfaces a failed health state (never gives up / never stop()s)', async () => {
@@ -469,13 +627,18 @@ describe('GeminiLiveProvider — reconnect + wedge detection (#16)', () => {
     // 0↔1 forever and never surface 'failed' → the cross-model failover banner
     // could never appear. The reset must happen on setupComplete (proven live).
     vi.useFakeTimers();
-    wsEmitSetup = false; // socket opens but never confirms the session…
-    wsAutoCloseAfterOpen = true; // …and drops right after open
     const fetchMock = vi.fn(() => Promise.resolve(tokenResponse()));
     vi.stubGlobal('fetch', fetchMock);
 
     const { provider, health } = makeHarness();
     await provider.start();
+
+    // The initial session was proven live. Every reconnect opens, never reaches
+    // setupComplete, and drops immediately; those failed reconnects must keep
+    // climbing the attempt counter.
+    wsEmitSetup = false;
+    wsAutoCloseAfterOpen = true;
+    FakeWebSocket.instances.at(-1)!.close();
 
     // Drive many connect-then-drop cycles through the capped backoff.
     await vi.advanceTimersByTimeAsync(120_000);

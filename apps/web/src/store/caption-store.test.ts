@@ -19,11 +19,19 @@ function installDomShims(): void {
     const store = new Map<string, string>();
     g.localStorage = {
       getItem: (k) => (store.has(k) ? store.get(k)! : null),
-      setItem: (k, v) => { store.set(k, v); },
-      removeItem: (k) => { store.delete(k); },
-      clear: () => { store.clear(); },
+      setItem: (k, v) => {
+        store.set(k, v);
+      },
+      removeItem: (k) => {
+        store.delete(k);
+      },
+      clear: () => {
+        store.clear();
+      },
       key: (i) => Array.from(store.keys())[i] ?? null,
-      get length() { return store.size; },
+      get length() {
+        return store.size;
+      },
     };
   }
   if (typeof g.window === 'undefined') {
@@ -32,7 +40,9 @@ function installDomShims(): void {
 }
 
 installDomShims();
-beforeEach(() => { localStorage.clear(); });
+beforeEach(() => {
+  localStorage.clear();
+});
 
 const baseTranscript = {
   kind: 'transcript' as const,
@@ -41,11 +51,18 @@ const baseTranscript = {
   source: 'fake_replay' as const,
 };
 
-function transcript(overrides: Partial<TranscriptEvent> & Pick<TranscriptEvent, 'segmentId' | 'status' | 'text' | 'startMs'>): TranscriptEvent {
+function transcript(
+  overrides: Partial<TranscriptEvent> &
+    Pick<TranscriptEvent, 'segmentId' | 'status' | 'text' | 'startMs'>,
+): TranscriptEvent {
   return { ...baseTranscript, ...overrides } as TranscriptEvent;
 }
 
-function translation(sourceSegmentId: string, status: TranslationEvent['status'], targetText: string): TranslationEvent {
+function translation(
+  sourceSegmentId: string,
+  status: TranslationEvent['status'],
+  targetText: string,
+): TranslationEvent {
   return {
     kind: 'translation',
     provider: 'fake-replay',
@@ -63,7 +80,9 @@ function translation(sourceSegmentId: string, status: TranslationEvent['status']
 describe('captionStore.applyTranscript (partial → livePartial)', () => {
   it('partial does NOT enter segments[]; lands in livePartial', () => {
     const store = createCaptionStore({ persistKey: null });
-    store.getState().applyTranscript(transcript({ segmentId: 's1', status: 'partial', text: 'a', startMs: 0 }));
+    store
+      .getState()
+      .applyTranscript(transcript({ segmentId: 's1', status: 'partial', text: 'a', startMs: 0 }));
     expect(store.getState().segments).toHaveLength(0);
     expect(store.getState().livePartial?.text).toBe('a');
     expect(store.getState().livePartial?.status).toBe('partial');
@@ -72,8 +91,12 @@ describe('captionStore.applyTranscript (partial → livePartial)', () => {
   it('revised stays in livePartial too', () => {
     const store = createCaptionStore({ persistKey: null });
     const api = store.getState();
-    api.applyTranscript(transcript({ segmentId: 's1', status: 'partial', text: 'hel', startMs: 0 }));
-    api.applyTranscript(transcript({ segmentId: 's1', status: 'revised', text: 'hello', startMs: 0 }));
+    api.applyTranscript(
+      transcript({ segmentId: 's1', status: 'partial', text: 'hel', startMs: 0 }),
+    );
+    api.applyTranscript(
+      transcript({ segmentId: 's1', status: 'revised', text: 'hello', startMs: 0 }),
+    );
     expect(store.getState().segments).toHaveLength(0);
     expect(store.getState().livePartial?.text).toBe('hello');
     expect(store.getState().livePartial?.status).toBe('revised');
@@ -82,11 +105,15 @@ describe('captionStore.applyTranscript (partial → livePartial)', () => {
   it('segments[] reference is stable across partial deltas (key perf invariant)', () => {
     const store = createCaptionStore({ persistKey: null });
     const api = store.getState();
-    api.applyTranscript(transcript({ segmentId: 'finalized', status: 'final', text: 'done', startMs: 0 }));
+    api.applyTranscript(
+      transcript({ segmentId: 'finalized', status: 'final', text: 'done', startMs: 0 }),
+    );
     const before = store.getState().segments;
     // Many partials in a row — segments[] ref must not change.
     for (let i = 0; i < 20; i++) {
-      api.applyTranscript(transcript({ segmentId: 's1', status: 'partial', text: 'x'.repeat(i + 1), startMs: 100 }));
+      api.applyTranscript(
+        transcript({ segmentId: 's1', status: 'partial', text: 'x'.repeat(i + 1), startMs: 100 }),
+      );
     }
     expect(store.getState().segments).toBe(before);
   });
@@ -94,8 +121,12 @@ describe('captionStore.applyTranscript (partial → livePartial)', () => {
   it('final commits to segments[] and clears matching livePartial', () => {
     const store = createCaptionStore({ persistKey: null });
     const api = store.getState();
-    api.applyTranscript(transcript({ segmentId: 's1', status: 'partial', text: 'hel', startMs: 0 }));
-    api.applyTranscript(transcript({ segmentId: 's1', status: 'final', text: 'hello.', startMs: 0, endMs: 500 }));
+    api.applyTranscript(
+      transcript({ segmentId: 's1', status: 'partial', text: 'hel', startMs: 0 }),
+    );
+    api.applyTranscript(
+      transcript({ segmentId: 's1', status: 'final', text: 'hello.', startMs: 0, endMs: 500 }),
+    );
     expect(store.getState().livePartial).toBeNull();
     expect(store.getState().segments).toHaveLength(1);
     expect(store.getState().segments[0]?.status).toBe('final');
@@ -107,16 +138,24 @@ describe('captionStore.applyTranscript (partial → livePartial)', () => {
     const store = createCaptionStore({ persistKey: null });
     const api = store.getState();
     api.applyTranscript(transcript({ segmentId: 'a', status: 'final', text: 'first', startMs: 0 }));
-    api.applyTranscript(transcript({ segmentId: 'c', status: 'final', text: 'third', startMs: 2000 }));
-    api.applyTranscript(transcript({ segmentId: 'b', status: 'final', text: 'second', startMs: 1000 }));
+    api.applyTranscript(
+      transcript({ segmentId: 'c', status: 'final', text: 'third', startMs: 2000 }),
+    );
+    api.applyTranscript(
+      transcript({ segmentId: 'b', status: 'final', text: 'second', startMs: 1000 }),
+    );
     expect(store.getState().segments.map((s) => s.segmentId)).toEqual(['a', 'b', 'c']);
   });
 
   it('supersedes the previous segment when revisionOf is set on the final', () => {
     const store = createCaptionStore({ persistKey: null });
     const api = store.getState();
-    api.applyTranscript(transcript({ segmentId: 's1', status: 'final', text: 'wrong', startMs: 0 }));
-    api.applyTranscript(transcript({ segmentId: 's2', status: 'final', text: 'right', startMs: 0, revisionOf: 's1' }));
+    api.applyTranscript(
+      transcript({ segmentId: 's1', status: 'final', text: 'wrong', startMs: 0 }),
+    );
+    api.applyTranscript(
+      transcript({ segmentId: 's2', status: 'final', text: 'right', startMs: 0, revisionOf: 's1' }),
+    );
     const segs = store.getState().segments;
     expect(segs).toHaveLength(1);
     expect(segs[0]?.segmentId).toBe('s2');
@@ -126,8 +165,12 @@ describe('captionStore.applyTranscript (partial → livePartial)', () => {
   it('clears livePartial when a final supersedes its segmentId', () => {
     const store = createCaptionStore({ persistKey: null });
     const api = store.getState();
-    api.applyTranscript(transcript({ segmentId: 's1', status: 'partial', text: 'tentative', startMs: 0 }));
-    api.applyTranscript(transcript({ segmentId: 's2', status: 'final', text: 'right', startMs: 0, revisionOf: 's1' }));
+    api.applyTranscript(
+      transcript({ segmentId: 's1', status: 'partial', text: 'tentative', startMs: 0 }),
+    );
+    api.applyTranscript(
+      transcript({ segmentId: 's2', status: 'final', text: 'right', startMs: 0, revisionOf: 's1' }),
+    );
     expect(store.getState().livePartial).toBeNull();
     expect(store.getState().segments.map((s) => s.segmentId)).toEqual(['s2']);
   });
@@ -136,7 +179,9 @@ describe('captionStore.applyTranscript (partial → livePartial)', () => {
     const store = createCaptionStore({ maxSegments: 3, persistKey: null });
     const api = store.getState();
     for (let i = 0; i < 5; i++) {
-      api.applyTranscript(transcript({ segmentId: `s${i}`, status: 'final', text: `t${i}`, startMs: i * 100 }));
+      api.applyTranscript(
+        transcript({ segmentId: `s${i}`, status: 'final', text: `t${i}`, startMs: i * 100 }),
+      );
     }
     const segs = store.getState().segments;
     expect(segs).toHaveLength(3);
@@ -148,7 +193,9 @@ describe('captionStore.applyTranslation', () => {
   it('routes drafts for the live partial into liveTranslation (off the history map)', () => {
     const store = createCaptionStore({ persistKey: null });
     const api = store.getState();
-    api.applyTranscript(transcript({ segmentId: 's1', status: 'partial', text: 'live', startMs: 0 }));
+    api.applyTranscript(
+      transcript({ segmentId: 's1', status: 'partial', text: 'live', startMs: 0 }),
+    );
     const translationsBefore = store.getState().translations;
     api.applyTranslation(translation('s1', 'draft', '草稿'));
     expect(store.getState().liveTranslation?.targetText).toBe('草稿');
@@ -183,7 +230,9 @@ describe('captionStore.applyTranslation', () => {
     api.applyTranslation(translation('s1', 'draft', '預先到達'));
     // No livePartial yet → routed into translations[].
     expect(store.getState().translations['s1']?.targetText).toBe('預先到達');
-    api.applyTranscript(transcript({ segmentId: 's1', status: 'partial', text: 'pre-arrival', startMs: 0 }));
+    api.applyTranscript(
+      transcript({ segmentId: 's1', status: 'partial', text: 'pre-arrival', startMs: 0 }),
+    );
     // After partial lands, the prior translation should be promoted.
     expect(store.getState().liveTranslation?.targetText).toBe('預先到達');
     expect(store.getState().translations['s1']).toBeUndefined();
@@ -192,10 +241,14 @@ describe('captionStore.applyTranslation', () => {
   it('finalizing a transcript promotes the liveTranslation into the history map', () => {
     const store = createCaptionStore({ persistKey: null });
     const api = store.getState();
-    api.applyTranscript(transcript({ segmentId: 's1', status: 'partial', text: 'live', startMs: 0 }));
+    api.applyTranscript(
+      transcript({ segmentId: 's1', status: 'partial', text: 'live', startMs: 0 }),
+    );
     api.applyTranslation(translation('s1', 'draft', '草稿'));
     expect(store.getState().liveTranslation?.targetText).toBe('草稿');
-    api.applyTranscript(transcript({ segmentId: 's1', status: 'final', text: 'final.', startMs: 0, endMs: 100 }));
+    api.applyTranscript(
+      transcript({ segmentId: 's1', status: 'final', text: 'final.', startMs: 0, endMs: 100 }),
+    );
     expect(store.getState().liveTranslation).toBeNull();
     expect(store.getState().translations['s1']?.targetText).toBe('草稿');
   });
@@ -221,7 +274,9 @@ describe('captionStore.clear', () => {
     const store = createCaptionStore({ persistKey: null });
     const api = store.getState();
     api.applyTranscript(transcript({ segmentId: 's1', status: 'final', text: 'a', startMs: 0 }));
-    api.applyTranscript(transcript({ segmentId: 's2', status: 'partial', text: 'b', startMs: 1000 }));
+    api.applyTranscript(
+      transcript({ segmentId: 's2', status: 'partial', text: 'b', startMs: 1000 }),
+    );
     api.applyTranslation(translation('s1', 'final', '甲'));
     api.clear();
     expect(store.getState().segments).toEqual([]);
@@ -242,7 +297,9 @@ describe('captionStore session boundary', () => {
     const store = createCaptionStore({ persistKey: null });
     const api = store.getState();
     api.applyTranscript(transcript({ segmentId: 's1', status: 'final', text: 'a', startMs: 0 }));
-    api.applyTranscript(transcript({ segmentId: 's2', status: 'partial', text: 'b', startMs: 100 }));
+    api.applyTranscript(
+      transcript({ segmentId: 's2', status: 'partial', text: 'b', startMs: 100 }),
+    );
     api.applyTranslation(translation('s1', 'final', '甲'));
     expect(store.getState().segments).toHaveLength(1);
     api.beginSession();
@@ -264,7 +321,17 @@ describe('captionStore session boundary', () => {
       key,
       JSON.stringify({
         v: 3,
-        segments: [{ segmentId: 's1', provider: 'fake', source: 'fake_replay', mode: 'full_offline', status: 'final', text: 'a', startMs: 0 }],
+        segments: [
+          {
+            segmentId: 's1',
+            provider: 'fake',
+            source: 'fake_replay',
+            mode: 'full_offline',
+            status: 'final',
+            text: 'a',
+            startMs: 0,
+          },
+        ],
         translations: {},
         sessionStartMs: 0,
         sessionId: null,
@@ -312,6 +379,49 @@ describe('captionStore session boundary', () => {
 });
 
 describe('captionStore persistence migration', () => {
+  it('does not hydrate retained transcript data without explicit opt-in', () => {
+    localStorage.setItem(
+      'meeting-audio:captions:v4',
+      JSON.stringify({
+        v: 4,
+        segments: [
+          {
+            segmentId: 'old',
+            provider: 'fake',
+            source: 'fake_replay',
+            mode: 'full_offline',
+            status: 'final',
+            text: 'must not hydrate',
+            startMs: 0,
+          },
+        ],
+        translations: {},
+        savedAt: '2026-07-29T00:00:00.000Z',
+      }),
+    );
+
+    const store = createCaptionStore();
+
+    expect(store.getState().segments).toEqual([]);
+    expect(localStorage.getItem('meeting-audio:captions:v4')).toBeNull();
+  });
+
+  it('enables and disables retention without clearing in-memory captions', async () => {
+    const store = createCaptionStore();
+    store
+      .getState()
+      .applyTranscript(
+        transcript({ segmentId: 'current', status: 'final', text: 'still visible', startMs: 0 }),
+      );
+
+    await store.getState().setTranscriptRetention(true);
+    expect(localStorage.getItem('meeting-audio:captions:v4')).not.toBeNull();
+
+    await store.getState().setTranscriptRetention(false);
+    expect(localStorage.getItem('meeting-audio:captions:v4')).toBeNull();
+    expect(store.getState().segments.map((segment) => segment.segmentId)).toEqual(['current']);
+  });
+
   it('reads legacy v2 payload from meeting-audio:captions:v2 when v3 is missing', () => {
     // Write a v2-shaped payload to the legacy key, leave the v3 key empty.
     localStorage.removeItem('meeting-audio:captions:v3');
@@ -319,13 +429,34 @@ describe('captionStore persistence migration', () => {
       'meeting-audio:captions:v2',
       JSON.stringify({
         v: 2,
-        segments: [{ segmentId: 's1', provider: 'fake', source: 'fake_replay', mode: 'full_offline', status: 'final', text: 'legacy', startMs: 0 }],
-        translations: { s1: { sourceSegmentId: 's1', provider: 'fake', status: 'final', sourceText: 'l', targetText: '舊', sourceLanguage: 'en', targetLanguage: 'zh-Hant', updatedAt: '2026-05-19T00:00:00.000Z' } },
+        segments: [
+          {
+            segmentId: 's1',
+            provider: 'fake',
+            source: 'fake_replay',
+            mode: 'full_offline',
+            status: 'final',
+            text: 'legacy',
+            startMs: 0,
+          },
+        ],
+        translations: {
+          s1: {
+            sourceSegmentId: 's1',
+            provider: 'fake',
+            status: 'final',
+            sourceText: 'l',
+            targetText: '舊',
+            sourceLanguage: 'en',
+            targetLanguage: 'zh-Hant',
+            updatedAt: '2026-05-19T00:00:00.000Z',
+          },
+        },
         sessionStartMs: 0,
         savedAt: '2026-05-19T00:00:00.000Z',
       }),
     );
-    const store = createCaptionStore({});
+    const store = createCaptionStore({ persistenceEnabled: true });
     expect(store.getState().segments).toHaveLength(1);
     expect(store.getState().segments[0]?.text).toBe('legacy');
     expect(store.getState().translations.s1?.targetText).toBe('舊');
@@ -348,7 +479,17 @@ describe('captionStore: legacy phase migration (no spurious crash-continue)', ()
       key,
       JSON.stringify({
         v: 3,
-        segments: [{ segmentId: 's1', provider: 'fake', source: 'fake_replay', mode: 'full_offline', status: 'final', text: 'a', startMs: 0 }],
+        segments: [
+          {
+            segmentId: 's1',
+            provider: 'fake',
+            source: 'fake_replay',
+            mode: 'full_offline',
+            status: 'final',
+            text: 'a',
+            startMs: 0,
+          },
+        ],
         translations: {},
         sessionStartMs: 0,
         sessionId: 'old-id',
@@ -371,14 +512,18 @@ describe('captionStore: provider switch without transcript loss', () => {
     // store level.
     const store = createCaptionStore({ persistKey: null });
     store.getState().beginSession();
-    store.getState().applyTranscript(
-      transcript({ segmentId: 's1', status: 'final', text: 'before switch', startMs: 0 }),
-    );
+    store
+      .getState()
+      .applyTranscript(
+        transcript({ segmentId: 's1', status: 'final', text: 'before switch', startMs: 0 }),
+      );
     // Provider restarts without calling beginSession() — new provider feeds
     // events into the same store instance.
-    store.getState().applyTranscript(
-      transcript({ segmentId: 's2', status: 'final', text: 'after switch', startMs: 1000 }),
-    );
+    store
+      .getState()
+      .applyTranscript(
+        transcript({ segmentId: 's2', status: 'final', text: 'after switch', startMs: 1000 }),
+      );
     const segs = store.getState().segments;
     expect(segs).toHaveLength(2);
     expect(segs[0]?.text).toBe('before switch');
@@ -387,9 +532,11 @@ describe('captionStore: provider switch without transcript loss', () => {
 
   it('beginSession clears history (explicit new session — not a provider restart)', () => {
     const store = createCaptionStore({ persistKey: null });
-    store.getState().applyTranscript(
-      transcript({ segmentId: 's1', status: 'final', text: 'old session', startMs: 0 }),
-    );
+    store
+      .getState()
+      .applyTranscript(
+        transcript({ segmentId: 's1', status: 'final', text: 'old session', startMs: 0 }),
+      );
     store.getState().beginSession();
     expect(store.getState().segments).toHaveLength(0);
   });
@@ -402,9 +549,11 @@ describe('captionStore: translation failure isolation', () => {
     // store (e.g., the segment was already pruned or the event is stale),
     // the call must be a no-op for the caption history.
     const store = createCaptionStore({ persistKey: null });
-    store.getState().applyTranscript(
-      transcript({ segmentId: 's1', status: 'final', text: 'caption intact', startMs: 0 }),
-    );
+    store
+      .getState()
+      .applyTranscript(
+        transcript({ segmentId: 's1', status: 'final', text: 'caption intact', startMs: 0 }),
+      );
     expect(() => {
       store.getState().applyTranslation(translation('nonexistent-seg', 'final', ''));
     }).not.toThrow();
@@ -414,9 +563,11 @@ describe('captionStore: translation failure isolation', () => {
 
   it('empty-text translation does not corrupt the liveTranslation slot', () => {
     const store = createCaptionStore({ persistKey: null });
-    store.getState().applyTranscript(
-      transcript({ segmentId: 's1', status: 'partial', text: 'live', startMs: 0 }),
-    );
+    store
+      .getState()
+      .applyTranscript(
+        transcript({ segmentId: 's1', status: 'partial', text: 'live', startMs: 0 }),
+      );
     store.getState().applyTranslation(translation('s1', 'draft', ''));
     // liveTranslation should be set (even empty text is a valid draft)
     expect(store.getState().liveTranslation).not.toBeNull();
@@ -435,9 +586,11 @@ describe('captionStore: long-running memory stability', () => {
     const store = createCaptionStore({ maxSegments, persistKey: null });
     const burst = 500;
     for (let i = 0; i < burst; i++) {
-      store.getState().applyTranscript(
-        transcript({ segmentId: `s${i}`, status: 'final', text: `w${i}`, startMs: i * 100 }),
-      );
+      store
+        .getState()
+        .applyTranscript(
+          transcript({ segmentId: `s${i}`, status: 'final', text: `w${i}`, startMs: i * 100 }),
+        );
     }
     const segs = store.getState().segments;
     expect(segs.length).toBe(maxSegments);
@@ -453,9 +606,11 @@ describe('captionStore: long-running memory stability', () => {
     const maxSegments = 3;
     const store = createCaptionStore({ maxSegments, persistKey: null });
     for (let i = 0; i < 5; i++) {
-      store.getState().applyTranscript(
-        transcript({ segmentId: `s${i}`, status: 'final', text: `t${i}`, startMs: i * 100 }),
-      );
+      store
+        .getState()
+        .applyTranscript(
+          transcript({ segmentId: `s${i}`, status: 'final', text: `t${i}`, startMs: i * 100 }),
+        );
       store.getState().applyTranslation(translation(`s${i}`, 'final', `譯${i}`));
     }
     // s0 and s1 were evicted from segments[].
@@ -504,9 +659,13 @@ describe('captionStore.flushNow — interruption durability', () => {
     const store = createCaptionStore({ persistKey: key });
     const api = store.getState();
     api.beginSession();
-    api.applyTranscript(transcript({ segmentId: 'f1', status: 'final', text: 'finalized', startMs: 0 }));
+    api.applyTranscript(
+      transcript({ segmentId: 'f1', status: 'final', text: 'finalized', startMs: 0 }),
+    );
     // In-flight utterance — partial transcript + draft translation, never finalized.
-    api.applyTranscript(transcript({ segmentId: 'p2', status: 'partial', text: 'still talking', startMs: 1000 }));
+    api.applyTranscript(
+      transcript({ segmentId: 'p2', status: 'partial', text: 'still talking', startMs: 1000 }),
+    );
     api.applyTranslation(translation('p2', 'draft', '還在說'));
 
     api.flushNow(); // synchronous — no debounce wait
@@ -526,8 +685,12 @@ describe('captionStore.flushNow — interruption durability', () => {
     localStorage.removeItem(key);
     const store = createCaptionStore({ persistKey: key });
     const api = store.getState();
-    api.applyTranscript(transcript({ segmentId: 's2', status: 'partial', text: 'x', startMs: 100 }));
-    api.applyTranscript(transcript({ segmentId: 's2', status: 'final', text: 'x final', startMs: 100 }));
+    api.applyTranscript(
+      transcript({ segmentId: 's2', status: 'partial', text: 'x', startMs: 100 }),
+    );
+    api.applyTranscript(
+      transcript({ segmentId: 's2', status: 'final', text: 'x final', startMs: 100 }),
+    );
     expect(store.getState().livePartial).toBeNull();
 
     api.flushNow();
@@ -540,7 +703,9 @@ describe('captionStore.flushNow — interruption durability', () => {
 
   it('is a no-op (no throw) when persistence is disabled', () => {
     const store = createCaptionStore({ persistKey: null });
-    store.getState().applyTranscript(transcript({ segmentId: 's1', status: 'partial', text: 'a', startMs: 0 }));
+    store
+      .getState()
+      .applyTranscript(transcript({ segmentId: 's1', status: 'partial', text: 'a', startMs: 0 }));
     expect(() => store.getState().flushNow()).not.toThrow();
   });
 });
@@ -571,8 +736,14 @@ describe('captionStore: session lifecycle (crash-continue foundation)', () => {
 
     store.getState().beginSession('gemini');
     store.getState().applyTranscript({
-      kind: 'transcript', provider: 'gemini-live', mode: 'online_full', source: 'microphone',
-      segmentId: 'g1', status: 'final', text: 'kept across failover', startMs: 1,
+      kind: 'transcript',
+      provider: 'gemini-live',
+      mode: 'online_full',
+      source: 'microphone',
+      segmentId: 'g1',
+      status: 'final',
+      text: 'kept across failover',
+      startMs: 1,
     });
     expect(store.getState().sessionMode).toBe('gemini');
 
@@ -596,7 +767,9 @@ describe('captionStore: session lifecycle (crash-continue foundation)', () => {
     localStorage.removeItem(key);
     const store = createCaptionStore({ persistKey: key });
     store.getState().beginSession('gemini');
-    store.getState().applyTranscript(transcript({ segmentId: 's1', status: 'final', text: 'a', startMs: 0 }));
+    store
+      .getState()
+      .applyTranscript(transcript({ segmentId: 's1', status: 'final', text: 'a', startMs: 0 }));
     store.getState().setSessionPhase('paused');
     store.getState().flushNow();
     const parsed = JSON.parse(localStorage.getItem(key)!) as PersistedState;
@@ -613,9 +786,11 @@ describe('captionStore: localStorage tail bounding (IDB holds the full history)'
     const store = createCaptionStore({ persistKey: key });
     store.getState().beginSession('fake');
     for (let i = 0; i < 2100; i++) {
-      store.getState().applyTranscript(
-        transcript({ segmentId: `s${i}`, status: 'final', text: `w${i}`, startMs: i * 100 }),
-      );
+      store
+        .getState()
+        .applyTranscript(
+          transcript({ segmentId: `s${i}`, status: 'final', text: `w${i}`, startMs: i * 100 }),
+        );
     }
     store.getState().flushNow();
     const parsed = JSON.parse(localStorage.getItem(key)!) as PersistedState;
@@ -640,21 +815,30 @@ describe('mergeSnapshots — IDB(full) + localStorage(tail) union on crash recov
     ...over,
   });
   const seg = (id: string, startMs: number) => ({
-    segmentId: id, provider: 'fake', source: 'fake_replay' as const,
-    mode: 'full_offline' as const, status: 'final' as const, text: id, startMs,
+    segmentId: id,
+    provider: 'fake',
+    source: 'fake_replay' as const,
+    mode: 'full_offline' as const,
+    status: 'final' as const,
+    text: id,
+    startMs,
   });
 
   it('unions a fresher localStorage tail (with the in-flight final) onto the fuller IDB base', () => {
     // IDB: full history captured at the last debounce (s0..s2), older savedAt.
     const idb = snap({
       segments: [seg('s0', 0), seg('s1', 100), seg('s2', 200)],
-      savedAtMs: 1000, sessionPhase: 'running', sessionMode: 'gemini',
+      savedAtMs: 1000,
+      sessionPhase: 'running',
+      sessionMode: 'gemini',
     });
     // localStorage: the synchronous flushNow net, newer savedAt, holds the tail
     // PLUS the post-debounce in-flight final s3 that never reached IDB.
     const ls = snap({
       segments: [seg('s2', 200), seg('s3', 300)],
-      savedAtMs: 2000, sessionPhase: 'paused', sessionMode: 'gemini',
+      savedAtMs: 2000,
+      sessionPhase: 'paused',
+      sessionMode: 'gemini',
     });
     const merged = mergeSnapshots(ls, idb, 20000);
     expect(merged.segments.map((s) => s.segmentId)).toEqual(['s0', 's1', 's2', 's3']);
@@ -673,8 +857,20 @@ describe('mergeSnapshots — IDB(full) + localStorage(tail) union on crash recov
 describe('tailPayload', () => {
   it('returns the same payload when under the tail size', () => {
     const full: PersistedState = {
-      v: 4, segments: [{ segmentId: 's0', provider: 'f', source: 'fake_replay', mode: 'full_offline', status: 'final', text: 'a', startMs: 0 }],
-      translations: {}, savedAt: '2026-06-11T00:00:00.000Z',
+      v: 4,
+      segments: [
+        {
+          segmentId: 's0',
+          provider: 'f',
+          source: 'fake_replay',
+          mode: 'full_offline',
+          status: 'final',
+          text: 'a',
+          startMs: 0,
+        },
+      ],
+      translations: {},
+      savedAt: '2026-06-11T00:00:00.000Z',
     };
     expect(tailPayload(full, 2000)).toBe(full);
   });
@@ -704,7 +900,9 @@ describe('captionStore: emergency flush on page exit', () => {
       // nothing (segments[] ref unchanged), so disk is still empty here.
       store
         .getState()
-        .applyTranscript(transcript({ segmentId: 'p1', status: 'partial', text: 'mid sentence', startMs: 0 }));
+        .applyTranscript(
+          transcript({ segmentId: 'p1', status: 'partial', text: 'mid sentence', startMs: 0 }),
+        );
       expect(localStorage.getItem(key)).toBeNull();
 
       const visHandlers = captured['doc:visibilitychange'];

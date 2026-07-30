@@ -122,7 +122,12 @@ afterEach(() => {
 describe('OfflineSTTProvider', () => {
   it('sends start control message with langPair on open', async () => {
     const handlers = makeHandlers();
-    const provider = new OfflineSTTProvider('ws://localhost:8000/ws', handlers, makeMicMock(), 'en→zh-TW');
+    const provider = new OfflineSTTProvider(
+      'ws://localhost:8000/ws',
+      handlers,
+      makeMicMock(),
+      'en→zh-TW',
+    );
 
     await startProvider(provider);
 
@@ -218,9 +223,11 @@ describe('OfflineSTTProvider', () => {
     });
 
     expect(handlers.onTranslation).toHaveBeenCalledOnce();
-    const call = (handlers.onTranslation as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as {
-      targetText: string;
-    } | undefined;
+    const call = (handlers.onTranslation as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as
+      | {
+          targetText: string;
+        }
+      | undefined;
     expect(call?.targetText).toBe('最終文字。');
   });
 
@@ -311,9 +318,9 @@ describe('OfflineSTTProvider', () => {
     );
     // Must emit either api_error or offline_engine_unavailable — either
     // indicates the offline service is unreachable.
-    expect(
-      states.includes('api_error') || states.includes('offline_engine_unavailable'),
-    ).toBe(true);
+    expect(states.includes('api_error') || states.includes('offline_engine_unavailable')).toBe(
+      true,
+    );
   });
 
   it('stop() emits stopped health events and closes WebSocket', async () => {
@@ -336,7 +343,12 @@ describe('OfflineSTTProvider', () => {
   it('start message includes translate:true by default', async () => {
     const handlers = makeHandlers();
     // OfflineSTTProvider 4th arg = langPair, no translate arg → defaults to true
-    const provider = new OfflineSTTProvider('ws://localhost:8000/ws', handlers, makeMicMock(), 'en→zh-TW');
+    const provider = new OfflineSTTProvider(
+      'ws://localhost:8000/ws',
+      handlers,
+      makeMicMock(),
+      'en→zh-TW',
+    );
 
     await startProvider(provider);
 
@@ -376,7 +388,11 @@ describe('OfflineSTTProvider', () => {
 // time-gutter elapsed isn't clamped to 0:00 and (b) reconnect / Resume segments
 // don't sort to the front of history.
 
-function lastTranscript(handlers: CaptionProviderHandlers): { startMs: number; endMs?: number; segmentId?: string } {
+function lastTranscript(handlers: CaptionProviderHandlers): {
+  startMs: number;
+  endMs?: number;
+  segmentId?: string;
+} {
   const calls = (handlers.onTranscript as ReturnType<typeof vi.fn>).mock.calls;
   return calls[calls.length - 1]![0] as { startMs: number; endMs?: number; segmentId?: string };
 }
@@ -390,8 +406,15 @@ describe('OfflineSTTProvider — wall-clock timeline rebase', () => {
       await startProvider(provider); // onopen sets anchor = 1_000_000_000_000
 
       mockWsInstance!.simulateMessage({
-        kind: 'transcript', provider: 'offline-stt', mode: 'full_offline', source: 'microphone',
-        segmentId: 'seg-1000', status: 'final', text: 'Hello.', startMs: 1000, endMs: 2000,
+        kind: 'transcript',
+        provider: 'offline-stt',
+        mode: 'full_offline',
+        source: 'microphone',
+        segmentId: 'seg-1000',
+        status: 'final',
+        text: 'Hello.',
+        startMs: 1000,
+        endMs: 2000,
       });
 
       const ev = lastTranscript(handlers);
@@ -417,8 +440,14 @@ describe('OfflineSTTProvider — wall-clock timeline rebase', () => {
 
       // Connection #1: a late segment at relative 5000.
       mockWsInstance!.simulateMessage({
-        kind: 'transcript', provider: 'offline-stt', mode: 'full_offline', source: 'microphone',
-        segmentId: 'a', status: 'final', text: 'first', startMs: 5000,
+        kind: 'transcript',
+        provider: 'offline-stt',
+        mode: 'full_offline',
+        source: 'microphone',
+        segmentId: 'a',
+        status: 'final',
+        text: 'first',
+        startMs: 5000,
       });
       const firstAbs = lastTranscript(handlers).startMs; // 1_005_000
 
@@ -430,8 +459,14 @@ describe('OfflineSTTProvider — wall-clock timeline rebase', () => {
 
       // Connection #2: WHL restarts relative timestamps at 0.
       mockWsInstance!.simulateMessage({
-        kind: 'transcript', provider: 'offline-stt', mode: 'full_offline', source: 'microphone',
-        segmentId: 'b', status: 'final', text: 'second', startMs: 0,
+        kind: 'transcript',
+        provider: 'offline-stt',
+        mode: 'full_offline',
+        source: 'microphone',
+        segmentId: 'b',
+        status: 'final',
+        text: 'second',
+        startMs: 0,
       });
       const secondAbs = lastTranscript(handlers).startMs; // 1_050_000
 

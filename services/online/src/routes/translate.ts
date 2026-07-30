@@ -108,7 +108,10 @@ export async function registerTranslate(app: FastifyInstance): Promise<void> {
       res = outcome.res;
     } catch (err) {
       const isAbort = err instanceof Error && err.name === 'TimeoutError';
-      req.log.warn({ err: err instanceof Error ? err.message : String(err) }, '/translate fetch failed');
+      req.log.warn(
+        { err: err instanceof Error ? err.message : String(err) },
+        '/translate fetch failed',
+      );
       if (isAbort) return reply.status(504).send({ error: 'Translation request timed out' });
       return reply.status(502).send({ error: 'Translation upstream failed' });
     }
@@ -116,7 +119,9 @@ export async function registerTranslate(app: FastifyInstance): Promise<void> {
     if (!res.ok) {
       const body = await res.text().catch(() => '<unreadable>');
       req.log.warn({ status: res.status, body: body.slice(0, 500) }, '/translate upstream non-2xx');
-      return reply.status(res.status < 500 ? res.status : 502).send({ error: 'Translation upstream error' });
+      return reply
+        .status(res.status < 500 ? res.status : 502)
+        .send({ error: 'Translation upstream error' });
     }
 
     const data = (await res.json()) as { choices: { message: { content: string } }[] };

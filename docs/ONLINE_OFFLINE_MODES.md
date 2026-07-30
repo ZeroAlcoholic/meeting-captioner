@@ -53,12 +53,12 @@ audio → local STT (services/offline) → local MT (Argos) → UI
 
 ## Component Responsibilities by Mode
 
-| Component | Online Full | Hybrid Privacy | Full Offline |
-|-----------|-------------|----------------|--------------|
+| Component     | Online Full    | Hybrid Privacy | Full Offline   |
+| ------------- | -------------- | -------------- | -------------- |
 | Audio capture | browser/native | browser/native | browser/native |
-| STT | OpenAI | local | local |
-| Translation | OpenAI | online (text) | local (Argos) |
-| Summary | OpenAI (later) | online (text) | local or off |
+| STT           | OpenAI         | local          | local          |
+| Translation   | OpenAI         | online (text)  | local (Argos)  |
+| Summary       | OpenAI (later) | online (text)  | local or off   |
 
 ---
 

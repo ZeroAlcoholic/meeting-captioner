@@ -57,7 +57,7 @@ async def test_healthz_ok_false_when_unavailable() -> None:
     assert body["whisper_status"] == "unavailable"
 
 
-async def test_healthz_ok_false_when_unavailable() -> None:
+async def test_healthz_exposes_error_when_unavailable() -> None:
     with (
         patch("app.main._whisper_status", "unavailable"),
         patch("app.main._whisper_error", "WhisperLiveKit not reachable on port 9090"),
@@ -140,7 +140,7 @@ class _FakeWhlWs:
         try:
             return next(self._iter)
         except StopIteration:
-            raise StopAsyncIteration
+            raise StopAsyncIteration from None
 
     async def __aenter__(self):
         return self

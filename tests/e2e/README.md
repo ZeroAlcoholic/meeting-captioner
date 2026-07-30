@@ -3,11 +3,13 @@
 Playwright cross-app end-to-end tests.
 
 ## First-time setup
+
 ```
 pnpm exec playwright install chromium
 ```
 
 ## Run
+
 ```
 pnpm test:e2e
 ```
@@ -16,12 +18,14 @@ The config auto-spawns `pnpm -F @meeting-audio/web dev` on port 5173 if
 no dev server is already running.
 
 ## What this covers in P0
+
 - Caption board renders empty state
 - Start Fake Replay produces transcript + translation final states
 - Specific scripted text appears (zh-Hant target + en source)
 - Stop button halts the replay
 
 ## KEEPALIVE reliability (`online-keepalive.spec.ts` + `online-mock.ts`)
+
 `online-mock.ts` provides `installOnlineMocks(page)`: an in-browser mock backend
 for both online providers (no cloud key needed). It replaces
 `RTCPeerConnection`/`RTCDataChannel`, `WebSocket` (Gemini host ONLY — every other
@@ -43,5 +47,6 @@ transcript preserved, Gemini happy path + auto-reconnect. See `docs/TEST_PLAN.md
 §"KEEPALIVE … (T0–T2)".
 
 ## Future
+
 - Failure-state surfaces (no audio track, audio source ended)
 - Offline/hybrid server-unavailable e2e

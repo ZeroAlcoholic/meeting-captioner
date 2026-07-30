@@ -1,4 +1,9 @@
-import type { AudioLevelEvent, HealthEvent, TranscriptEvent, TranslationEvent } from '@meeting-audio/contracts';
+import type {
+  AudioLevelEvent,
+  HealthEvent,
+  TranscriptEvent,
+  TranslationEvent,
+} from '@meeting-audio/contracts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FakeReplayProvider, FakeReplayScript } from './fake-replay-provider.js';
 
@@ -91,7 +96,9 @@ describe('FakeReplayProvider — multi-event dispatch', () => {
     const { provider, transcripts, translations, healths, levels } = makeProvider();
     provider.start();
     vi.advanceTimersByTime(1000);
-    for (const e of [...transcripts, ...translations, ...healths, ...levels] as ReadonlyArray<Record<string, unknown>>) {
+    for (const e of [...transcripts, ...translations, ...healths, ...levels] as ReadonlyArray<
+      Record<string, unknown>
+    >) {
       expect(e.tMs).toBeUndefined();
     }
   });
@@ -113,8 +120,6 @@ describe('FakeReplayScript schema', () => {
   });
 
   it('rejects unknown kind', () => {
-    expect(() =>
-      FakeReplayScript.parse([{ tMs: 0, kind: 'mystery' }]),
-    ).toThrow();
+    expect(() => FakeReplayScript.parse([{ tMs: 0, kind: 'mystery' }])).toThrow();
   });
 });

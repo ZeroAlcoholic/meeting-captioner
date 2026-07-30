@@ -40,9 +40,11 @@ describe('POST /session/gemini', () => {
 
   it('mints an ephemeral token and returns token + prefixed model', async () => {
     mockConfig.GEMINI_API_KEY = 'gk-test';
-    const fetchMock = vi.fn().mockResolvedValueOnce(
-      new Response(JSON.stringify({ name: 'auth_tokens/abc123' }), { status: 200 }),
-    );
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ name: 'auth_tokens/abc123' }), { status: 200 }),
+      );
     vi.stubGlobal('fetch', fetchMock);
 
     const app = Fastify({ logger: false });
@@ -79,7 +81,10 @@ describe('POST /session/gemini', () => {
 
   it('502 when upstream response lacks a token name', async () => {
     mockConfig.GEMINI_API_KEY = 'gk-test';
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({}), { status: 200 })));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({}), { status: 200 })),
+    );
     const app = Fastify({ logger: false });
     await registerGemini(app);
     const res = await app.inject({ method: 'POST', url: '/session/gemini' });

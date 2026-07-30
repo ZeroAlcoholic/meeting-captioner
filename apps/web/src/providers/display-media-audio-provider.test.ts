@@ -3,7 +3,11 @@ import type { HealthEvent } from '@meeting-audio/contracts';
 import { DisplayMediaAudioProvider } from './display-media-audio-provider.js';
 
 function fakeStream(opts: {
-  audioTracks?: Array<{ stop: ReturnType<typeof vi.fn>; addEventListener?: ReturnType<typeof vi.fn>; removeEventListener?: ReturnType<typeof vi.fn> }>;
+  audioTracks?: Array<{
+    stop: ReturnType<typeof vi.fn>;
+    addEventListener?: ReturnType<typeof vi.fn>;
+    removeEventListener?: ReturnType<typeof vi.fn>;
+  }>;
   videoTracks?: Array<{ enabled: boolean; stop: ReturnType<typeof vi.fn> }>;
 }): MediaStream {
   const audio = opts.audioTracks ?? [];
@@ -94,9 +98,7 @@ describe('DisplayMediaAudioProvider', () => {
       mediaDevices: { getDisplayMedia: vi.fn().mockResolvedValue(stream) },
     });
 
-    await expect(provider.acquire((e) => events.push(e))).rejects.toThrow(
-      /No audio track/,
-    );
+    await expect(provider.acquire((e) => events.push(e))).rejects.toThrow(/No audio track/);
 
     // requesting_permission, then no_audio_track (NOT a 'failed' state which
     // would tag the wrong root cause for the UI's actionable copy).

@@ -24,12 +24,96 @@ TL;DR:
 
 ---
 
+## Phase 1 operating rules
+
+### Local-only production launch
+
+The production-style offline launchers bind both services to loopback and do
+not enable Uvicorn reload:
+
+```powershell
+.\services\offline\start.bat
+```
+
+```bash
+./services/offline/start.sh
+```
+
+Expected listeners are `127.0.0.1:9090` (WhisperLiveKit) and
+`127.0.0.1:8000` (FastAPI). A wildcard/LAN bind is not a supported default.
+
+### Transcript retention
+
+**本機保存逐字稿** is off by default. While off, captions remain in memory for
+the current page only and are not restored after reload. Enabling it explicitly
+persists the current snapshot. Turning it off immediately removes the app's
+localStorage/legacy snapshots and serially clears IndexedDB; the captions still
+visible on the current page are not erased. Use Export before reload if the
+meeting must be retained as a file.
+
+### Stop before changing session configuration
+
+While a session is running, mode, scenario, online backend, and language pair
+are locked. Press **Stop**, wait for the stopped state, then change settings and
+start again. Stop releases the active microphone/display track and transport;
+there is no supported in-place provider handoff.
+
+### Offline translation pressure
+
+Offline MT is serialized through a FIFO queue with capacity 10. If translation
+falls behind, the oldest queued translation is dropped so transcript reception
+continues, and the UI receives `translation:degraded`. The current caption
+source text remains available; do not restart WHL merely because this health
+state appears. Reduce input rate or investigate MT/model performance.
+
+### Live upstream contract probe
+
+This release operation uses real server-side credentials and is never implied by
+unit-test success. Obtain explicit authorization before running:
+
+```powershell
+pnpm -F @meeting-audio/online probe:upstream-contracts
+pnpm -F @meeting-audio/online verify:upstream-contracts
+```
+
+Required environment variables: `OPENAI_API_KEY` and `GEMINI_API_KEY`;
+`OPENAI_API_KEY_AUDIO` is an optional OpenAI 401/403 fallback. The probe creates
+an OpenAI translation client secret, creates a one-use Gemini auth token, and
+opens Gemini only long enough to receive `setupComplete`. It sends no audio or
+transcript content.
+
+Success writes:
+
+```text
+tests/fixtures/upstream-contracts/openai-realtime-translate.json
+tests/fixtures/upstream-contracts/gemini-live-translate.json
+```
+
+Inspect both files before commit. They must contain placeholders instead of API
+keys, ephemeral credentials, ids, and unstable timestamps. A failed or
+unauthorized probe is an explicit unverified release operation, not a passing
+Phase 1 result. The second command reads both fixtures back through the exact
+contract validators and exits non-zero if either file is missing, malformed, or
+records a non-dedicated model; it is required in addition to manual secret
+inspection. Before accepting Phase 1, also confirm the Gemini provider unit test
+imports and compares the recorded `clientFrame`, and `tests/e2e/online-mock.ts`
+imports the recorded `serverFrame`; a standalone validator is not a substitute
+for those consumers.
+
+Last accepted recording: 2026-07-30 (`b8029e6`). The minimal OpenAI and Gemini
+calls passed with explicit authorization; verifier, source-key scans, provider
+golden comparison, E2E golden acknowledgement, and the full release matrix all
+passed. No audio or transcript content was sent.
+
+---
+
 ## Project KEEPALIVE — manual verification (needs live keys / a real meeting)
 
 Automated coverage (238 web unit + 15 Playwright e2e) cannot exercise a real
 backend failure, so verify these by hand before relying on a long meeting:
 
 **Cross-model failover (#21):**
+
 1. Set `OPENAI_API_KEY` and `GEMINI_API_KEY` in the system env; start the online
    service + web app; Start OpenAI and confirm captions.
 2. Force a backend failure — e.g. disconnect the network for ~40 s, or block
@@ -63,7 +147,7 @@ pnpm dev                  # web + online (concurrently)
 pnpm -F web dev           # web only
 pnpm -F online dev        # online only
 cd services/offline
-uv run uvicorn app.main:app --port 8000   # offline only
+uv run uvicorn app.main:app --host 127.0.0.1 --port 8000   # offline dev only
 ```
 
 Open http://localhost:5173.
@@ -84,7 +168,8 @@ cd services/offline && uv run pytest
 ## Lint / Format / Typecheck
 
 ```
-pnpm lint                 # eslint + prettier --check
+pnpm lint                 # eslint
+pnpm format:check         # prettier check (cross-platform EOL aware)
 pnpm format               # prettier --write
 pnpm typecheck            # tsc --noEmit
 cd services/offline && uv run ruff check .
@@ -94,11 +179,11 @@ cd services/offline && uv run ruff check .
 
 ## Default Ports
 
-| Service | Port | Override env var |
-|---------|------|------------------|
-| Web (Vite) | 5173 | (Vite default) |
-| Online | 8787 | `ONLINE_PORT` |
-| Offline | 8000 | `OFFLINE_PORT` |
+| Service    | Port | Override env var |
+| ---------- | ---- | ---------------- |
+| Web (Vite) | 5173 | (Vite default)   |
+| Online     | 8787 | `ONLINE_PORT`    |
+| Offline    | 8000 | `OFFLINE_PORT`   |
 
 Free a port (Windows):
 
@@ -146,20 +231,25 @@ cd services/offline && uv sync
 ## Common Issues
 
 ### `pnpm: command not found`
+
 Run `npm install -g pnpm`, then re-open the shell.
 
 ### `uv: command not found`
+
 Windows: `winget install --id=astral-sh.uv -e`
-macOS:   `brew install uv`
-Linux:   `curl -LsSf https://astral.sh/uv/install.sh | sh`
+macOS: `brew install uv`
+Linux: `curl -LsSf https://astral.sh/uv/install.sh | sh`
 
 ### Port already in use
+
 See "Default Ports" above.
 
 ### CRLF warnings on Windows
+
 Expected. Git is normalizing to LF on commit; harmless.
 
 ### Playwright browsers not installed
+
 `pnpm exec playwright install`
 
 ---
@@ -171,6 +261,7 @@ Commit Sequence" for a 7-commit Conventional Commits split, or use a
 single commit if you prefer.
 
 Steps:
+
 1. Set git identity once (repo-local; CLAUDE.md forbids agents touching
    global git config):
    ```
@@ -206,14 +297,14 @@ ping OpenAI.
 
 ### `/session` failure modes
 
-| Status | Meaning | Operator action |
-|--------|---------|-----------------|
-| 200 | Ephemeral token returned with `session_renewal_recommended_ms` | — |
-| 400 | Invalid request body (unknown key or bad `langPair`) | Fix client |
-| 429 | Per-IP rate limit (`SESSION_RATE_LIMIT_PER_MIN`) exceeded | Throttle client; raise env if legitimate |
-| 502 | Upstream network error (DNS, connection refused) | Check egress firewall |
-| 503 | `OPENAI_API_KEY` missing | Set env var, restart |
-| 401/403 persisting | Both OpenAI keys rejected upstream | Check key restrictions; see key failover below |
+| Status             | Meaning                                                        | Operator action                                |
+| ------------------ | -------------------------------------------------------------- | ---------------------------------------------- |
+| 200                | Ephemeral token returned with `session_renewal_recommended_ms` | —                                              |
+| 400                | Invalid request body (unknown key or bad `langPair`)           | Fix client                                     |
+| 429                | Per-IP rate limit (`SESSION_RATE_LIMIT_PER_MIN`) exceeded      | Throttle client; raise env if legitimate       |
+| 502                | Upstream network error (DNS, connection refused)               | Check egress firewall                          |
+| 503                | `OPENAI_API_KEY` missing                                       | Set env var, restart                           |
+| 401/403 persisting | Both OpenAI keys rejected upstream                             | Check key restrictions; see key failover below |
 
 ### OpenAI key failover (`OPENAI_API_KEY_AUDIO`)
 
@@ -255,21 +346,21 @@ A passive monitor records caption latency for the running session (no HUD, no
 perf cost). To read it during/after a REAL-key session, open DevTools console:
 
 ```js
-window.__latency.summary()   // current session, per provider: ttfcMs, lagP50/P95, samples
-window.__latency.export()    // raw per-segment samples (for analysis)
-window.__latency.history()   // last 50 past-session summaries (persisted in localStorage)
+window.__latency.summary(); // current session, per provider: ttfcMs, lagP50/P95, samples
+window.__latency.export(); // raw per-segment samples (for analysis)
+window.__latency.history(); // last 50 past-session summaries (persisted in localStorage)
 ```
 
 Metrics are ARRIVAL-based proxies (honest caveat):
-- `ttfcMs`  — transport 'connecting' → first translation (bring-up felt latency)
-- `lagMs`   — a segment's first event → its first translation (responsiveness)
-- `durMs`   — a segment's first event → finalization
+
+- `ttfcMs` — transport 'connecting' → first translation (bring-up felt latency)
+- `lagMs` — a segment's first event → its first translation (responsiveness)
+- `durMs` — a segment's first event → finalization
 
 It also logs a one-line `[latency] …` summary to the console every ~15 s. Use it
 to compare OpenAI vs Gemini on the SAME spoken input and pick the faster backend.
 For true spoken-word→on-screen latency, do a clap/marker test against the real
 key (the monitor numbers are the repeatable in-app proxy, not microphone-truth).
-
 
 ## YouTube / web-page audio realtime field test
 
@@ -302,11 +393,17 @@ Recording is explicit. Normal use is not recorded unless the operator presses
    DevTools console:
 
    ```js
-   console.log(JSON.stringify({
-     fieldHistory: window.__fieldTest.history(),
-     latencySummary: window.__latency.summary(),
-     latencyHistory: window.__latency.history()
-   }, null, 2));
+   console.log(
+     JSON.stringify(
+       {
+         fieldHistory: window.__fieldTest.history(),
+         latencySummary: window.__latency.summary(),
+         latencyHistory: window.__latency.history(),
+       },
+       null,
+       2,
+     ),
+   );
    ```
 
 Optional markers while a run is active:

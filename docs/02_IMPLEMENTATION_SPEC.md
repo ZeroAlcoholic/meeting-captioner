@@ -287,7 +287,7 @@ translation:
   fallback_path:
     engine: ctranslate2
     model: Helsinki-NLP/opus-mt-en-zh
-    target_token: ">>cmn_Hant<<"
+    target_token: '>>cmn_Hant<<'
     timeout_ms: 250
     enabled: true
 

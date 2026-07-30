@@ -70,7 +70,14 @@ function kinds(events: Collected['events']): Set<string> {
 describe('provider conformance — every emitted event matches NormalizedEvent', () => {
   it('OpenAIRealtimeProvider (deltas, finalize, error) emits only normalized events', () => {
     const { handlers, events } = collector();
-    const p = new OpenAIRealtimeProvider('http://x/session', handlers, 'en→zh-TW', stubMic, true, 'meeting');
+    const p = new OpenAIRealtimeProvider(
+      'http://x/session',
+      handlers,
+      'en→zh-TW',
+      stubMic,
+      true,
+      'meeting',
+    );
     const pa = p as unknown as {
       _status: string;
       newSegment(): void;
@@ -97,12 +104,20 @@ describe('provider conformance — every emitted event matches NormalizedEvent',
 
   it('GeminiLiveProvider (setup, transcription, sentence-finalize, goAway) emits only normalized events', () => {
     const { handlers, events } = collector();
-    const g = new GeminiLiveProvider('http://x/session/gemini', handlers, stubMic, 'en→zh-TW', 'meeting');
+    const g = new GeminiLiveProvider(
+      'http://x/session/gemini',
+      handlers,
+      stubMic,
+      'en→zh-TW',
+      'meeting',
+    );
     const ga = g as unknown as { _status: string };
     ga._status = 'running';
 
     g.handleServerObject({ setupComplete: {} }); // health: connected
-    g.handleServerObject({ serverContent: { inputTranscription: { text: 'Hello team.', languageCode: 'en-US' } } });
+    g.handleServerObject({
+      serverContent: { inputTranscription: { text: 'Hello team.', languageCode: 'en-US' } },
+    });
     g.handleServerObject({ serverContent: { outputTranscription: { text: '大家好。' } } }); // sentence end → finalize
     g.handleServerObject({ serverContent: { turnComplete: true } });
     g.handleServerObject({ sessionResumptionUpdate: { newHandle: 'handle-1', resumable: true } });
@@ -125,20 +140,53 @@ describe('provider conformance — every emitted event matches NormalizedEvent',
     };
     oa.connectionAnchorMs = 10_000; // simulate a connected-and-anchored session
 
-    const baseT = { provider: 'offline-stt', mode: 'full_offline' as const, source: 'microphone' as const };
-    oa.handleEvent({ kind: 'transcript', ...baseT, segmentId: 'o1', status: 'partial', text: 'partial line', startMs: 200 });
-    oa.handleEvent({ kind: 'transcript', ...baseT, segmentId: 'o1', status: 'final', text: 'final line.', startMs: 200, endMs: 1200 });
+    const baseT = {
+      provider: 'offline-stt',
+      mode: 'full_offline' as const,
+      source: 'microphone' as const,
+    };
     oa.handleEvent({
-      kind: 'translation', provider: 'offline-stt', mode: 'full_offline',
-      sourceSegmentId: 'o1', status: 'final', sourceText: 'final line.', targetText: '最終句。',
-      sourceLanguage: 'en', targetLanguage: 'zh-Hant', updatedAt: '2026-06-12T00:00:00.000Z',
+      kind: 'transcript',
+      ...baseT,
+      segmentId: 'o1',
+      status: 'partial',
+      text: 'partial line',
+      startMs: 200,
     });
-    oa.handleEvent({ kind: 'health', component: 'stt', state: 'connected', timestamp: '2026-06-12T00:00:00.000Z' });
+    oa.handleEvent({
+      kind: 'transcript',
+      ...baseT,
+      segmentId: 'o1',
+      status: 'final',
+      text: 'final line.',
+      startMs: 200,
+      endMs: 1200,
+    });
+    oa.handleEvent({
+      kind: 'translation',
+      provider: 'offline-stt',
+      mode: 'full_offline',
+      sourceSegmentId: 'o1',
+      status: 'final',
+      sourceText: 'final line.',
+      targetText: '最終句。',
+      sourceLanguage: 'en',
+      targetLanguage: 'zh-Hant',
+      updatedAt: '2026-06-12T00:00:00.000Z',
+    });
+    oa.handleEvent({
+      kind: 'health',
+      component: 'stt',
+      state: 'connected',
+      timestamp: '2026-06-12T00:00:00.000Z',
+    });
 
     expectAllConform(events);
     expect(kinds(events)).toEqual(new Set(['transcript', 'translation', 'health']));
     // The rebase shifted startMs onto the wall-clock anchor (still a valid, nonneg int).
-    const finalT = events.find((e) => e.kind === 'transcript' && e.status === 'final') as TranscriptEvent;
+    const finalT = events.find(
+      (e) => e.kind === 'transcript' && e.status === 'final',
+    ) as TranscriptEvent;
     expect(finalT.startMs).toBe(10_200);
   });
 
@@ -146,11 +194,57 @@ describe('provider conformance — every emitted event matches NormalizedEvent',
     vi.useFakeTimers();
     const { handlers, events } = collector();
     const script: FakeReplayScript = [
-      { kind: 'health', component: 'transport', state: 'connected', timestamp: '2026-06-12T00:00:00.000Z', tMs: 0 },
-      { kind: 'transcript', provider: 'fake-replay', mode: 'full_offline', source: 'fake_replay', segmentId: 'f1', status: 'partial', text: 'Welcome.', startMs: 0, tMs: 10 },
-      { kind: 'translation', provider: 'fake-replay', mode: 'full_offline', sourceSegmentId: 'f1', status: 'draft', sourceText: 'Welcome.', targetText: '歡迎。', sourceLanguage: 'en', targetLanguage: 'zh-Hant', updatedAt: '2026-06-12T00:00:00.000Z', tMs: 20 },
-      { kind: 'transcript', provider: 'fake-replay', mode: 'full_offline', source: 'fake_replay', segmentId: 'f1', status: 'final', text: 'Welcome.', startMs: 0, endMs: 500, tMs: 30 },
-      { kind: 'audio_level', source: 'fake_replay', rmsDb: -24, peakDb: -12, timestamp: '2026-06-12T00:00:00.000Z', tMs: 40 },
+      {
+        kind: 'health',
+        component: 'transport',
+        state: 'connected',
+        timestamp: '2026-06-12T00:00:00.000Z',
+        tMs: 0,
+      },
+      {
+        kind: 'transcript',
+        provider: 'fake-replay',
+        mode: 'full_offline',
+        source: 'fake_replay',
+        segmentId: 'f1',
+        status: 'partial',
+        text: 'Welcome.',
+        startMs: 0,
+        tMs: 10,
+      },
+      {
+        kind: 'translation',
+        provider: 'fake-replay',
+        mode: 'full_offline',
+        sourceSegmentId: 'f1',
+        status: 'draft',
+        sourceText: 'Welcome.',
+        targetText: '歡迎。',
+        sourceLanguage: 'en',
+        targetLanguage: 'zh-Hant',
+        updatedAt: '2026-06-12T00:00:00.000Z',
+        tMs: 20,
+      },
+      {
+        kind: 'transcript',
+        provider: 'fake-replay',
+        mode: 'full_offline',
+        source: 'fake_replay',
+        segmentId: 'f1',
+        status: 'final',
+        text: 'Welcome.',
+        startMs: 0,
+        endMs: 500,
+        tMs: 30,
+      },
+      {
+        kind: 'audio_level',
+        source: 'fake_replay',
+        rmsDb: -24,
+        peakDb: -12,
+        timestamp: '2026-06-12T00:00:00.000Z',
+        tMs: 40,
+      },
     ];
     const f = new FakeReplayProvider(script, handlers);
     void f.start();

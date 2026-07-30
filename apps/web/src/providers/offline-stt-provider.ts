@@ -4,7 +4,12 @@ import type {
   TranscriptEvent,
   TranslationEvent,
 } from '@meeting-audio/contracts';
-import type { AudioSource, CaptionProvider, CaptionProviderHandlers, ProviderStatus } from './types.js';
+import type {
+  AudioSource,
+  CaptionProvider,
+  CaptionProviderHandlers,
+  ProviderStatus,
+} from './types.js';
 import { MicrophoneAudioProvider } from './microphone-audio-provider.js';
 import { getCaptureContext, ensureCaptureWorklet, resumeCaptureContext } from './audio-engine.js';
 
@@ -127,7 +132,14 @@ export class OfflineSTTProvider implements CaptionProvider {
         // Anchor this connection's relative timeline onto wall-clock NOW, so a
         // reconnect / Resume continues monotonically instead of restarting at 0.
         this.connectionAnchorMs = Date.now();
-        ws.send(JSON.stringify({ type: 'start', langPair: this.langPair, source: this.audioSource, translate: this.translate }));
+        ws.send(
+          JSON.stringify({
+            type: 'start',
+            langPair: this.langPair,
+            source: this.audioSource,
+            translate: this.translate,
+          }),
+        );
         clearTimeout(timeout);
         this.reconnectAttempts = 0;
         resolve();
@@ -262,7 +274,11 @@ export class OfflineSTTProvider implements CaptionProvider {
               `Sustained WS backpressure (${this.wsBackpressureConsecutiveDrops} consecutive drops) — forcing reconnect`,
             );
             this.wsBackpressureConsecutiveDrops = 0;
-            try { this.ws.close(); } catch { /* noop */ }
+            try {
+              this.ws.close();
+            } catch {
+              /* noop */
+            }
           }
           return;
         }

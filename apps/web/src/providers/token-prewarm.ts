@@ -25,10 +25,7 @@ export class WarmTokenCache<T> {
     private readonly now: () => number = () => Date.now(),
   ) {}
 
-  private isFresh(
-    entry: { mintedAt: number; expiresAtMs: number | null },
-    nowMs: number,
-  ): boolean {
+  private isFresh(entry: { mintedAt: number; expiresAtMs: number | null }, nowMs: number): boolean {
     if (nowMs - entry.mintedAt > this.freshTtlMs) return false;
     if (entry.expiresAtMs !== null && entry.expiresAtMs - nowMs < this.expirySafetyMs) return false;
     return true;

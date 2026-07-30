@@ -30,15 +30,15 @@ These map to the `HealthEvent.state` enum in `packages/contracts`.
 
 ## Degradation Rules (must hold at all times)
 
-| Trigger | Required behavior |
-|---------|------------------|
-| Translated audio fails | Keep translated text |
-| Translation fails | Keep source transcript |
-| Summary fails | Keep captions |
-| Online fails | Allow offline or retry |
-| Offline fails | Allow online or retry |
-| Audio source ends | Keep transcript, show restart UI |
-| Provider switch | Do not clear transcript unless user requests |
+| Trigger                | Required behavior                            |
+| ---------------------- | -------------------------------------------- |
+| Translated audio fails | Keep translated text                         |
+| Translation fails      | Keep source transcript                       |
+| Summary fails          | Keep captions                                |
+| Online fails           | Allow offline or retry                       |
+| Offline fails          | Allow online or retry                        |
+| Audio source ends      | Keep transcript, show restart UI             |
+| Provider switch        | Do not clear transcript unless user requests |
 
 The caption path **never** waits on summary, model load, persistence, or
 animation. See [`CLAUDE.md`](../CLAUDE.md) §"Caption Path Is Sacred".
@@ -50,12 +50,12 @@ animation. See [`CLAUDE.md`](../CLAUDE.md) §"Caption Path Is Sacred".
 Both online backends now follow the same three-tier "never go dark" model:
 
 1. **Intra-model self-heal** (automatic, invisible):
-   - *OpenAI:* ICE-restart backoff → full session rebuild on ICE/connection
+   - _OpenAI:_ ICE-restart backoff → full session rebuild on ICE/connection
      `failed` or `session.closed`; a **stale-data detector** (DC silent > 30 s
      while audio is active) forces a rebuild; the scheduled 25-min renewal is
      **make-before-break** (new peer built over the same mic stream, then
      swapped) so it costs **zero caption gap** and never re-acquires the mic.
-   - *Gemini:* WS `onclose` AND a **receive-side wedge detector** (no
+   - _Gemini:_ WS `onclose` AND a **receive-side wedge detector** (no
      serverContent > 30 s while audio active) trigger a session-resuming
      reconnect; reconnect retries **forever** with a capped backoff.
 2. **Surface `failed` while still retrying** — after the fast retries are

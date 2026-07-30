@@ -1,11 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { config } from '../config.js';
-import {
-  fetchWithOpenAIKeyFailover,
-  hasAnyOpenAIKey,
-  type OpenAIKeySlot,
-} from '../openai-keys.js';
+import { fetchWithOpenAIKeyFailover, hasAnyOpenAIKey, type OpenAIKeySlot } from '../openai-keys.js';
 import { recordOpenAIReachability } from './healthz.js';
 
 const TRANSLATION_CLIENT_SECRETS_URL =
@@ -109,9 +105,7 @@ export async function registerSession(app: FastifyInstance): Promise<void> {
     }
 
     if (isRateLimited(req.ip, config.SESSION_RATE_LIMIT_PER_MIN)) {
-      return reply
-        .status(429)
-        .send({ error: 'Too many session requests; retry in a minute' });
+      return reply.status(429).send({ error: 'Too many session requests; retry in a minute' });
     }
 
     // Parse body permissively — empty body is allowed and means defaults.

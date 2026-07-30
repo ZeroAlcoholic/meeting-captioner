@@ -91,12 +91,20 @@ describe('online service', () => {
     expect(pkg.dependencies?.dotenv).toBeUndefined();
     expect(pkg.devDependencies?.dotenv).toBeUndefined();
 
-    const configSrc = fs.readFileSync(
-      path.resolve(__dirname, 'config.ts'),
-      'utf8',
-    );
+    const configSrc = fs.readFileSync(path.resolve(__dirname, 'config.ts'), 'utf8');
     expect(configSrc).not.toMatch(/from\s+['"]dotenv['"]/);
     expect(configSrc).not.toMatch(/require\(\s*['"]dotenv['"]\s*\)/);
+  });
+
+  it('does not accumulate process exit listeners across test app lifecycles', async () => {
+    const listenersBefore = process.listenerCount('exit');
+
+    for (let index = 0; index < 2; index += 1) {
+      const app = await buildApp();
+      await app.close();
+    }
+
+    expect(process.listenerCount('exit')).toBe(listenersBefore);
   });
 
   describe('static SPA fallback (slim release)', () => {
@@ -144,24 +152,21 @@ describe('online service', () => {
       await app.close();
     });
 
-    it.each([
-      '/favicon.ico',
-      '/robots.txt',
-      '/sitemap.xml',
-      '/something.map',
-      '/foo/bar.png',
-    ])('GET %s returns 404 (file-ext heuristic; not SPA fallback)', async (path) => {
-      // Caught in Phase D: GET /favicon.ico used to return HTML (the
-      // index.html fallback), which the browser then warned about as a
-      // content-type mismatch. The heuristic: any path whose final segment
-      // looks like a file (has an extension) must be a real 404 if not on
-      // disk, never the SPA fallback.
-      const app = await buildApp();
-      const res = await app.inject({ method: 'GET', url: path });
-      expect(res.statusCode).toBe(404);
-      expect(res.body).not.toContain('<html>');
-      await app.close();
-    });
+    it.each(['/favicon.ico', '/robots.txt', '/sitemap.xml', '/something.map', '/foo/bar.png'])(
+      'GET %s returns 404 (file-ext heuristic; not SPA fallback)',
+      async (path) => {
+        // Caught in Phase D: GET /favicon.ico used to return HTML (the
+        // index.html fallback), which the browser then warned about as a
+        // content-type mismatch. The heuristic: any path whose final segment
+        // looks like a file (has an extension) must be a real 404 if not on
+        // disk, never the SPA fallback.
+        const app = await buildApp();
+        const res = await app.inject({ method: 'GET', url: path });
+        expect(res.statusCode).toBe(404);
+        expect(res.body).not.toContain('<html>');
+        await app.close();
+      },
+    );
 
     it('GET /assets/app.js serves the actual asset', async () => {
       const app = await buildApp();

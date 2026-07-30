@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import type {
   AudioLevelEvent,
   HealthEvent,
@@ -59,7 +59,9 @@ describe('createStoreBoundHandlers — partial throttling', () => {
   it('queues partials and flushes once per scheduler tick', () => {
     const queue: Array<() => void> = [];
     const handlers = createStoreBoundHandlers({
-      scheduler: (cb) => { queue.push(cb); },
+      scheduler: (cb) => {
+        queue.push(cb);
+      },
     });
 
     handlers.onTranscript(partial('s1', 'h'));
@@ -81,7 +83,9 @@ describe('createStoreBoundHandlers — partial throttling', () => {
   it('finals bypass the queue and flush immediately', () => {
     const queue: Array<() => void> = [];
     const handlers = createStoreBoundHandlers({
-      scheduler: (cb) => { queue.push(cb); },
+      scheduler: (cb) => {
+        queue.push(cb);
+      },
     });
 
     handlers.onTranscript(partial('s1', 'hello'));
@@ -101,7 +105,9 @@ describe('createStoreBoundHandlers — partial throttling', () => {
   it('draft translations are throttled; final translations bypass', () => {
     const queue: Array<() => void> = [];
     const handlers = createStoreBoundHandlers({
-      scheduler: (cb) => { queue.push(cb); },
+      scheduler: (cb) => {
+        queue.push(cb);
+      },
     });
 
     handlers.onTranslation(draft('s1', '你'));
@@ -126,7 +132,9 @@ describe('createStoreBoundHandlers — partial throttling', () => {
     // only the SAME-segment partial is cleared.
     const queue: Array<() => void> = [];
     const handlers = createStoreBoundHandlers({
-      scheduler: (cb) => { queue.push(cb); },
+      scheduler: (cb) => {
+        queue.push(cb);
+      },
     });
 
     // Partial B is queued first.
@@ -147,7 +155,9 @@ describe('createStoreBoundHandlers — partial throttling', () => {
   it('out-of-order: final translation for A does NOT clear pending draft for B', () => {
     const queue: Array<() => void> = [];
     const handlers = createStoreBoundHandlers({
-      scheduler: (cb) => { queue.push(cb); },
+      scheduler: (cb) => {
+        queue.push(cb);
+      },
     });
 
     // First a transcript-partial for B (so the store routes B's draft to

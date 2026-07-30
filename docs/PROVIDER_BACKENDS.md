@@ -18,19 +18,20 @@ UI selector lives in Settings → "Online backend". Default: OpenAI.
 
 ## Provider comparison (verified June 2026)
 
-| | OpenAI (shipped) | Azure OpenAI (designed) | Gemini (by key, built) |
-|---|---|---|---|
-| Realtime translate | `gpt-realtime-translate` | same model (deployment) | `gemini-3.1-flash-live-preview` |
-| Protocol | WebRTC (SDP) | WebRTC (SDP, same shape) | **WebSocket** |
-| Token broker | `/v1/realtime/translations/client_secrets` | `…/openai/v1/realtime/client_secrets` | `auth_tokens` → our `/session/gemini` |
-| Browser connect | `…/translations/calls` (Bearer ephemeral) | `…/openai/v1/realtime/calls` | `…BidiGenerateContentConstrained?access_token=` |
-| Model id | model name | **deployment name** (`session.model`) | model id (`models/…`) |
-| Translation | dedicated translate model | dedicated translate model | **system instruction** |
-| Source partials | yes (whisper) | `.completed` only (partials unconfirmed) | 2.5 yes / **3.1 end-of-utterance** |
-| Session cap | long + renewal | ~30 min → rolling reconnect | 15 min → compression + resumption + GoAway |
-| Auth (server) | `OPENAI_API_KEY` | api-key / Entra (`Cognitive Services User`) | `GEMINI_API_KEY` |
+|                    | OpenAI (shipped)                           | Azure OpenAI (designed)                     | Gemini (by key, built)                          |
+| ------------------ | ------------------------------------------ | ------------------------------------------- | ----------------------------------------------- |
+| Realtime translate | `gpt-realtime-translate`                   | same model (deployment)                     | `gemini-3.1-flash-live-preview`                 |
+| Protocol           | WebRTC (SDP)                               | WebRTC (SDP, same shape)                    | **WebSocket**                                   |
+| Token broker       | `/v1/realtime/translations/client_secrets` | `…/openai/v1/realtime/client_secrets`       | `auth_tokens` → our `/session/gemini`           |
+| Browser connect    | `…/translations/calls` (Bearer ephemeral)  | `…/openai/v1/realtime/calls`                | `…BidiGenerateContentConstrained?access_token=` |
+| Model id           | model name                                 | **deployment name** (`session.model`)       | model id (`models/…`)                           |
+| Translation        | dedicated translate model                  | dedicated translate model                   | **system instruction**                          |
+| Source partials    | yes (whisper)                              | `.completed` only (partials unconfirmed)    | 2.5 yes / **3.1 end-of-utterance**              |
+| Session cap        | long + renewal                             | ~30 min → rolling reconnect                 | 15 min → compression + resumption + GoAway      |
+| Auth (server)      | `OPENAI_API_KEY`                           | api-key / Entra (`Cognitive Services User`) | `GEMINI_API_KEY`                                |
 
 ### Traditional Chinese (繁體中文) — carefully checked
+
 - **OpenAI / Azure** `gpt-realtime-translate`: output language list exposes only
   **"Mandarin"** (no Simplified/Traditional script switch); effectively
   **Simplified** → the project converts with **OpenCC** (`to_traditional`).
@@ -39,6 +40,7 @@ UI selector lives in Settings → "Online backend". Default: OpenAI.
 - **Cross-provider safety net**: keep OpenCC post-processing on all backends.
 
 ### Azure region (gpt-realtime-translate / -whisper, Global Standard, 2026-06-03)
+
 Canada Central · Central US · **East US 2** · France Central · Sweden Central ·
 South India. (Earlier "only CA/FR/IN" was an outdated snapshot — East US 2 IS
 supported.)
@@ -79,6 +81,7 @@ which keys exist); the Settings selector greys out unconfigured backends.
 - See `PROJECT_STATE.md` "Multi-backend (P-A/P-C)" for the file list + tests.
 
 ### Live-verify checklist — DONE 2026-06-09 (real GEMINI_API_KEY)
+
 1. ✅ `auth_tokens`: body `{uses,expireTime,newSessionExpireTime}` → `{name}`; `?key=` auth.
    Fixed a bug — `liveConnectConstraints` rejected; model-lock via
    `bidiGenerateContentSetup` made the WS close `1011`, so mint **unconstrained**.

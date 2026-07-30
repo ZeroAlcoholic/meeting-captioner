@@ -144,7 +144,10 @@ export class LatencyMonitor {
     }
     const out: ProviderSummary[] = [];
     for (const [provider, arr] of byProvider) {
-      const lags = arr.map((s) => s.lagMs).filter((x) => x >= 0).sort((a, b) => a - b);
+      const lags = arr
+        .map((s) => s.lagMs)
+        .filter((x) => x >= 0)
+        .sort((a, b) => a - b);
       const durs = arr.map((s) => s.durMs).sort((a, b) => a - b);
       out.push({
         provider,
@@ -160,7 +163,11 @@ export class LatencyMonitor {
 
   /** Full raw export (for offline analysis). */
   export(): { sessionProvider: string | null; ttfcMs: number | null; samples: LatencySample[] } {
-    return { sessionProvider: this.sessionProvider, ttfcMs: this.ttfcMs, samples: [...this.samples] };
+    return {
+      sessionProvider: this.sessionProvider,
+      ttfcMs: this.ttfcMs,
+      samples: [...this.samples],
+    };
   }
 
   /** Persisted rolling history of past session summaries (survives reloads). */
@@ -182,7 +189,10 @@ export class LatencyMonitor {
     try {
       const prior = this.history();
       // Replace the most recent entry if it's THIS session (same start), else append.
-      const entry: PersistedSessionSummary = { endedAt: new Date(this.now()).toISOString(), byProvider };
+      const entry: PersistedSessionSummary = {
+        endedAt: new Date(this.now()).toISOString(),
+        byProvider,
+      };
       const next = [...prior, entry].slice(-PERSIST_HISTORY_CAP);
       localStorage.setItem(PERSIST_KEY, JSON.stringify(next));
     } catch {
@@ -200,7 +210,10 @@ export class LatencyMonitor {
     console.info(
       '[latency]',
       s
-        .map((p) => `${p.provider}: ttfc=${p.ttfcMs ?? '–'}ms lagP50=${p.lagP50 ?? '–'}ms lagP95=${p.lagP95 ?? '–'}ms n=${p.samples}`)
+        .map(
+          (p) =>
+            `${p.provider}: ttfc=${p.ttfcMs ?? '–'}ms lagP50=${p.lagP50 ?? '–'}ms lagP95=${p.lagP95 ?? '–'}ms n=${p.samples}`,
+        )
         .join(' | '),
     );
   }

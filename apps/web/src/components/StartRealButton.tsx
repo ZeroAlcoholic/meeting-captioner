@@ -19,16 +19,16 @@ export interface StartRealButtonProps {
 }
 
 const LABEL_BY_STATUS: Record<ApiKeyStatus, string> = {
-  checking:       '🎤 Checking…',
-  present:        '🎤 Start Real',
-  'no-key':       '🔑 No API Key',
+  checking: '🎤 Checking…',
+  present: '🎤 Start Real',
+  'no-key': '🔑 No API Key',
   'service-down': '⚠ Online Service Down',
 };
 
 const BASE_TITLE_BY_STATUS: Record<ApiKeyStatus, string | undefined> = {
-  checking:       'Checking online service…',
-  present:        undefined,
-  'no-key':       'OPENAI_API_KEY not configured on server',
+  checking: 'Checking online service…',
+  present: undefined,
+  'no-key': 'OPENAI_API_KEY not configured on server',
   'service-down': 'Online service unreachable — start it via start-dev.bat',
 };
 
@@ -53,8 +53,7 @@ export const StartRealButton = memo(function StartRealButton(props: StartRealBut
   }, [running, getRenewalEtaMs]);
 
   const disabled = apiKeyStatus !== 'present' || isOtherRunning;
-  const renewalSuffix =
-    running && etaMs !== null ? ` — Auto-renew in ${formatEta(etaMs)}` : '';
+  const renewalSuffix = running && etaMs !== null ? ` — Auto-renew in ${formatEta(etaMs)}` : '';
   const baseTitle = BASE_TITLE_BY_STATUS[apiKeyStatus];
   const title =
     apiKeyStatus === 'present'

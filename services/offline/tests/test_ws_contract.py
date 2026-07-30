@@ -185,7 +185,10 @@ def test_final_transcript_event_schema():
         }],
     })
 
-    with patch("app.pipeline.asr.websockets.connect", _mock_connect([SERVER_READY, seg_with_logprob])):
+    with patch(
+        "app.pipeline.asr.websockets.connect",
+        _mock_connect([SERVER_READY, seg_with_logprob]),
+    ):
         with TestClient(app) as client:
             with client.websocket_connect("/ws") as ws:
                 ws.send_json({"type": "start", "langPair": "en→zh-TW", "translate": False})

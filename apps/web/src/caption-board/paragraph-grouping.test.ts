@@ -42,10 +42,7 @@ function tr(sourceSegmentId: string, sourceText: string, targetText: string): Ca
 
 describe('groupParagraphsForSide — EN side', () => {
   it('breaks paragraphs at sentence-ending punctuation', () => {
-    const segments = [
-      seg('a', "OK so let's pick up.", 0),
-      seg('b', "I think we're ready.", 1500),
-    ];
+    const segments = [seg('a', "OK so let's pick up.", 0), seg('b', "I think we're ready.", 1500)];
     const out = groupParagraphsForSide({
       segments,
       translations: {},
@@ -84,7 +81,9 @@ describe('groupParagraphsForSide — EN side', () => {
       accessor: (s) => s.text,
     });
     expect(out).toHaveLength(1);
-    expect(out[0]?.text).toBe('Yeah, but we still need to confirm the path on Windows— should that be bundled?');
+    expect(out[0]?.text).toBe(
+      'Yeah, but we still need to confirm the path on Windows— should that be bundled?',
+    );
   });
 });
 
@@ -110,7 +109,7 @@ describe('groupParagraphsForSide — ZH side', () => {
 
   it('uses U+2009 thin space when merging two CJK-adjacent segments', () => {
     const segments = [
-      seg('a', '好，我們從上次中斷的路線圖繼續', 0),         // no 「。」 → merges
+      seg('a', '好，我們從上次中斷的路線圖繼續', 0), // no 「。」 → merges
       seg('b', '我覺得 offline 流水線下週可以開始。', 1100),
     ];
     const out = groupParagraphsForSide({
@@ -121,7 +120,9 @@ describe('groupParagraphsForSide — ZH side', () => {
     });
     expect(out).toHaveLength(1);
     // Adjacent CJK chars 「續」+「我」 should be joined by U+2009 thin space — visible breath but no injected punctuation.
-    expect(out[0]?.text).toBe('好，我們從上次中斷的路線圖繼續' + THIN_SPACE + '我覺得 offline 流水線下週可以開始。');
+    expect(out[0]?.text).toBe(
+      '好，我們從上次中斷的路線圖繼續' + THIN_SPACE + '我覺得 offline 流水線下週可以開始。',
+    );
   });
 });
 
@@ -167,7 +168,7 @@ describe('groupParagraphsForSide — independent split between sides', () => {
 describe('groupParagraphsForSide — paragraph cap and gap break', () => {
   it('breaks paragraph when gap exceeds PARAGRAPH_GAP_MS even without punctuation', () => {
     const segments = [
-      seg('a', 'first chunk', 0,    { endMs: 800 }),
+      seg('a', 'first chunk', 0, { endMs: 800 }),
       seg('b', 'second chunk', 5000, { endMs: 5800 }), // 4.2s gap from prev paragraph end
     ];
     const out = groupParagraphsForSide({
@@ -183,8 +184,8 @@ describe('groupParagraphsForSide — paragraph cap and gap break', () => {
 describe('confidence dim flag', () => {
   it('marks paragraph confLow=true if any constituent segment has confidence < threshold', () => {
     const segments = [
-      seg('a', 'high conf piece', 0,    { confidence: 0.9 }),
-      seg('b', 'low conf piece',  1100, { confidence: 0.4 }),
+      seg('a', 'high conf piece', 0, { confidence: 0.9 }),
+      seg('b', 'low conf piece', 1100, { confidence: 0.4 }),
     ];
     const out = groupParagraphsForSide({
       segments,

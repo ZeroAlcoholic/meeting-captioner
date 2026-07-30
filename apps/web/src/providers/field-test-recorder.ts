@@ -90,7 +90,10 @@ function summarizeSamples(samples: LatencySample[]): FieldTestRunSummary[] {
     byProvider.set(sample.provider, arr);
   }
   return Array.from(byProvider.entries()).map(([provider, arr]) => {
-    const lags = arr.map((s) => s.lagMs).filter((x) => x >= 0).sort((a, b) => a - b);
+    const lags = arr
+      .map((s) => s.lagMs)
+      .filter((x) => x >= 0)
+      .sort((a, b) => a - b);
     const durs = arr.map((s) => s.durMs).sort((a, b) => a - b);
     return {
       provider,

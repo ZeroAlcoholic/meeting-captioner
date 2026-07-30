@@ -45,7 +45,8 @@ function openDb(): Promise<IDBDatabase> {
     // so callers fall back cleanly (idbLoad → null, idbSave/idbClear → no-op).
     // Harmless today (DB_VERSION never bumped) but prevents a future version
     // bump from wedging hydration with a multi-tab session.
-    req.onblocked = () => reject(new Error('indexedDB open blocked (another tab holds an older version)'));
+    req.onblocked = () =>
+      reject(new Error('indexedDB open blocked (another tab holds an older version)'));
   });
 }
 

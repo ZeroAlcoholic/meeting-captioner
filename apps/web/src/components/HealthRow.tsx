@@ -4,9 +4,9 @@ import type { ModeId } from '../settings/settings-store.js';
 import styles from './HealthRow.module.css';
 
 const COMPONENTS_BY_MODE: Record<ModeId, readonly HealthComponent[]> = {
-  online_full:     ['audio', 'transport', 'translation'],
-  hybrid_privacy:  ['audio', 'stt', 'transport', 'translation'],
-  full_offline:    ['audio', 'stt', 'translation'],
+  online_full: ['audio', 'transport', 'translation'],
+  hybrid_privacy: ['audio', 'stt', 'transport', 'translation'],
+  full_offline: ['audio', 'stt', 'translation'],
 };
 
 const LABEL: Record<HealthComponent, string> = {

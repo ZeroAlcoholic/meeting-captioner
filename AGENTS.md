@@ -28,8 +28,9 @@
 ## Setup
 
 See [`README.md`](README.md) Quick Start. Bootstrap scripts:
+
 - Windows: `.\scripts\setup.ps1`
-- Unix:    `./scripts/setup.sh`
+- Unix: `./scripts/setup.sh`
 
 Always run `scripts/doctor` after setup to verify the environment.
 
@@ -78,7 +79,7 @@ For any non-trivial change:
 1. **Explore** — read the relevant docs and code first.
 2. **Plan** — write or update a plan; align on approach before editing.
 3. **Implement** — smallest robust vertical slice.
-4. **Verify** — tests, Playwright check, screenshot, or reproducible manual steps. Code compiling is *not* verification.
+4. **Verify** — tests, Playwright check, screenshot, or reproducible manual steps. Code compiling is _not_ verification.
 5. **Update docs** — `docs/PROJECT_STATE.md`, `docs/DECISIONS.md`, `docs/TODO.md` as relevant.
 6. **Report** — what changed / files / how to run / how verified / risks / next.
 
@@ -86,21 +87,22 @@ For any non-trivial change:
 
 ## Subagent Map (when delegating)
 
-| Topic | Subagent intent |
-|-------|-----------------|
-| OpenAI Realtime, WebRTC, SDP, session tokens | realtime-webrtc-agent |
-| WhisperLiveKit, faster-whisper, VAD, streaming policy | offline-stt-agent |
-| Mic, browser tab/system audio, WASAPI loopback | audio-capture-agent |
-| Fullscreen caption board, accessibility, typography | caption-ux-agent |
-| Summary draft/refined/stable pipeline | summary-agent |
-| Reconnect, silence, long-running tests, bounded memory | reliability-agent |
-| API key handling, offline guarantee, retention, deps | security-review-agent |
+| Topic                                                  | Subagent intent       |
+| ------------------------------------------------------ | --------------------- |
+| OpenAI Realtime, WebRTC, SDP, session tokens           | realtime-webrtc-agent |
+| WhisperLiveKit, faster-whisper, VAD, streaming policy  | offline-stt-agent     |
+| Mic, browser tab/system audio, WASAPI loopback         | audio-capture-agent   |
+| Fullscreen caption board, accessibility, typography    | caption-ux-agent      |
+| Summary draft/refined/stable pipeline                  | summary-agent         |
+| Reconnect, silence, long-running tests, bounded memory | reliability-agent     |
+| API key handling, offline guarantee, retention, deps   | security-review-agent |
 
 ---
 
 ## Done Definition (per [`CLAUDE.md`](CLAUDE.md))
 
 A feature is done only when:
+
 - it works in the app
 - visible success/failure states exist
 - it emits normalized events if relevant

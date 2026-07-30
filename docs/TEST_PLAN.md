@@ -7,15 +7,15 @@
 
 ## Test Levels
 
-| Level | Tool | Where | What it covers |
-|-------|------|-------|----------------|
-| Unit | Vitest | `packages/contracts`, `apps/web` | event schema, store reducers, pure logic |
-| Component | Vitest + Testing Library | `apps/web` | React components in isolation |
-| Service unit | Vitest | `services/online` | route handlers, validators |
-| Service unit (Py) | pytest | `services/offline` | adapters, VAD, streaming policy |
-| Integration | scripts in `tests/integration/` | spawn services, hit endpoints | service ↔ contract correctness |
-| E2E | Playwright | `tests/e2e/` | full UI flows, fake replay |
-| Stability | custom harness | `tests/stability/` | long-running memory + reconnect |
+| Level             | Tool                            | Where                            | What it covers                           |
+| ----------------- | ------------------------------- | -------------------------------- | ---------------------------------------- |
+| Unit              | Vitest                          | `packages/contracts`, `apps/web` | event schema, store reducers, pure logic |
+| Component         | Vitest + Testing Library        | `apps/web`                       | React components in isolation            |
+| Service unit      | Vitest                          | `services/online`                | route handlers, validators               |
+| Service unit (Py) | pytest                          | `services/offline`               | adapters, VAD, streaming policy          |
+| Integration       | scripts in `tests/integration/` | spawn services, hit endpoints    | service ↔ contract correctness           |
+| E2E               | Playwright                      | `tests/e2e/`                     | full UI flows, fake replay               |
+| Stability         | custom harness                  | `tests/stability/`               | long-running memory + reconnect          |
 
 ---
 
@@ -142,8 +142,50 @@ Run: `pnpm -F @meeting-audio/web test` (unit incl. T1/T2) and
 
 ---
 
+## Phase 1 closure verification (2026-07-30)
+
+| Requirement                                   | Automated evidence                                                                                   |
+| --------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Gemini exact model/setup/ack/no fallback      | `gemini-live-provider.test.ts`, online config/route tests                                            |
+| Retention default-off and race-safe disable   | `caption-persistence.test.ts`, caption-store/settings tests, retention-aware E2E                     |
+| Stop-before-switch and resource release       | `mode-switch.spec.ts`, `scenario-switch.spec.ts`, `online-keepalive.spec.ts` capture/peer counters   |
+| MT backpressure outside caption receive loop  | `test_translation_dispatcher.py`, `test_asr_session.py`                                              |
+| Loopback-only production launch               | `test_launch_policy.py`, `bash -n services/offline/start.sh`                                         |
+| Normalized event boundary and bounded history | provider conformance/property/soak tests                                                             |
+| Recorded upstream fixture integrity           | `probe-upstream-contracts.test.ts`, `verify:upstream-contracts` (fails closed when files are absent) |
+
+Release matrix last run on 2026-07-30:
+
+```text
+pnpm test              # contracts 19, online 65, web 293
+pnpm test:e2e          # Playwright 30
+pnpm lint              # 0 errors, 0 warnings
+pnpm format:check      # pass
+pnpm typecheck         # pass
+pnpm build             # pass
+& 'C:\Programs\miniforge3\envs\deve\python.exe' -m pytest services/offline/tests -q # offline 81
+cd services/offline && uv run ruff check . # pass
+```
+
+The live-key operation remains separate from CI. Run
+`pnpm -F @meeting-audio/online probe:upstream-contracts` only with explicit
+credential authorization. Acceptance requires both redacted files under
+`tests/fixtures/upstream-contracts/`, a passing
+`pnpm -F @meeting-audio/online verify:upstream-contracts`, and a manual check
+that no source API key, ephemeral token, session id, or unstable timestamp
+remains. The verifier reads both stored artifacts and fails if either file is
+missing or violates the exact model/schema contract. The provider unit test
+must also compare its emitted setup with the recorded `clientFrame`, and the
+E2E mock must source its acknowledgement from the recorded `serverFrame`.
+
+Completed 2026-07-30 with explicit authorization: both live calls passed, no
+audio/transcript was sent, `b8029e6` records the redacted fixtures and golden
+consumers, the verifier and source-key scans passed, and the complete matrix
+above was rerun successfully.
+
+---
+
 ## Open Questions
 
-- Long-running stability test: 60 min vs 4 hr default?
-- Where do we host model/API regression fixtures? (Probably
-  `tests/fixtures/`, gitignored if large.)
+- The Phase 4 real-session soak target remains 30–60 minutes plus a 1-hour
+  bounded-heap run; the former 4-hour default is explicitly deferred.
