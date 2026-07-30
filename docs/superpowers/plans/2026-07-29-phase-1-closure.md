@@ -53,7 +53,7 @@
 - Modify: `apps/web/src/providers/gemini-live-provider.test.ts`
 - Modify: `tests/e2e/online-mock.ts`
 
-- [ ] **Step 1: Write failing golden-consumption tests**
+- [x] **Step 1: Write failing golden-consumption tests**
 
 Add a fixture import to `gemini-live-provider.test.ts` and compare the provider's
 actual setup frame with `geminiGolden.clientFrame`. Change `online-mock.ts` to
@@ -82,7 +82,7 @@ expect(
 });
 ```
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 Run:
 
@@ -93,7 +93,7 @@ pnpm -F online test -- scripts/probe-upstream-contracts.test.ts
 
 Expected: FAIL because the fixtures and probe module do not exist.
 
-- [ ] **Step 3: Implement the probe and generate, rather than hand-author, fixtures**
+- [x] **Step 3: Implement the probe and generate, rather than hand-author, fixtures**
 
 The probe sends this Gemini client frame and records its redacted request plus
 the real `setupComplete` acknowledgement:
@@ -163,7 +163,7 @@ Add:
 
 to `services/online/package.json`.
 
-- [ ] **Step 4: Verify GREEN and run the live probe when keys are present**
+- [x] **Step 4: Verify GREEN and run the live probe when keys are present**
 
 Run:
 
@@ -178,7 +178,7 @@ keys and create both fixtures; the fixture-consuming provider test then PASSes.
 If either key is absent or rejected, Task 1 remains incomplete and phase 1
 cannot be closed.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add tests/fixtures/upstream-contracts services/online/scripts services/online/package.json apps/web/src/providers/gemini-live-provider.test.ts tests/e2e/online-mock.ts
@@ -192,7 +192,7 @@ git commit -m "test: record upstream realtime contracts"
 - Modify: `apps/web/src/providers/gemini-live-provider.ts`
 - Modify: `apps/web/src/providers/gemini-live-provider.test.ts`
 
-- [ ] **Step 1: Write failing readiness and rejection tests**
+- [x] **Step 1: Write failing readiness and rejection tests**
 
 Add four focused tests:
 
@@ -212,7 +212,7 @@ Also cover close-before-setup, setup timeout, and a token response carrying
 `models/gemini-2.5-flash-native-audio-preview` producing `api_error`, zero
 WebSockets, and zero audio-worklet nodes.
 
-- [ ] **Step 2: Run the provider test and verify RED**
+- [x] **Step 2: Run the provider test and verify RED**
 
 Run:
 
@@ -223,7 +223,7 @@ pnpm -F web test -- src/providers/gemini-live-provider.test.ts
 Expected: readiness test FAIL because `connect()` resolves in `onopen`;
 unsupported-model test FAIL because the fallback setup branch still exists.
 
-- [ ] **Step 3: Implement a setup-complete connection promise**
+- [x] **Step 3: Implement a setup-complete connection promise**
 
 Use one settlement guard in `connect()`:
 
@@ -262,7 +262,7 @@ function assertTranslateModel(model: string): void {
 
 Delete `systemInstructionFor` and the native-audio setup branch.
 
-- [ ] **Step 4: Verify GREEN and related regressions**
+- [x] **Step 4: Verify GREEN and related regressions**
 
 Run:
 
@@ -273,7 +273,7 @@ pnpm -F web typecheck
 
 Expected: all selected tests PASS and typecheck is clean.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add apps/web/src/providers/gemini-live-provider.ts apps/web/src/providers/gemini-live-provider.test.ts
@@ -293,7 +293,7 @@ git commit -m "fix(web): require Gemini setup completion"
 - Modify: `apps/web/src/settings/settings-store.test.ts`
 - Modify: `apps/web/src/components/SettingsPanel.tsx`
 
-- [ ] **Step 1: Write failing preference and controller tests**
+- [x] **Step 1: Write failing preference and controller tests**
 
 Add settings tests proving:
 
@@ -315,7 +315,7 @@ Add controller/store tests proving:
 - disabling leaves store segments intact and removes both storage tiers;
 - a deferred older `idbSave` cannot recreate data after disable.
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 Run:
 
@@ -326,7 +326,7 @@ pnpm -F web test -- src/settings/settings-store.test.ts src/store/caption-persis
 Expected: FAIL because the preference, controller, and transition API do not
 exist and the current caption store persists by default.
 
-- [ ] **Step 3: Implement the focused controller**
+- [x] **Step 3: Implement the focused controller**
 
 Define:
 
@@ -375,7 +375,7 @@ Add `transcriptRetentionEnabled` and
 false. Add a Settings checkbox labeled `本機保存逐字稿` with explicit local-only
 and deletion wording.
 
-- [ ] **Step 4: Verify GREEN and persistence regressions**
+- [x] **Step 4: Verify GREEN and persistence regressions**
 
 Run:
 
@@ -386,7 +386,7 @@ pnpm -F web typecheck
 
 Expected: tests PASS, with no console warnings and clean typecheck.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add apps/web/src/store apps/web/src/settings apps/web/src/components/SettingsPanel.tsx
@@ -404,7 +404,7 @@ git commit -m "feat(web): make transcript retention opt-in"
 - Modify: `tests/e2e/scenario-switch.spec.ts`
 - Modify: `tests/e2e/online-keepalive.spec.ts`
 
-- [ ] **Step 1: Change E2E expectations to the required lock and verify RED**
+- [x] **Step 1: Change E2E expectations to the required lock and verify RED**
 
 For Mode and Scenario:
 
@@ -432,7 +432,7 @@ pnpm test:e2e -- mode-switch.spec.ts scenario-switch.spec.ts online-keepalive.sp
 Expected: Mode and Scenario lock assertions FAIL because those controls ignore
 `sessionActive`.
 
-- [ ] **Step 2: Implement one lock input**
+- [x] **Step 2: Implement one lock input**
 
 Change selectors to:
 
@@ -447,7 +447,7 @@ Apply the same shape to `ScenarioPicker`. Set `disabled`, `data-disabled`, and a
 `會議進行中 — 請先 Stop` title. Pass `sessionActive ?? false` from
 `SettingsPanel`.
 
-- [ ] **Step 3: Verify GREEN**
+- [x] **Step 3: Verify GREEN**
 
 Run:
 
@@ -459,7 +459,7 @@ pnpm -F web typecheck
 Expected: all selected E2E tests PASS, settings unlock only after Stop, and
 caption history remains visible.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```powershell
 git add apps/web/src/components/ModeSelector.tsx apps/web/src/components/ScenarioPicker.tsx apps/web/src/components/SettingsPanel.tsx tests/e2e/mode-switch.spec.ts tests/e2e/scenario-switch.spec.ts tests/e2e/online-keepalive.spec.ts
@@ -475,7 +475,7 @@ git commit -m "fix(web): lock session configuration while running"
 - Modify: `services/offline/app/pipeline/asr.py`
 - Modify: `services/offline/tests/test_asr_session.py`
 
-- [ ] **Step 1: Write failing dispatcher tests**
+- [x] **Step 1: Write failing dispatcher tests**
 
 Use the required Python runtime:
 
@@ -503,7 +503,7 @@ Add tests for FIFO order, enqueue returning immediately while the worker is
 blocked, worker exception callback, cancellation/no late emit, and
 `translate_enabled=False` never starting/enqueuing the dispatcher.
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 Run:
 
@@ -514,7 +514,7 @@ Run:
 Expected: FAIL because `TranslationDispatcher` does not exist and ASR still
 waits on `_pending_translates`.
 
-- [ ] **Step 3: Implement the dispatcher**
+- [x] **Step 3: Implement the dispatcher**
 
 Use one bounded `asyncio.Queue[dict]`:
 
@@ -541,7 +541,7 @@ returns a drop. Delete `_pending_translates`, `_max_pending_translates`, and the
 `asyncio.wait(FIRST_COMPLETED)` cap branch. Before emitting a translation result,
 check `not self._closed`.
 
-- [ ] **Step 4: Verify GREEN and full offline suite**
+- [x] **Step 4: Verify GREEN and full offline suite**
 
 Run:
 
@@ -553,7 +553,7 @@ Run:
 
 Expected: all offline tests PASS and Ruff reports no violations.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add services/offline/app/pipeline/translation_dispatcher.py services/offline/app/pipeline/asr.py services/offline/tests/test_translation_dispatcher.py services/offline/tests/test_asr_session.py
@@ -571,7 +571,7 @@ git commit -m "fix(offline): isolate translation backpressure"
 - Modify: `package.json`
 - Modify: `services/offline/README.md`
 
-- [ ] **Step 1: Write the failing static policy test**
+- [x] **Step 1: Write the failing static policy test**
 
 ```python
 @pytest.mark.parametrize("relative", ["start.bat", "start.sh"])
@@ -589,7 +589,7 @@ def test_whl_is_loopback_only():
 Add a root-package assertion that `dev:full` contains neither bare `python` nor
 `0.0.0.0`.
 
-- [ ] **Step 2: Run test and verify RED**
+- [x] **Step 2: Run test and verify RED**
 
 Run:
 
@@ -599,7 +599,7 @@ Run:
 
 Expected: FAIL on current `0.0.0.0`, `--reload`, and bare Python command.
 
-- [ ] **Step 3: Update production launch paths**
+- [x] **Step 3: Update production launch paths**
 
 Set:
 
@@ -625,7 +625,7 @@ there. Production `start.bat` and `start.sh` contain no reload flag. Keep
 `services/offline/README.md`'s development reload command explicitly bound to
 `127.0.0.1`.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run:
 
@@ -636,7 +636,7 @@ pnpm format:check
 
 Expected: policy test and formatting PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add services/offline/run_whl.py services/offline/start.bat services/offline/start.sh services/offline/README.md services/offline/tests/test_launch_policy.py package.json
@@ -653,7 +653,7 @@ git commit -m "fix(offline): bind production services to loopback"
 - Modify: `docs/RUNBOOK.md`
 - Modify: `docs/BLUEPRINT_2026-07-29.md`
 
-- [ ] **Step 1: Update documentation from verified evidence**
+- [x] **Step 1: Update documentation from verified evidence**
 
 Mark each 1.1–1.6 item with exact tests and commits. Document:
 
@@ -665,7 +665,7 @@ Mark each 1.1–1.6 item with exact tests and commits. Document:
 - any live-key probe that could not be run as an explicit unverified release
   operation, not as completion.
 
-- [ ] **Step 2: Run the complete verification matrix**
+- [x] **Step 2: Run the complete verification matrix**
 
 Run:
 
@@ -683,7 +683,7 @@ pnpm build
 Expected: every command exits 0 with no test failure, type error, lint error, or
 format drift.
 
-- [ ] **Step 3: Perform the adversarial requirement audit**
+- [x] **Step 3: Perform the adversarial requirement audit**
 
 Run searches that must return no production violation:
 
@@ -696,14 +696,14 @@ Inspect each phase 1 row against its named test evidence. A missing live probe,
 fixture consumer, deletion-race test, Stop cleanup assertion, degraded health
 assertion, or launcher gate means phase 1 remains incomplete.
 
-- [ ] **Step 4: Commit documentation**
+- [x] **Step 4: Commit documentation**
 
 ```powershell
 git add docs/PROJECT_STATE.md docs/TODO.md docs/TEST_PLAN.md docs/RUNBOOK.md docs/BLUEPRINT_2026-07-29.md
 git commit -m "docs: close phase 1 with verification evidence"
 ```
 
-- [ ] **Step 5: Final clean-tree verification**
+- [x] **Step 5: Final clean-tree verification**
 
 Run:
 
