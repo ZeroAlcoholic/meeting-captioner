@@ -1,0 +1,28 @@
+{
+  "provider": "openai",
+  "model": "gpt-realtime-translate",
+  "response": {
+    "value": "<ephemeral-token>",
+    "expires_at": "<unix-seconds>",
+    "session": {
+      "id": "<session-id>",
+      "type": "translation",
+      "expires_at": "<unix-seconds>",
+      "model": "gpt-realtime-translate",
+      "audio": {
+        "input": {
+          "noise_reduction": {
+            "type": "far_field"
+          },
+          "transcription": {
+            "model": "gpt-realtime-whisper"
+          }
+        },
+        "output": {
+          "language": "zh"
+        }
+      },
+      "include": null
+    }
+  }
+}

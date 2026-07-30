@@ -5,6 +5,7 @@ import type {
   TranscriptEvent,
   TranslationEvent,
 } from '@meeting-audio/contracts';
+import geminiGolden from '../../../../tests/fixtures/upstream-contracts/gemini-live-translate.json' with { type: 'json' };
 import type { AudioSource } from './types.js';
 import {
   GeminiLiveProvider,
@@ -432,31 +433,10 @@ describe('GeminiLiveProvider — reconnect + wedge detection (#16)', () => {
 
     const setupFrame = FakeWebSocket.instances.at(-1)!.sent[0];
     expect(setupFrame).toBeTruthy();
-    const setup = JSON.parse(setupFrame!) as {
-      setup: {
-        inputAudioTranscription?: unknown;
-        outputAudioTranscription?: unknown;
-        generationConfig?: {
-          responseModalities?: string[];
-          inputAudioTranscription?: unknown;
-          outputAudioTranscription?: unknown;
-          translationConfig?: { targetLanguageCode?: string; echoTargetLanguage?: boolean };
-        };
-      };
-    };
-
-    // Transcription fields MUST be at setup top level — the live service
-    // rejects the generationConfig-nested shape with WS close 1007 (verified
-    // 2026-07-28, 8/8 handshake matrix; see diagnostic report §4.3). This
-    // assertion guards against regressing to the doc-page nested shape.
-    expect(setup.setup.inputAudioTranscription).toEqual({});
-    expect(setup.setup.outputAudioTranscription).toEqual({});
-    expect(setup.setup.generationConfig).toMatchObject({
-      responseModalities: ['AUDIO'],
-      translationConfig: { targetLanguageCode: 'zh-Hant', echoTargetLanguage: false },
-    });
-    expect(setup.setup.generationConfig).not.toHaveProperty('inputAudioTranscription');
-    expect(setup.setup.generationConfig).not.toHaveProperty('outputAudioTranscription');
+    // Exact equality keeps the provider request anchored to the setup frame
+    // accepted by the real upstream probe. This also guards the top-level
+    // transcription placement and dedicated translate-model identity.
+    expect(JSON.parse(setupFrame!)).toEqual(geminiGolden.clientFrame);
 
     provider.stop();
   });

@@ -1,4 +1,5 @@
 import type { Page } from '@playwright/test';
+import geminiGolden from '../fixtures/upstream-contracts/gemini-live-translate.json' with { type: 'json' };
 
 /**
  * In-browser mock backend for the two online realtime providers, plus a Node
@@ -29,6 +30,7 @@ import type { Page } from '@playwright/test';
 
 const INIT_SCRIPT = `
 (function () {
+  var geminiSetupComplete = ${JSON.stringify(geminiGolden.serverFrame)};
   var mock = {
     getUserMediaCalls: 0,
     getDisplayMediaCalls: 0,
@@ -230,7 +232,7 @@ const INIT_SCRIPT = `
     // so the happy-path session goes "connected" without per-test plumbing.
     if (mock.gemini.autoSetup && typeof data === 'string' && data.indexOf('"setup"') !== -1) {
       var self = this;
-      setTimeout(function () { self._emit({ setupComplete: {} }); }, 0);
+      setTimeout(function () { self._emit(geminiSetupComplete); }, 0);
     }
   };
   FakeWS.prototype._emit = function (obj) {

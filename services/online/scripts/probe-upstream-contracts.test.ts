@@ -118,6 +118,25 @@ describe('upstream contract probe redaction', () => {
       });
 
       await writeFile(
+        path.join(fixtureDir, 'openai-realtime-translate.json'),
+        JSON.stringify({
+          ...openAI,
+          response: {
+            ...openAI.response,
+            expires_at: 1_754_000_000,
+            session: { id: 'sess-unredacted', model: 'gpt-realtime-translate' },
+          },
+        }),
+      );
+      await expect(verifyFixtureDirectory(fixtureDir)).rejects.toThrowError(
+        'unredacted upstream contract field',
+      );
+      await writeFile(
+        path.join(fixtureDir, 'openai-realtime-translate.json'),
+        JSON.stringify(openAI),
+      );
+
+      await writeFile(
         path.join(fixtureDir, 'gemini-live-translate.json'),
         JSON.stringify({ ...gemini, model: 'models/native-audio-fallback' }),
       );

@@ -100,6 +100,29 @@ export function assertRedacted(value: unknown, forbidden: string[]): void {
   }
 }
 
+function assertStableRedaction(value: unknown, key = ''): void {
+  if (Array.isArray(value)) {
+    for (const item of value) assertStableRedaction(item);
+    return;
+  }
+  if (isRecord(value)) {
+    for (const [childKey, child] of Object.entries(value)) {
+      assertStableRedaction(child, childKey);
+    }
+    return;
+  }
+
+  const valid =
+    key === 'value'
+      ? value === '<ephemeral-token>'
+      : key === 'id' || key.endsWith('_id')
+        ? typeof value === 'string' && /^<[^>]+>$/.test(value)
+        : key === 'expires_at' || key === 'created_at' || key === 'updated_at'
+          ? value === '<unix-seconds>'
+          : true;
+  if (!valid) throw new Error(`unredacted upstream contract field: ${key}`);
+}
+
 export function validateGeminiGolden(value: unknown): GeminiGoldenContract {
   if (!isRecord(value)) throw new Error('invalid Gemini golden contract');
   const clientFrame = value.clientFrame;
@@ -137,6 +160,7 @@ export function validateOpenAIGolden(value: unknown): OpenAIGoldenContract {
   ) {
     throw new Error('invalid OpenAI golden contract');
   }
+  assertStableRedaction(value.response);
   return value as unknown as OpenAIGoldenContract;
 }
 
