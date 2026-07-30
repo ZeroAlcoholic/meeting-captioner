@@ -27,8 +27,7 @@ class PcmWorkletProcessor extends AudioWorkletProcessor {
     const requested = options && options.processorOptions && options.processorOptions.chunkSize;
     // Guard: must be a positive integer; fall back to the default otherwise so a
     // malformed option can never wedge the audio thread with a 0/NaN-size buffer.
-    this._chunkSize =
-      Number.isInteger(requested) && requested > 0 ? requested : DEFAULT_CHUNK_SIZE;
+    this._chunkSize = Number.isInteger(requested) && requested > 0 ? requested : DEFAULT_CHUNK_SIZE;
     this._buf = new Float32Array(this._chunkSize);
     this._writePos = 0;
   }

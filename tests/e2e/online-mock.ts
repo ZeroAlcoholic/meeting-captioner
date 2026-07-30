@@ -326,7 +326,11 @@ export async function installOnlineMocks(page: Page): Promise<OnlineMockControll
   await page.route(/\/session$/, (route) => {
     state.oaiSessionCalls += 1;
     if (state.oaiSessionFailing) {
-      return route.fulfill({ status: 500, contentType: 'text/plain', body: 'mock /session failure' });
+      return route.fulfill({
+        status: 500,
+        contentType: 'text/plain',
+        body: 'mock /session failure',
+      });
     }
     return route.fulfill({
       json: {
@@ -347,13 +351,21 @@ export async function installOnlineMocks(page: Page): Promise<OnlineMockControll
   return {
     oaiEmit: (obj) => page.evaluate((o) => window.__mock.oai.emit(o), obj),
     oaiInput: async (delta) => {
-      await page.evaluate((d) => window.__mock.oai.emit({ type: 'session.input_transcript.delta', delta: d }), delta);
+      await page.evaluate(
+        (d) => window.__mock.oai.emit({ type: 'session.input_transcript.delta', delta: d }),
+        delta,
+      );
     },
     oaiOutput: async (delta) => {
-      await page.evaluate((d) => window.__mock.oai.emit({ type: 'session.output_transcript.delta', delta: d }), delta);
+      await page.evaluate(
+        (d) => window.__mock.oai.emit({ type: 'session.output_transcript.delta', delta: d }),
+        delta,
+      );
     },
     oaiComplete: async () => {
-      await page.evaluate(() => window.__mock.oai.emit({ type: 'response.output_audio_transcript.done' }));
+      await page.evaluate(() =>
+        window.__mock.oai.emit({ type: 'response.output_audio_transcript.done' }),
+      );
     },
     oaiClosed: async () => {
       await page.evaluate(() => window.__mock.oai.emit({ type: 'session.closed' }));
@@ -364,7 +376,8 @@ export async function installOnlineMocks(page: Page): Promise<OnlineMockControll
     oaiSessionCalls: () => state.oaiSessionCalls,
     geminiSessionCalls: () => state.geminiSessionCalls,
     oaiAddedTrackKinds: () => page.evaluate(() => window.__mock.oai.addedTrackKinds.slice()),
-    micAcquisitions: () => page.evaluate(() => window.__mock.getUserMediaCalls + window.__mock.getDisplayMediaCalls),
+    micAcquisitions: () =>
+      page.evaluate(() => window.__mock.getUserMediaCalls + window.__mock.getDisplayMediaCalls),
     userMediaAcquisitions: () => page.evaluate(() => window.__mock.getUserMediaCalls),
     displayMediaAcquisitions: () => page.evaluate(() => window.__mock.getDisplayMediaCalls),
     oaiPeerCount: () => page.evaluate(() => window.__mock.oai.dcCount()),
@@ -372,7 +385,8 @@ export async function installOnlineMocks(page: Page): Promise<OnlineMockControll
     activeCaptureTracks: () => page.evaluate(() => window.__mock.activeTrackCount()),
     oaiReady: () => page.evaluate(() => window.__mock.oai.ready()),
     geminiSend: (obj) => page.evaluate((o) => window.__mock.gemini.send(o), obj),
-    geminiServerContent: (sc) => page.evaluate((s) => window.__mock.gemini.send({ serverContent: s }), sc),
+    geminiServerContent: (sc) =>
+      page.evaluate((s) => window.__mock.gemini.send({ serverContent: s }), sc),
     geminiClose: () => page.evaluate(() => window.__mock.gemini.close()),
     geminiOpenSockets: () => page.evaluate(() => window.__mock.gemini.openCount()),
     setAvailableProviders: (providers) => {

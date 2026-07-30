@@ -26,9 +26,7 @@ const FAKE_SECRET = { value: 'ephemeral-token-xyz', expires_at: 9999999999 };
 function stubFetchOk(): void {
   vi.stubGlobal(
     'fetch',
-    vi.fn().mockResolvedValueOnce(
-      new Response(JSON.stringify(FAKE_SECRET), { status: 200 }),
-    ),
+    vi.fn().mockResolvedValueOnce(new Response(JSON.stringify(FAKE_SECRET), { status: 200 })),
   );
 }
 
@@ -96,9 +94,9 @@ describe('POST /session', () => {
   });
 
   it('calls /v1/realtime/translations/client_secrets with gpt-realtime-translate model', async () => {
-    const mockFn = vi.fn().mockResolvedValueOnce(
-      new Response(JSON.stringify(FAKE_SECRET), { status: 200 }),
-    );
+    const mockFn = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(FAKE_SECRET), { status: 200 }));
     vi.stubGlobal('fetch', mockFn);
     mockConfig.OPENAI_API_KEY = 'sk-test';
     const app = Fastify({ logger: false });
@@ -106,10 +104,7 @@ describe('POST /session', () => {
     await app.inject({ method: 'POST', url: '/session' });
 
     expect(mockFn).toHaveBeenCalledOnce();
-    const [url, init] = mockFn.mock.calls[0] as [
-      string,
-      { body: string; signal?: AbortSignal },
-    ];
+    const [url, init] = mockFn.mock.calls[0] as [string, { body: string; signal?: AbortSignal }];
     expect(url).toContain('/v1/realtime/translations/client_secrets');
     const body = JSON.parse(init.body) as {
       session: { model: string; audio: { output: { language: string } } };
@@ -121,9 +116,9 @@ describe('POST /session', () => {
   });
 
   it('includes transcription:gpt-realtime-whisper by default (bilingual)', async () => {
-    const mockFn = vi.fn().mockResolvedValueOnce(
-      new Response(JSON.stringify(FAKE_SECRET), { status: 200 }),
-    );
+    const mockFn = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(FAKE_SECRET), { status: 200 }));
     vi.stubGlobal('fetch', mockFn);
     mockConfig.OPENAI_API_KEY = 'sk-test';
     const app = Fastify({ logger: false });
@@ -139,9 +134,9 @@ describe('POST /session', () => {
   });
 
   it('omits transcription when includeSourceTranscript=false (translation-only)', async () => {
-    const mockFn = vi.fn().mockResolvedValueOnce(
-      new Response(JSON.stringify(FAKE_SECRET), { status: 200 }),
-    );
+    const mockFn = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(FAKE_SECRET), { status: 200 }));
     vi.stubGlobal('fetch', mockFn);
     mockConfig.OPENAI_API_KEY = 'sk-test';
     const app = Fastify({ logger: false });
@@ -161,9 +156,9 @@ describe('POST /session', () => {
   });
 
   it('maps micDistance="meeting" to far_field noise_reduction', async () => {
-    const mockFn = vi.fn().mockResolvedValueOnce(
-      new Response(JSON.stringify(FAKE_SECRET), { status: 200 }),
-    );
+    const mockFn = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(FAKE_SECRET), { status: 200 }));
     vi.stubGlobal('fetch', mockFn);
     mockConfig.OPENAI_API_KEY = 'sk-test';
     const app = Fastify({ logger: false });
@@ -182,9 +177,9 @@ describe('POST /session', () => {
   });
 
   it('sets output language "en" when langPair is zh-TW→en', async () => {
-    const mockFn = vi.fn().mockResolvedValueOnce(
-      new Response(JSON.stringify(FAKE_SECRET), { status: 200 }),
-    );
+    const mockFn = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(FAKE_SECRET), { status: 200 }));
     vi.stubGlobal('fetch', mockFn);
     mockConfig.OPENAI_API_KEY = 'sk-test';
     const app = Fastify({ logger: false });
@@ -246,10 +241,7 @@ describe('POST /session', () => {
   });
 
   it('returns 502 on upstream network error (non-timeout)', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockRejectedValueOnce(new TypeError('fetch failed')),
-    );
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValueOnce(new TypeError('fetch failed')));
     mockConfig.OPENAI_API_KEY = 'sk-test';
     const app = Fastify({ logger: false });
     await registerSession(app);
@@ -261,9 +253,7 @@ describe('POST /session', () => {
     const upstreamLeak = 'org_abc123 quota exceeded plan_pro_monthly';
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValueOnce(
-        new Response(upstreamLeak, { status: 429 }),
-      ),
+      vi.fn().mockResolvedValueOnce(new Response(upstreamLeak, { status: 429 })),
     );
     mockConfig.OPENAI_API_KEY = 'sk-test';
     const app = Fastify({ logger: false });
@@ -282,10 +272,11 @@ describe('POST /session', () => {
     vi.stubGlobal(
       'fetch',
       // Return a fresh Response per call — Response.body is single-use.
-      vi.fn().mockImplementation(
-        () =>
+      vi
+        .fn()
+        .mockImplementation(() =>
           Promise.resolve(new Response(JSON.stringify(FAKE_SECRET), { status: 200 })),
-      ),
+        ),
     );
     const app = Fastify({ logger: false });
     await registerSession(app);
@@ -334,9 +325,11 @@ describe('POST /session — key failover (domain-restricted primary)', () => {
     mockConfig.OPENAI_API_KEY_AUDIO = 'sk-private-audio';
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockImplementation(() =>
-        Promise.resolve(new Response('{"error":"bad key"}', { status: 401 })),
-      ),
+      vi
+        .fn()
+        .mockImplementation(() =>
+          Promise.resolve(new Response('{"error":"bad key"}', { status: 401 })),
+        ),
     );
     const app = Fastify({ logger: false });
     await registerSession(app);

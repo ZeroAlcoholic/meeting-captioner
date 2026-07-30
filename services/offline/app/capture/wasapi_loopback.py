@@ -50,7 +50,7 @@ def _resample(pcm: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
     return np.interp(indices, np.arange(len(pcm)), pcm).astype(np.float32)
 
 
-async def stream_to_session(session: "ASRSession", stop_event: asyncio.Event) -> None:
+async def stream_to_session(session: ASRSession, stop_event: asyncio.Event) -> None:
     """Capture WASAPI loopback and push PCM to ASRSession until stop_event is set.
 
     Emits health events via session.push_event() so the browser sees audio state.
@@ -165,7 +165,7 @@ async def stream_to_session(session: "ASRSession", stop_event: asyncio.Event) ->
                 try:
                     data = await asyncio.wait_for(queue.get(), timeout=1.0)
                     await session.push_audio(data)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     continue
         finally:
             stream.stop_stream()

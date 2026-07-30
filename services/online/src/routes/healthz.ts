@@ -5,8 +5,7 @@ import { activeOpenAIKeySlot, hasAnyOpenAIKey } from '../openai-keys.js';
 // bundle does not depend on a runtime package.json lookup (which fails
 // inside a single-file CJS bundle). Dev / tests rely on the fallback.
 declare const __APP_VERSION__: string;
-const VERSION =
-  typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '0.0.0';
+const VERSION = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '0.0.0';
 
 const STARTUP_MS = Date.now();
 

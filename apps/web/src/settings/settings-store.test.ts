@@ -4,7 +4,11 @@ import { createSettingsStore, MODE_OPTIONS, SCENARIO_OPTIONS } from './settings-
 
 const ts = '2026-05-11T10:00:00.000Z';
 
-function health(component: HealthEvent['component'], state: HealthEvent['state'], message?: string): HealthEvent {
+function health(
+  component: HealthEvent['component'],
+  state: HealthEvent['state'],
+  message?: string,
+): HealthEvent {
   const e: HealthEvent = { kind: 'health', component, state, timestamp: ts };
   if (message !== undefined) e.message = message;
   return e;
@@ -29,7 +33,14 @@ describe('settingsStore — defaults', () => {
 
   it('starts with all health components in idle', () => {
     const s = createSettingsStore().getState();
-    for (const component of ['audio', 'stt', 'translation', 'summary', 'transport', 'ui'] as const) {
+    for (const component of [
+      'audio',
+      'stt',
+      'translation',
+      'summary',
+      'transport',
+      'ui',
+    ] as const) {
       expect(s.health[component]?.state).toBe('idle');
     }
   });
@@ -319,10 +330,7 @@ describe('settingsStore — micDistance + persistence', () => {
   });
 
   it('ignores stored prefs with a stale version', () => {
-    memLs.set(
-      'meeting-audio:settings:v1',
-      JSON.stringify({ v: 999, langPair: 'zh-TW→en' }),
-    );
+    memLs.set('meeting-audio:settings:v1', JSON.stringify({ v: 999, langPair: 'zh-TW→en' }));
     const fresh = createSettingsStore().getState();
     expect(fresh.langPair).toBe('en→zh-TW'); // default, not the persisted v999 value
   });
@@ -345,6 +353,10 @@ describe('SCENARIO_OPTIONS / MODE_OPTIONS', () => {
   });
 
   it('exposes the three modes from CLAUDE.md', () => {
-    expect(MODE_OPTIONS.map((m) => m.id)).toEqual(['online_full', 'hybrid_privacy', 'full_offline']);
+    expect(MODE_OPTIONS.map((m) => m.id)).toEqual([
+      'online_full',
+      'hybrid_privacy',
+      'full_offline',
+    ]);
   });
 });

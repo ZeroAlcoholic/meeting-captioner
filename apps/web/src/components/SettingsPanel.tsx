@@ -3,20 +3,45 @@ import { AudioLevelMeter } from './AudioLevelMeter.js';
 import { HealthRow } from './HealthRow.js';
 import { ModeSelector } from './ModeSelector.js';
 import { ScenarioPicker } from './ScenarioPicker.js';
-import { LANG_PAIR_OPTIONS, type LangPair, type MicDistance, type OnlineProvider } from '../settings/settings-store.js';
+import {
+  LANG_PAIR_OPTIONS,
+  type LangPair,
+  type MicDistance,
+  type OnlineProvider,
+} from '../settings/settings-store.js';
 import { useSettingsStore } from '../settings/use-settings-store.js';
 import styles from './SettingsPanel.module.css';
 
 const ONLINE_PROVIDER_OPTIONS: Array<{ id: OnlineProvider; label: string; hint: string }> = [
   { id: 'openai', label: 'OpenAI', hint: 'OpenAI Realtime Translate (WebRTC). 預設。' },
-  { id: 'gemini', label: 'Gemini', hint: 'Google Gemini 3.5 Live Translate（WebSocket）。專用即時翻譯模型，連續串流，繁體中文原生輸出；譯文約落後語音 2–3 秒（模型特性，官方無參數可調）。延遲敏感的會議建議用 OpenAI。需伺服器設定 GEMINI_API_KEY。' },
+  {
+    id: 'gemini',
+    label: 'Gemini',
+    hint: 'Google Gemini 3.5 Live Translate（WebSocket）。專用即時翻譯模型，連續串流，繁體中文原生輸出；譯文約落後語音 2–3 秒（模型特性，官方無參數可調）。延遲敏感的會議建議用 OpenAI。需伺服器設定 GEMINI_API_KEY。',
+  },
 ];
 
 const MIC_DISTANCE_OPTIONS: Array<{ id: MicDistance; label: string; hint: string }> = [
-  { id: 'meeting', label: 'Meeting', hint: '多人會議共用一支麥克風（建議）。關閉瀏覽器 AGC/雜訊抑制，改用 OpenAI far_field — 換語者時不會把新講者當雜訊濾掉。' },
-  { id: 'close',   label: 'Close',   hint: 'Single speaker, desktop / headset mic ≤ 1 m. AGC on + near_field noise reduction.' },
-  { id: 'far',     label: 'Far',     hint: 'Conference room, ceiling mic, far speakers. AGC off (NS on) + far_field noise reduction.' },
-  { id: 'off',     label: 'Raw',     hint: 'No AGC, no noise reduction. For clean upstream (mixer / DSP).' },
+  {
+    id: 'meeting',
+    label: 'Meeting',
+    hint: '多人會議共用一支麥克風（建議）。關閉瀏覽器 AGC/雜訊抑制，改用 OpenAI far_field — 換語者時不會把新講者當雜訊濾掉。',
+  },
+  {
+    id: 'close',
+    label: 'Close',
+    hint: 'Single speaker, desktop / headset mic ≤ 1 m. AGC on + near_field noise reduction.',
+  },
+  {
+    id: 'far',
+    label: 'Far',
+    hint: 'Conference room, ceiling mic, far speakers. AGC off (NS on) + far_field noise reduction.',
+  },
+  {
+    id: 'off',
+    label: 'Raw',
+    hint: 'No AGC, no noise reduction. For clean upstream (mixer / DSP).',
+  },
 ];
 
 export interface SettingsPanelProps {
@@ -118,7 +143,15 @@ function LanguageBlock({ sessionActive = false }: { sessionActive?: boolean }) {
           data-testid="toggle-source-transcript"
         />
         <span>
-          <span style={{ opacity: 0.55, marginRight: 6, fontSize: 10, letterSpacing: 1, textTransform: 'uppercase' }}>
+          <span
+            style={{
+              opacity: 0.55,
+              marginRight: 6,
+              fontSize: 10,
+              letterSpacing: 1,
+              textTransform: 'uppercase',
+            }}
+          >
             Transcript
           </span>
           {includeSource ? 'Bilingual' : 'Translation only'}
@@ -127,7 +160,6 @@ function LanguageBlock({ sessionActive = false }: { sessionActive?: boolean }) {
     </div>
   );
 }
-
 
 /**
  * Acoustic environment selector. Pairs browser-side AGC with server-side
@@ -205,11 +237,7 @@ function MicDistanceBlock() {
             type="button"
             data-testid={`mic-distance-${opt.id}`}
             disabled={isSystem}
-            title={
-              isSystem
-                ? '系統音源已預混乾淨，無需 AGC / 雜訊抑制 — 此選項不適用'
-                : opt.hint
-            }
+            title={isSystem ? '系統音源已預混乾淨，無需 AGC / 雜訊抑制 — 此選項不適用' : opt.hint}
             onClick={() => setMicDistance(opt.id)}
             style={{
               padding: '5px 12px',
@@ -235,7 +263,6 @@ function MicDistanceBlock() {
     </div>
   );
 }
-
 
 function TranscriptRetentionBlock() {
   const enabled = useSettingsStore((state) => state.transcriptRetentionEnabled);

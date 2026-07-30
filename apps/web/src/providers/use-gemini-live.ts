@@ -88,7 +88,10 @@ export function useGeminiLive(): UseGeminiLive {
     const origOnHealth = handlers.onHealth;
     handlers.onHealth = (ev) => {
       origOnHealth(ev);
-      if ((ev.state === 'failed' || ev.state === 'api_error' || ev.state === 'no_audio_track') && ev.message) {
+      if (
+        (ev.state === 'failed' || ev.state === 'api_error' || ev.state === 'no_audio_track') &&
+        ev.message
+      ) {
         setError(ev.message);
       }
     };

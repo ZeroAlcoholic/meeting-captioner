@@ -33,14 +33,14 @@ Offline) decides routing.
 
 ## 2. Packages and Services
 
-| Path | Role | Stack |
-|------|------|-------|
-| `apps/web/` | Renderer UI: caption board, mode/scenario controls | Vite + React + TS |
-| `services/online/` | OpenAI session bridge, key isolation | Node 22 + Fastify |
-| `services/offline/` | Local STT/MT bridge, audio capture | Python 3.11 + FastAPI + uv |
-| `packages/contracts/` | Normalized event schemas (TS + zod) | TS |
-| `tests/e2e/` | Cross-app Playwright tests | Playwright |
-| `scripts/` | Bootstrap and doctor | PowerShell + bash |
+| Path                  | Role                                               | Stack                      |
+| --------------------- | -------------------------------------------------- | -------------------------- |
+| `apps/web/`           | Renderer UI: caption board, mode/scenario controls | Vite + React + TS          |
+| `services/online/`    | OpenAI session bridge, key isolation               | Node 22 + Fastify          |
+| `services/offline/`   | Local STT/MT bridge, audio capture                 | Python 3.11 + FastAPI + uv |
+| `packages/contracts/` | Normalized event schemas (TS + zod)                | TS                         |
+| `tests/e2e/`          | Cross-app Playwright tests                         | Playwright                 |
+| `scripts/`            | Bootstrap and doctor                               | PowerShell + bash          |
 
 ---
 
@@ -106,6 +106,7 @@ All defined in `packages/contracts`. UI imports types from there only.
 - `AudioLevelEvent` — { source, rmsDb, peakDb, timestamp }
 
 Statuses:
+
 - Transcript: `partial | revised | final`
 - Translation: `draft | refined | final`
 - Health: `idle | requesting_permission | connecting | connected | reconnecting | degraded | failed | stopped | no_audio_track | silence | model_loading | offline_unavailable | api_error`
@@ -131,11 +132,11 @@ P0 ships only `FakeReplayProvider`. Future providers:
 
 ## 6. Process / Port Map
 
-| Process | Port (default) | How to start |
-|---------|---------------|--------------|
-| Web (Vite dev) | 5173 | `pnpm -F web dev` |
-| Online (Fastify) | 8787 | `pnpm -F online dev` |
-| Offline (FastAPI) | 8000 | `cd services/offline && uv run uvicorn app.main:app --port 8000` |
+| Process           | Port (default) | How to start                                                     |
+| ----------------- | -------------- | ---------------------------------------------------------------- |
+| Web (Vite dev)    | 5173           | `pnpm -F web dev`                                                |
+| Online (Fastify)  | 8787           | `pnpm -F online dev`                                             |
+| Offline (FastAPI) | 8000           | `cd services/offline && uv run uvicorn app.main:app --port 8000` |
 
 All ports are overridable via `.env`.
 
@@ -144,6 +145,7 @@ All ports are overridable via `.env`.
 ## 7. Future Topology (post-MVP)
 
 When packaged with Electron (P7):
+
 - Main process spawns `services/online` and `services/offline` as sidecars
 - Renderer keeps the same web URL contract — IPC only for OS-only features
   (window controls, file dialogs, native audio enumeration)

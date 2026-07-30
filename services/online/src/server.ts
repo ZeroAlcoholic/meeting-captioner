@@ -76,7 +76,11 @@ export async function buildApp(): Promise<FastifyInstance> {
           return reply.code(404).send({ error: 'Not found' });
         }
         const urlPath = req.url.split('?', 1)[0] ?? req.url;
-        if (urlPath.startsWith('/session') || urlPath.startsWith('/healthz') || urlPath.startsWith('/translate')) {
+        if (
+          urlPath.startsWith('/session') ||
+          urlPath.startsWith('/healthz') ||
+          urlPath.startsWith('/translate')
+        ) {
           return reply.code(404).send({ error: 'Not found' });
         }
         const lastSegment = urlPath.split('/').pop() ?? '';

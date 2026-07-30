@@ -7,15 +7,15 @@
 
 ## Test Levels
 
-| Level | Tool | Where | What it covers |
-|-------|------|-------|----------------|
-| Unit | Vitest | `packages/contracts`, `apps/web` | event schema, store reducers, pure logic |
-| Component | Vitest + Testing Library | `apps/web` | React components in isolation |
-| Service unit | Vitest | `services/online` | route handlers, validators |
-| Service unit (Py) | pytest | `services/offline` | adapters, VAD, streaming policy |
-| Integration | scripts in `tests/integration/` | spawn services, hit endpoints | service ↔ contract correctness |
-| E2E | Playwright | `tests/e2e/` | full UI flows, fake replay |
-| Stability | custom harness | `tests/stability/` | long-running memory + reconnect |
+| Level             | Tool                            | Where                            | What it covers                           |
+| ----------------- | ------------------------------- | -------------------------------- | ---------------------------------------- |
+| Unit              | Vitest                          | `packages/contracts`, `apps/web` | event schema, store reducers, pure logic |
+| Component         | Vitest + Testing Library        | `apps/web`                       | React components in isolation            |
+| Service unit      | Vitest                          | `services/online`                | route handlers, validators               |
+| Service unit (Py) | pytest                          | `services/offline`               | adapters, VAD, streaming policy          |
+| Integration       | scripts in `tests/integration/` | spawn services, hit endpoints    | service ↔ contract correctness           |
+| E2E               | Playwright                      | `tests/e2e/`                     | full UI flows, fake replay               |
+| Stability         | custom harness                  | `tests/stability/`               | long-running memory + reconnect          |
 
 ---
 

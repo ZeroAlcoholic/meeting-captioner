@@ -75,9 +75,7 @@ const INIT_SCRIPT = `
 
 test.describe('OpenAI Realtime provider (mocked WebRTC)', () => {
   test.beforeEach(async ({ page }) => {
-    await page.route('**/session/info', (route) =>
-      route.fulfill({ json: { hasApiKey: true } }),
-    );
+    await page.route('**/session/info', (route) => route.fulfill({ json: { hasApiKey: true } }));
     await page.route('**/session', (route) =>
       route.fulfill({
         json: { client_secret: { value: MOCK_CLIENT_SECRET, expires_at: 9999999999 } },
@@ -142,10 +140,12 @@ test.describe('OpenAI Realtime provider (mocked WebRTC)', () => {
     // Fire input transcript delta — caption board renders partials immediately
     await page.evaluate(() => {
       const w = window as Window & { __fireDCMessage?: (d: string) => void };
-      w.__fireDCMessage?.(JSON.stringify({
-        type: 'session.input_transcript.delta',
-        delta: 'Testing the caption board.',
-      }));
+      w.__fireDCMessage?.(
+        JSON.stringify({
+          type: 'session.input_transcript.delta',
+          delta: 'Testing the caption board.',
+        }),
+      );
     });
 
     await expect(page.getByTestId('caption-current')).toContainText('Testing the caption board.', {
@@ -165,20 +165,28 @@ test.describe('OpenAI Realtime provider (mocked WebRTC)', () => {
     await page.evaluate(() => {
       const w = window as Window & { __fireDCMessage?: (d: string) => void };
       // input delta renders caption-current, output delta renders caption-target
-      w.__fireDCMessage?.(JSON.stringify({
-        type: 'session.input_transcript.delta',
-        delta: 'Translation test.',
-      }));
-      w.__fireDCMessage?.(JSON.stringify({
-        type: 'session.output_transcript.delta',
-        delta: '測試字幕板。',
-      }));
+      w.__fireDCMessage?.(
+        JSON.stringify({
+          type: 'session.input_transcript.delta',
+          delta: 'Translation test.',
+        }),
+      );
+      w.__fireDCMessage?.(
+        JSON.stringify({
+          type: 'session.output_transcript.delta',
+          delta: '測試字幕板。',
+        }),
+      );
     });
 
-    await expect(page.getByTestId('caption-target')).toContainText('測試字幕板。', { timeout: 3_000 });
+    await expect(page.getByTestId('caption-target')).toContainText('測試字幕板。', {
+      timeout: 3_000,
+    });
   });
 
-  test('Target area shows pending source while translation lags, swaps on first delta', async ({ page }) => {
+  test('Target area shows pending source while translation lags, swaps on first delta', async ({
+    page,
+  }) => {
     // The translation stream trails the source stream on every backend —
     // ~2–3 s per sentence on Gemini Live Translate. The big target area must
     // bridge that window with the source text that HAS arrived (dimmed,
@@ -195,10 +203,12 @@ test.describe('OpenAI Realtime provider (mocked WebRTC)', () => {
     // Source-only window: input delta arrived, no translation yet.
     await page.evaluate(() => {
       const w = window as Window & { __fireDCMessage?: (d: string) => void };
-      w.__fireDCMessage?.(JSON.stringify({
-        type: 'session.input_transcript.delta',
-        delta: 'Revenue grew strongly this quarter.',
-      }));
+      w.__fireDCMessage?.(
+        JSON.stringify({
+          type: 'session.input_transcript.delta',
+          delta: 'Revenue grew strongly this quarter.',
+        }),
+      );
     });
     const pendingSource = page.getByTestId('pending-source');
     await expect(pendingSource).toContainText('Revenue grew strongly this quarter.', {
@@ -210,10 +220,12 @@ test.describe('OpenAI Realtime provider (mocked WebRTC)', () => {
     // translated caption.
     await page.evaluate(() => {
       const w = window as Window & { __fireDCMessage?: (d: string) => void };
-      w.__fireDCMessage?.(JSON.stringify({
-        type: 'session.output_transcript.delta',
-        delta: '本季營收強勁成長。',
-      }));
+      w.__fireDCMessage?.(
+        JSON.stringify({
+          type: 'session.output_transcript.delta',
+          delta: '本季營收強勁成長。',
+        }),
+      );
     });
     await expect(page.getByTestId('caption-target')).toContainText('本季營收強勁成長。', {
       timeout: 3_000,
@@ -222,9 +234,7 @@ test.describe('OpenAI Realtime provider (mocked WebRTC)', () => {
   });
 
   test('No API key → "Start Real" shows disabled state with tooltip', async ({ page }) => {
-    await page.route('**/session/info', (route) =>
-      route.fulfill({ json: { hasApiKey: false } }),
-    );
+    await page.route('**/session/info', (route) => route.fulfill({ json: { hasApiKey: false } }));
     await page.goto('/');
 
     const btn = page.getByTestId('start-real');

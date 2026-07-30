@@ -32,7 +32,12 @@ function makeHandlers() {
 function makeProvider(langPair = 'en→zh-TW') {
   const h = makeHandlers();
   // No real mic needed: handleServerObject never touches audio capture.
-  const provider = new GeminiLiveProvider('http://localhost/session/gemini', h.handlers, undefined, langPair);
+  const provider = new GeminiLiveProvider(
+    'http://localhost/session/gemini',
+    h.handlers,
+    undefined,
+    langPair,
+  );
   return { provider, ...h };
 }
 
@@ -48,7 +53,12 @@ describe('GeminiLiveProvider — message mapping', () => {
     provider.handleServerObject({ serverContent: { inputTranscription: { text: 'Hello' } } });
     provider.handleServerObject({ serverContent: { inputTranscription: { text: ' world' } } });
     expect(transcripts).toHaveLength(2);
-    expect(transcripts[0]).toMatchObject({ status: 'partial', text: 'Hello', provider: 'gemini-live', mode: 'online_full' });
+    expect(transcripts[0]).toMatchObject({
+      status: 'partial',
+      text: 'Hello',
+      provider: 'gemini-live',
+      mode: 'online_full',
+    });
     expect(transcripts[1]).toMatchObject({ status: 'partial', text: 'Hello world' });
     // Same turn → same segment id.
     expect(transcripts[0]!.segmentId).toBe(transcripts[1]!.segmentId);
@@ -104,7 +114,9 @@ describe('GeminiLiveProvider — message mapping', () => {
     // text. The provider decodes UTF-8 → JSON before routing. This guards the
     // bug where `typeof ev.data !== 'string'` silently dropped every frame.
     const { provider, translations } = makeProvider('en→zh-TW');
-    const json = JSON.stringify({ serverContent: { inputTranscription: { text: 'hi' }, outputTranscription: { text: '嗨' } } });
+    const json = JSON.stringify({
+      serverContent: { inputTranscription: { text: 'hi' }, outputTranscription: { text: '嗨' } },
+    });
     const buf = new TextEncoder().encode(json).buffer;
     const decoded = JSON.parse(new TextDecoder().decode(buf));
     provider.handleServerObject(decoded);
@@ -116,10 +128,14 @@ describe('GeminiLiveProvider — message mapping', () => {
     // A translation ending in a sentence terminator (。！？) WITH matching source
     // text must auto-finalize so history populates and the live line is bounded.
     const { provider, transcripts, translations } = makeProvider('en→zh-TW');
-    provider.handleServerObject({ serverContent: { inputTranscription: { text: 'Hello everyone.' } } });
+    provider.handleServerObject({
+      serverContent: { inputTranscription: { text: 'Hello everyone.' } },
+    });
     provider.handleServerObject({ serverContent: { outputTranscription: { text: '大家好。' } } });
     // No turnComplete sent — finalize must have fired on the 。
-    expect(translations.some((t) => t.status === 'final' && t.targetText === '大家好。')).toBe(true);
+    expect(translations.some((t) => t.status === 'final' && t.targetText === '大家好。')).toBe(
+      true,
+    );
     expect(transcripts.some((t) => t.status === 'final')).toBe(true);
     // Next sentence (source + translation) becomes a NEW segment id.
     const firstFinal = translations.find((t) => t.status === 'final')!;
@@ -190,8 +206,12 @@ describe('GeminiLiveProvider — message mapping', () => {
 
   it('does not split a sentence at a decimal point ("3." mid-number)', () => {
     const { provider, translations } = makeProvider('zh-TW→en');
-    provider.handleServerObject({ serverContent: { inputTranscription: { text: '營收成長三點五個百分點。' } } });
-    provider.handleServerObject({ serverContent: { outputTranscription: { text: 'Revenue grew by 3.' } } });
+    provider.handleServerObject({
+      serverContent: { inputTranscription: { text: '營收成長三點五個百分點。' } },
+    });
+    provider.handleServerObject({
+      serverContent: { outputTranscription: { text: 'Revenue grew by 3.' } },
+    });
     // "3." must NOT finalize — the rest of the number is still streaming.
     expect(translations.filter((t) => t.status === 'final')).toHaveLength(0);
     provider.handleServerObject({ serverContent: { outputTranscription: { text: '5 percent.' } } });
@@ -226,7 +246,11 @@ describe('GeminiLiveProvider — message mapping', () => {
     const { provider, translations } = makeProvider('zh-TW→en');
     provider.handleServerObject({ serverContent: { inputTranscription: { text: '你好' } } });
     provider.handleServerObject({ serverContent: { outputTranscription: { text: 'Hello' } } });
-    expect(translations.at(-1)).toMatchObject({ sourceLanguage: 'zh-TW', targetLanguage: 'en', targetText: 'Hello' });
+    expect(translations.at(-1)).toMatchObject({
+      sourceLanguage: 'zh-TW',
+      targetLanguage: 'en',
+      targetText: 'Hello',
+    });
   });
 });
 

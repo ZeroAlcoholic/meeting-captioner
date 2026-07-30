@@ -41,7 +41,12 @@ export class DisplayMediaAudioProvider implements AudioSource {
   private trackEndedHandler: (() => void) | null = null;
 
   async acquire(onHealth: (e: HealthEvent) => void): Promise<MediaStream> {
-    onHealth({ kind: 'health', component: 'audio', state: 'requesting_permission', timestamp: now() });
+    onHealth({
+      kind: 'health',
+      component: 'audio',
+      state: 'requesting_permission',
+      timestamp: now(),
+    });
     try {
       // video: true is the price of admission for system audio on Chrome.
       // Without it the picker omits the "Share audio" checkbox.
@@ -116,7 +121,13 @@ export class DisplayMediaAudioProvider implements AudioSource {
       // Re-emit failed unless we already emitted no_audio_track above.
       const message = err instanceof Error ? err.message : 'System audio permission denied';
       if (!message.includes('No audio track')) {
-        onHealth({ kind: 'health', component: 'audio', state: 'failed', message, timestamp: now() });
+        onHealth({
+          kind: 'health',
+          component: 'audio',
+          state: 'failed',
+          message,
+          timestamp: now(),
+        });
       }
       throw err;
     }

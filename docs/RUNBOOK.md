@@ -30,6 +30,7 @@ Automated coverage (238 web unit + 15 Playwright e2e) cannot exercise a real
 backend failure, so verify these by hand before relying on a long meeting:
 
 **Cross-model failover (#21):**
+
 1. Set `OPENAI_API_KEY` and `GEMINI_API_KEY` in the system env; start the online
    service + web app; Start OpenAI and confirm captions.
 2. Force a backend failure — e.g. disconnect the network for ~40 s, or block
@@ -94,11 +95,11 @@ cd services/offline && uv run ruff check .
 
 ## Default Ports
 
-| Service | Port | Override env var |
-|---------|------|------------------|
-| Web (Vite) | 5173 | (Vite default) |
-| Online | 8787 | `ONLINE_PORT` |
-| Offline | 8000 | `OFFLINE_PORT` |
+| Service    | Port | Override env var |
+| ---------- | ---- | ---------------- |
+| Web (Vite) | 5173 | (Vite default)   |
+| Online     | 8787 | `ONLINE_PORT`    |
+| Offline    | 8000 | `OFFLINE_PORT`   |
 
 Free a port (Windows):
 
@@ -146,20 +147,25 @@ cd services/offline && uv sync
 ## Common Issues
 
 ### `pnpm: command not found`
+
 Run `npm install -g pnpm`, then re-open the shell.
 
 ### `uv: command not found`
+
 Windows: `winget install --id=astral-sh.uv -e`
-macOS:   `brew install uv`
-Linux:   `curl -LsSf https://astral.sh/uv/install.sh | sh`
+macOS: `brew install uv`
+Linux: `curl -LsSf https://astral.sh/uv/install.sh | sh`
 
 ### Port already in use
+
 See "Default Ports" above.
 
 ### CRLF warnings on Windows
+
 Expected. Git is normalizing to LF on commit; harmless.
 
 ### Playwright browsers not installed
+
 `pnpm exec playwright install`
 
 ---
@@ -171,6 +177,7 @@ Commit Sequence" for a 7-commit Conventional Commits split, or use a
 single commit if you prefer.
 
 Steps:
+
 1. Set git identity once (repo-local; CLAUDE.md forbids agents touching
    global git config):
    ```
@@ -206,14 +213,14 @@ ping OpenAI.
 
 ### `/session` failure modes
 
-| Status | Meaning | Operator action |
-|--------|---------|-----------------|
-| 200 | Ephemeral token returned with `session_renewal_recommended_ms` | — |
-| 400 | Invalid request body (unknown key or bad `langPair`) | Fix client |
-| 429 | Per-IP rate limit (`SESSION_RATE_LIMIT_PER_MIN`) exceeded | Throttle client; raise env if legitimate |
-| 502 | Upstream network error (DNS, connection refused) | Check egress firewall |
-| 503 | `OPENAI_API_KEY` missing | Set env var, restart |
-| 401/403 persisting | Both OpenAI keys rejected upstream | Check key restrictions; see key failover below |
+| Status             | Meaning                                                        | Operator action                                |
+| ------------------ | -------------------------------------------------------------- | ---------------------------------------------- |
+| 200                | Ephemeral token returned with `session_renewal_recommended_ms` | —                                              |
+| 400                | Invalid request body (unknown key or bad `langPair`)           | Fix client                                     |
+| 429                | Per-IP rate limit (`SESSION_RATE_LIMIT_PER_MIN`) exceeded      | Throttle client; raise env if legitimate       |
+| 502                | Upstream network error (DNS, connection refused)               | Check egress firewall                          |
+| 503                | `OPENAI_API_KEY` missing                                       | Set env var, restart                           |
+| 401/403 persisting | Both OpenAI keys rejected upstream                             | Check key restrictions; see key failover below |
 
 ### OpenAI key failover (`OPENAI_API_KEY_AUDIO`)
 
@@ -255,21 +262,21 @@ A passive monitor records caption latency for the running session (no HUD, no
 perf cost). To read it during/after a REAL-key session, open DevTools console:
 
 ```js
-window.__latency.summary()   // current session, per provider: ttfcMs, lagP50/P95, samples
-window.__latency.export()    // raw per-segment samples (for analysis)
-window.__latency.history()   // last 50 past-session summaries (persisted in localStorage)
+window.__latency.summary(); // current session, per provider: ttfcMs, lagP50/P95, samples
+window.__latency.export(); // raw per-segment samples (for analysis)
+window.__latency.history(); // last 50 past-session summaries (persisted in localStorage)
 ```
 
 Metrics are ARRIVAL-based proxies (honest caveat):
-- `ttfcMs`  — transport 'connecting' → first translation (bring-up felt latency)
-- `lagMs`   — a segment's first event → its first translation (responsiveness)
-- `durMs`   — a segment's first event → finalization
+
+- `ttfcMs` — transport 'connecting' → first translation (bring-up felt latency)
+- `lagMs` — a segment's first event → its first translation (responsiveness)
+- `durMs` — a segment's first event → finalization
 
 It also logs a one-line `[latency] …` summary to the console every ~15 s. Use it
 to compare OpenAI vs Gemini on the SAME spoken input and pick the faster backend.
 For true spoken-word→on-screen latency, do a clap/marker test against the real
 key (the monitor numbers are the repeatable in-app proxy, not microphone-truth).
-
 
 ## YouTube / web-page audio realtime field test
 
@@ -302,11 +309,17 @@ Recording is explicit. Normal use is not recorded unless the operator presses
    DevTools console:
 
    ```js
-   console.log(JSON.stringify({
-     fieldHistory: window.__fieldTest.history(),
-     latencySummary: window.__latency.summary(),
-     latencyHistory: window.__latency.history()
-   }, null, 2));
+   console.log(
+     JSON.stringify(
+       {
+         fieldHistory: window.__fieldTest.history(),
+         latencySummary: window.__latency.summary(),
+         latencyHistory: window.__latency.history(),
+       },
+       null,
+       2,
+     ),
+   );
    ```
 
 Optional markers while a run is active:

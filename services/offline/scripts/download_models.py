@@ -73,7 +73,7 @@ def main(args: list[str]) -> None:
         import ctranslate2  # noqa: F401
     except ImportError:
         print("ERROR: ctranslate2 not installed. Run: uv add ctranslate2")
-        raise SystemExit(1)
+        raise SystemExit(1) from None
 
     force = "--force" in args
     keys = [a for a in args if a in TARGETS]

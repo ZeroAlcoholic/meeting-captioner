@@ -14,16 +14,16 @@
 
 原報告未隔離「API 版本」與「欄位位置」兩個變因，也未說明其成功樣本走的是 ephemeral token 還是 raw key。本輪以 8 組正交組合、**零音訊、只送一個 setup frame** 重測（成本可忽略）。
 
-| 端點版本 | 認證路徑 | transcription 欄位位置 | 結果 |
-|---|---|---|---|
-| v1alpha | Constrained + ephemeral | `generationConfig`（**現行工作區**） | ❌ CLOSE 1007 |
-| v1alpha | Constrained + ephemeral | setup 頂層（**已 commit 版**） | ✅ `{"setupComplete":{}}` |
-| v1alpha | BidiGenerateContent + raw key | `generationConfig` | ❌ CLOSE 1007 |
-| v1alpha | BidiGenerateContent + raw key | setup 頂層 | ✅ `{"setupComplete":{}}` |
-| v1beta | Constrained + ephemeral | `generationConfig` | ❌ CLOSE 1007 |
-| v1beta | Constrained + ephemeral | setup 頂層 | ✅ `{"setupComplete":{}}` |
-| v1beta | BidiGenerateContent + raw key | `generationConfig` | ❌ CLOSE 1007 |
-| v1beta | BidiGenerateContent + raw key | setup 頂層 | ✅ `{"setupComplete":{}}` |
+| 端點版本 | 認證路徑                      | transcription 欄位位置               | 結果                      |
+| -------- | ----------------------------- | ------------------------------------ | ------------------------- |
+| v1alpha  | Constrained + ephemeral       | `generationConfig`（**現行工作區**） | ❌ CLOSE 1007             |
+| v1alpha  | Constrained + ephemeral       | setup 頂層（**已 commit 版**）       | ✅ `{"setupComplete":{}}` |
+| v1alpha  | BidiGenerateContent + raw key | `generationConfig`                   | ❌ CLOSE 1007             |
+| v1alpha  | BidiGenerateContent + raw key | setup 頂層                           | ✅ `{"setupComplete":{}}` |
+| v1beta   | Constrained + ephemeral       | `generationConfig`                   | ❌ CLOSE 1007             |
+| v1beta   | Constrained + ephemeral       | setup 頂層                           | ✅ `{"setupComplete":{}}` |
+| v1beta   | BidiGenerateContent + raw key | `generationConfig`                   | ❌ CLOSE 1007             |
+| v1beta   | BidiGenerateContent + raw key | setup 頂層                           | ✅ `{"setupComplete":{}}` |
 
 八組錯誤訊息完全相同：
 
@@ -36,12 +36,12 @@ at 'setup.generation_config': Cannot find field.
 
 ### 這推翻了原報告的根因排序
 
-| 原報告根因 | 裁決 |
-|---|---|
-| 1. 專案使用舊 v1alpha 端點 | **不成立**。v1alpha + Constrained + ephemeral + 正確欄位位置**現在就能通**。值得為未來相容而遷移，但**不是本次失敗的原因**。 |
-| 2. transcription 欄位位置不符 | **唯一真因**，且為充分必要條件。 |
-| 3. token 未用 `liveConnectConstraints` | 與本失敗**無關**（未鎖 token 已成功握手）。 |
-| 4. mock 測試把錯誤 JSON 鎖成通過 | 屬實，見 §2 #4。這是讓 #2 得以存活的機制。 |
+| 原報告根因                             | 裁決                                                                                                                         |
+| -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| 1. 專案使用舊 v1alpha 端點             | **不成立**。v1alpha + Constrained + ephemeral + 正確欄位位置**現在就能通**。值得為未來相容而遷移，但**不是本次失敗的原因**。 |
+| 2. transcription 欄位位置不符          | **唯一真因**，且為充分必要條件。                                                                                             |
+| 3. token 未用 `liveConnectConstraints` | 與本失敗**無關**（未鎖 token 已成功握手）。                                                                                  |
+| 4. mock 測試把錯誤 JSON 鎖成通過       | 屬實，見 §2 #4。這是讓 #2 得以存活的機制。                                                                                   |
 
 ### 這是一個未 commit 的回歸
 
@@ -65,25 +65,25 @@ at 'setup.generation_config': Cannot find field.
 
 ### 2.1 屬實（已親驗）
 
-| # | 主張 | 證據位置 |
-|---|---|---|
-| 1 | transcription 欄位在 `generationConfig` | `apps/web/src/providers/gemini-live-provider.ts:414-417` ＋ §1 實測 |
-| 2 | 使用 v1alpha 端點 | `gemini-live-provider.ts:33-34`（屬實，但**非失敗主因**） |
-| 3 | 未等 `setupComplete` 就送 PCM | `connect()` 於 `ws.onopen` 即 `resolve()`（:343-353）；`start()` 緊接 `startAudioCapture()`（:301-302） |
-| 4 | mock 測試把錯誤 JSON 鎖成通過 | `gemini-live-provider.test.ts:417-421` 明確斷言頂層為 `undefined`、`generationConfig` 內為 `{}` |
-| 5 | chunk = 32 ms | `gemini-live-provider.ts:28` |
-| 6 | UI「2–3 秒」宣稱無專案量測背書 | `apps/web/src/components/SettingsPanel.tsx:12`；repo 內無任何 latency JSON/JSONL 產物 |
-| 7 | latency-monitor 跨 session 汙染 | `latency-monitor.ts:74-80` — `recordHealth()` 清 `sessionStartMs`/`ttfcMs`/`pending`，**未清 `samples`** |
-| 8 | persist 每次都 append | `latency-monitor.ts:186` `[...prior, entry]`，但 :184 註解寫「Replace…if it's THIS session」。15 s 節流 × `PERSIST_HISTORY_CAP=50` → 單場 13 分鐘會議即可把全部歷史擠掉 |
-| 9 | `GEMINI_LIVE_MODEL` 無 allowlist | `services/online/src/config.ts:41` `z.string()` |
-| 10 | 音源硬編 microphone | gemini `:600,:802`；openai `:789,:834,:924,:1042`（`display-media-audio-provider.ts` 明明存在） |
-| 11 | Gemini-only 發行被 OPENAI_API_KEY 擋 | `scripts/release-templates/start.sh:24`、`start.bat:29` 皆 `exit 1` |
-| 12 | 執行中切換模式只改 UI | `apps/web/src/components/ModeSelector.tsx:27` 直接 `setMode()`，無 running 守衛、無 `.stop()` |
-| 13 | 字幕預設持久化 | `store/use-caption-store.ts:4` `createCaptionStore()` → `store/caption-store.ts:564` 落到 `DEFAULT_PERSIST_KEY` |
-| 14 | MT 積壓可阻塞 caption 路徑 | `services/offline/app/pipeline/asr.py:232-236` — in-flight ≥10 時於 recv_loop 內 `await asyncio.wait(FIRST_COMPLETED)` |
-| 15 | Hybrid `separate_tracks` 未實作 | 僅存在於 `docs/AUDIO_SOURCES.md:14`，無對應程式碼 |
-| 16 | 相依套件 7 high / 1 moderate | `pnpm audit --prod` 完全吻合（brace-expansion ReDoS ×7、@fastify/static 授權繞過 ×1） |
-| 17 | 測試與 typecheck 綠 | web **283/283**、online **48/48**、`pnpm -r typecheck` exit 0（較原報告的 69/69 子集更完整） |
+| #   | 主張                                    | 證據位置                                                                                                                                                                |
+| --- | --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | transcription 欄位在 `generationConfig` | `apps/web/src/providers/gemini-live-provider.ts:414-417` ＋ §1 實測                                                                                                     |
+| 2   | 使用 v1alpha 端點                       | `gemini-live-provider.ts:33-34`（屬實，但**非失敗主因**）                                                                                                               |
+| 3   | 未等 `setupComplete` 就送 PCM           | `connect()` 於 `ws.onopen` 即 `resolve()`（:343-353）；`start()` 緊接 `startAudioCapture()`（:301-302）                                                                 |
+| 4   | mock 測試把錯誤 JSON 鎖成通過           | `gemini-live-provider.test.ts:417-421` 明確斷言頂層為 `undefined`、`generationConfig` 內為 `{}`                                                                         |
+| 5   | chunk = 32 ms                           | `gemini-live-provider.ts:28`                                                                                                                                            |
+| 6   | UI「2–3 秒」宣稱無專案量測背書          | `apps/web/src/components/SettingsPanel.tsx:12`；repo 內無任何 latency JSON/JSONL 產物                                                                                   |
+| 7   | latency-monitor 跨 session 汙染         | `latency-monitor.ts:74-80` — `recordHealth()` 清 `sessionStartMs`/`ttfcMs`/`pending`，**未清 `samples`**                                                                |
+| 8   | persist 每次都 append                   | `latency-monitor.ts:186` `[...prior, entry]`，但 :184 註解寫「Replace…if it's THIS session」。15 s 節流 × `PERSIST_HISTORY_CAP=50` → 單場 13 分鐘會議即可把全部歷史擠掉 |
+| 9   | `GEMINI_LIVE_MODEL` 無 allowlist        | `services/online/src/config.ts:41` `z.string()`                                                                                                                         |
+| 10  | 音源硬編 microphone                     | gemini `:600,:802`；openai `:789,:834,:924,:1042`（`display-media-audio-provider.ts` 明明存在）                                                                         |
+| 11  | Gemini-only 發行被 OPENAI_API_KEY 擋    | `scripts/release-templates/start.sh:24`、`start.bat:29` 皆 `exit 1`                                                                                                     |
+| 12  | 執行中切換模式只改 UI                   | `apps/web/src/components/ModeSelector.tsx:27` 直接 `setMode()`，無 running 守衛、無 `.stop()`                                                                           |
+| 13  | 字幕預設持久化                          | `store/use-caption-store.ts:4` `createCaptionStore()` → `store/caption-store.ts:564` 落到 `DEFAULT_PERSIST_KEY`                                                         |
+| 14  | MT 積壓可阻塞 caption 路徑              | `services/offline/app/pipeline/asr.py:232-236` — in-flight ≥10 時於 recv_loop 內 `await asyncio.wait(FIRST_COMPLETED)`                                                  |
+| 15  | Hybrid `separate_tracks` 未實作         | 僅存在於 `docs/AUDIO_SOURCES.md:14`，無對應程式碼                                                                                                                       |
+| 16  | 相依套件 7 high / 1 moderate            | `pnpm audit --prod` 完全吻合（brace-expansion ReDoS ×7、@fastify/static 授權繞過 ×1）                                                                                   |
+| 17  | 測試與 typecheck 綠                     | web **283/283**、online **48/48**、`pnpm -r typecheck` exit 0（較原報告的 69/69 子集更完整）                                                                            |
 
 #### 補充：#12 的內部矛盾
 
@@ -91,10 +91,10 @@ online backend picker（OpenAI↔Gemini）**有**執行中鎖定，`SettingsPane
 
 ### 2.2 屬實但描述有偏差
 
-| 項目 | 修正 |
-|---|---|
-| #13 範圍被低估 | 持久化是**全模式預設開啟**，不是「offline 才寫入」。直接違反 CLAUDE.md「Default retention: in-memory only」與「不得靜默持久化」。**嚴重度應上調。** |
-| #14 程度需限定 | MT 為 fire-and-forget，且每筆有 5 s executor timeout（`translation.py:111`）。阻塞只發生在飽和邊界，最壞約 5 s，且當批 transcript 已先 `_put()` 送出。是真缺陷，但不是「積壓即癱瘓」。 |
+| 項目                             | 修正                                                                                                                                                                                                                          |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| #13 範圍被低估                   | 持久化是**全模式預設開啟**，不是「offline 才寫入」。直接違反 CLAUDE.md「Default retention: in-memory only」與「不得靜默持久化」。**嚴重度應上調。**                                                                           |
+| #14 程度需限定                   | MT 為 fire-and-forget，且每筆有 5 s executor timeout（`translation.py:111`）。阻塞只發生在飽和邊界，最壞約 5 s，且當批 transcript 已先 `_put()` 送出。是真缺陷，但不是「積壓即癱瘓」。                                        |
 | 「Offline WebSocket 綁 0.0.0.0」 | **指錯 socket**。`services/offline/run_whl.py:70` 綁的是**內部 WhisperLiveKit :9090**（無驗證，確實對 LAN 曝險）。瀏覽器面向的 FastAPI :8000 以 `uvicorn app.main:app --port 8000` 啟動，預設 127.0.0.1。結論成立，位置要改。 |
 
 ### 2.3 錯誤 —— 不可照做
@@ -136,20 +136,20 @@ Google 文件在這一點上**與 transcription 欄位一樣自相矛盾**。現
 
 ## 四、修正後的修復優先序
 
-| 序 | 項目 | 理由 |
-|---|---|---|
-| 1 | **還原 transcription 欄位至 setup 頂層** | 撤銷未 commit 的回歸，2 行，解除 Gemini P0。**必須同步修 `gemini-live-provider.test.ts:417-421`**，否則測試會反過來擋住修復。 |
-| 2 | 收到 `setupComplete` 才啟動音訊 ＋ setup timeout | 官方要求；目前握手生命週期不正確 |
-| 3 | 模式切換守衛：切換前停掉執行中 provider | 雲端計費與收音持續中；同類風險已在 backend picker 擋過 |
-| 4 | 持久化預設關閉（全模式），改明示 opt-in | 違反 CLAUDE.md 最高等級的隱私條款 |
-| 5 | `start.sh`/`start.bat` 改為「OPENAI 或 GEMINI 任一存在即可啟動」 | 阻斷 Gemini-only 發行 |
-| 6 | 音源標記改為真實 source，不再硬編 microphone | 事件契約失真 |
-| 7 | WHL 綁 127.0.0.1（`run_whl.py:70`） | LAN 曝險 |
-| 8 | 加真實 cloud contract smoke test | 本輪探針可直接改造（見附錄）；mock 不能取代 |
-| 9 | `GEMINI_LIVE_MODEL` 加 allowlist；`@fastify/static` 升級消 audit | — |
-| 10 | v1alpha → v1beta 遷移 | **未來相容性，非故障修復**；可與 `liveConnectConstraints` 重測一起做 |
-| 11 | 重做 speech-marker → paint 延遲量測 | 需涵蓋雙語向、mic/system、安靜/噪音、短句/長句、p50/p95/p99 |
-| 12 | latency-monitor：`recordHealth` 清 `samples`、`persistNow` 真正替換同 session 條目 | 否則第 11 項量到的數字仍不可信 |
+| 序  | 項目                                                                               | 理由                                                                                                                          |
+| --- | ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| 1   | **還原 transcription 欄位至 setup 頂層**                                           | 撤銷未 commit 的回歸，2 行，解除 Gemini P0。**必須同步修 `gemini-live-provider.test.ts:417-421`**，否則測試會反過來擋住修復。 |
+| 2   | 收到 `setupComplete` 才啟動音訊 ＋ setup timeout                                   | 官方要求；目前握手生命週期不正確                                                                                              |
+| 3   | 模式切換守衛：切換前停掉執行中 provider                                            | 雲端計費與收音持續中；同類風險已在 backend picker 擋過                                                                        |
+| 4   | 持久化預設關閉（全模式），改明示 opt-in                                            | 違反 CLAUDE.md 最高等級的隱私條款                                                                                             |
+| 5   | `start.sh`/`start.bat` 改為「OPENAI 或 GEMINI 任一存在即可啟動」                   | 阻斷 Gemini-only 發行                                                                                                         |
+| 6   | 音源標記改為真實 source，不再硬編 microphone                                       | 事件契約失真                                                                                                                  |
+| 7   | WHL 綁 127.0.0.1（`run_whl.py:70`）                                                | LAN 曝險                                                                                                                      |
+| 8   | 加真實 cloud contract smoke test                                                   | 本輪探針可直接改造（見附錄）；mock 不能取代                                                                                   |
+| 9   | `GEMINI_LIVE_MODEL` 加 allowlist；`@fastify/static` 升級消 audit                   | —                                                                                                                             |
+| 10  | v1alpha → v1beta 遷移                                                              | **未來相容性，非故障修復**；可與 `liveConnectConstraints` 重測一起做                                                          |
+| 11  | 重做 speech-marker → paint 延遲量測                                                | 需涵蓋雙語向、mic/system、安靜/噪音、短句/長句、p50/p95/p99                                                                   |
+| 12  | latency-monitor：`recordHealth` 清 `samples`、`persistNow` 真正替換同 session 條目 | 否則第 11 項量到的數字仍不可信                                                                                                |
 
 **與原報告的差異**：原 #1（v1alpha）從第 1 位降至第 10 位並改標為相容性工作；原 #7（expires_at）**刪除**；原 #4（100 ms）降級為待測；原 #2（token 鎖定）加上「先重測 1011」前置條件。
 
@@ -162,17 +162,35 @@ Google 文件在這一點上**與 transcription 欄位一樣自相矛盾**。現
 ```js
 // 對每組 (version, authPath, placement)：開 WS → 送一個 setup frame → 記錄
 // 第一個 server frame 或 close code/reason。不送任何音訊。
-const setupInGenConfig = {                  // 現行工作區
-  setup: { model, contextWindowCompression: { slidingWindow: {} }, sessionResumption: {},
-    generationConfig: { responseModalities: ['AUDIO'],
-      inputAudioTranscription: {}, outputAudioTranscription: {},
-      translationConfig: { targetLanguageCode: 'zh-Hant', echoTargetLanguage: false } } } };
+const setupInGenConfig = {
+  // 現行工作區
+  setup: {
+    model,
+    contextWindowCompression: { slidingWindow: {} },
+    sessionResumption: {},
+    generationConfig: {
+      responseModalities: ['AUDIO'],
+      inputAudioTranscription: {},
+      outputAudioTranscription: {},
+      translationConfig: { targetLanguageCode: 'zh-Hant', echoTargetLanguage: false },
+    },
+  },
+};
 
-const setupTopLevel = {                     // 已 commit 的 8747078
-  setup: { model, inputAudioTranscription: {}, outputAudioTranscription: {},
-    contextWindowCompression: { slidingWindow: {} }, sessionResumption: {},
-    generationConfig: { responseModalities: ['AUDIO'],
-      translationConfig: { targetLanguageCode: 'zh-Hant', echoTargetLanguage: false } } } };
+const setupTopLevel = {
+  // 已 commit 的 8747078
+  setup: {
+    model,
+    inputAudioTranscription: {},
+    outputAudioTranscription: {},
+    contextWindowCompression: { slidingWindow: {} },
+    sessionResumption: {},
+    generationConfig: {
+      responseModalities: ['AUDIO'],
+      translationConfig: { targetLanguageCode: 'zh-Hant', echoTargetLanguage: false },
+    },
+  },
+};
 ```
 
 端點：

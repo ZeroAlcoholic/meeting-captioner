@@ -8,7 +8,7 @@
   --bg-3: #151d2e;
 
   --border-subtle: #161e30;
-  --border-mid:    #1e293a;
+  --border-mid: #1e293a;
   --border-bright: #2a3a55;
 
   --text-0: #edf0f5;
@@ -16,22 +16,28 @@
   --text-2: #68788f;
   --text-3: #384152;
 
-  --amber:  #c79236;
+  --amber: #c79236;
   --amber-dim: #7a5920;
-  --blue:   #3d7fff;
+  --blue: #3d7fff;
 
   /* CJK never falls through to PMingLiU/MingLiU on Windows: Noto Sans TC ships from
      Google Fonts and renders cleanly without synthetic italic. Per-character font-family
      fallback gives Latin = Fraunces, CJK = Noto Sans TC. */
-  --font-caption:  'Fraunces', 'Noto Sans TC', 'Microsoft JhengHei', sans-serif;
-  --font-ui:       'DM Mono', 'SF Mono', 'Fira Code', 'Noto Sans TC', monospace;
+  --font-caption: 'Fraunces', 'Noto Sans TC', 'Microsoft JhengHei', sans-serif;
+  --font-ui: 'DM Mono', 'SF Mono', 'Fira Code', 'Noto Sans TC', monospace;
   --font-fallback: ui-sans-serif, system-ui, -apple-system, 'Noto Sans TC', sans-serif;
 }
 
 /* ─── Reset ──────────────────────────────────────────────────────────────────── */
-*, *::before, *::after { box-sizing: border-box; }
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
 
-html, body, #root {
+html,
+body,
+#root {
   margin: 0;
   padding: 0;
   height: 100%;
@@ -121,7 +127,7 @@ body {
   line-height: 1;
   padding: 0.3rem 0.5rem;
   border-radius: 0.25rem;
-  background: rgba(255,255,255,0.04);
+  background: rgba(255, 255, 255, 0.04);
   border: 1px solid var(--border-subtle);
   cursor: default;
   user-select: none;
@@ -140,7 +146,10 @@ body {
   padding: 0.45rem 1rem;
   border-radius: 0.3rem;
   cursor: pointer;
-  transition: background 100ms, border-color 100ms, color 100ms;
+  transition:
+    background 100ms,
+    border-color 100ms,
+    color 100ms;
   white-space: nowrap;
 }
 
@@ -240,7 +249,9 @@ body {
   background: rgba(220, 76, 70, 0.12);
   border: 1px solid rgba(220, 76, 70, 0.55);
 }
-.failover-bar .launcher-continue-text strong { color: #f0857f; }
+.failover-bar .launcher-continue-text strong {
+  color: #f0857f;
+}
 .failover-bar .launcher-continue-btn {
   background: #dc4c46;
   border-color: rgba(220, 76, 70, 0.7);
@@ -253,8 +264,14 @@ body {
   gap: 0.2rem;
   font-family: var(--font-ui);
 }
-.launcher-continue-text strong { color: var(--amber); font-size: 0.9rem; }
-.launcher-continue-text span { color: var(--text-1); font-size: 0.78rem; }
+.launcher-continue-text strong {
+  color: var(--amber);
+  font-size: 0.9rem;
+}
+.launcher-continue-text span {
+  color: var(--text-1);
+  font-size: 0.78rem;
+}
 
 .launcher-continue-btn {
   flex-shrink: 0;
@@ -268,7 +285,9 @@ body {
   cursor: pointer;
   font-weight: 600;
 }
-.launcher-continue-btn:hover { filter: brightness(1.1); }
+.launcher-continue-btn:hover {
+  filter: brightness(1.1);
+}
 
 .launcher-grid {
   display: flex;
@@ -307,18 +326,33 @@ body {
   cursor: pointer;
   font-family: var(--font-ui);
   text-align: center;
-  transition: border-color 120ms, background 120ms, transform 120ms;
+  transition:
+    border-color 120ms,
+    background 120ms,
+    transform 120ms;
 }
 .launcher-option:hover:not(:disabled) {
   background: var(--bg-3);
   border-color: var(--border-bright);
   transform: translateY(-1px);
 }
-.launcher-option:disabled { opacity: 0.45; cursor: not-allowed; }
+.launcher-option:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
 
-.launcher-option-icon { font-size: 1.5rem; line-height: 1; }
-.launcher-option-label { font-size: 0.92rem; font-weight: 600; }
-.launcher-option-sub { font-size: 0.72rem; color: var(--text-2); }
+.launcher-option-icon {
+  font-size: 1.5rem;
+  line-height: 1;
+}
+.launcher-option-label {
+  font-size: 0.92rem;
+  font-weight: 600;
+}
+.launcher-option-sub {
+  font-size: 0.72rem;
+  color: var(--text-2);
+}
 
 /* ─── System-audio hint bar ──────────────────────────────────────────────────── */
 .app-hint {
@@ -379,9 +413,15 @@ body {
   transform: translateX(-1px);
 }
 
-.mic-level[data-state='connected']            .mic-bar-fill { background: var(--amber); }
-.mic-level[data-state='requesting_permission'] .mic-bar-fill { background: #8090cc; }
-.mic-level[data-state='failed']               .mic-bar-fill { background: #e06060; }
+.mic-level[data-state='connected'] .mic-bar-fill {
+  background: var(--amber);
+}
+.mic-level[data-state='requesting_permission'] .mic-bar-fill {
+  background: #8090cc;
+}
+.mic-level[data-state='failed'] .mic-bar-fill {
+  background: #e06060;
+}
 
 .mic-state {
   font-size: 0.75rem;

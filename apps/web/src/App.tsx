@@ -139,16 +139,7 @@ export function App() {
       }
       return ok;
     },
-    [
-      fake,
-      gemini,
-      offline,
-      hybrid,
-      realtime,
-      startSession,
-      stopSession,
-      markFieldTest,
-    ],
+    [fake, gemini, offline, hybrid, realtime, startSession, stopSession, markFieldTest],
   );
 
   // Fresh start (clears history). Wrapped so the onClick MouseEvent never
@@ -239,14 +230,7 @@ export function App() {
       markFieldTest('gemini running');
     }
     return ok;
-  }, [
-    fake,
-    realtime,
-    offline,
-    hybrid,
-    gemini,
-    markFieldTest,
-  ]);
+  }, [fake, realtime, offline, hybrid, gemini, markFieldTest]);
 
   const handleStartOffline = () => {
     fake.stop();

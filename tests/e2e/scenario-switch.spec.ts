@@ -1,7 +1,9 @@
 import { expect, test } from '@playwright/test';
 
 test.describe('scenario switching', () => {
-  test('running locks scenario; Stop unlocks it without clearing caption history', async ({ page }) => {
+  test('running locks scenario; Stop unlocks it without clearing caption history', async ({
+    page,
+  }) => {
     await page.goto('/');
     await page.getByTestId('settings-toggle').click();
 

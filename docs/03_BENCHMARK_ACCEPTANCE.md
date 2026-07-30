@@ -97,12 +97,12 @@ reconnect_success_rate
 ### 3.3 ASR result table format
 
 ```markdown
-| Candidate | WER ↓ | RTF ↓ | First partial p95 ↓ | Final p95 ↓ | Revision count ↓ | GPU MB | Verdict |
-|---|---:|---:|---:|---:|---:|---:|---|
-| whisperlivekit_large_v3_turbo |  |  |  |  |  |  |  |
-| whisperlivekit_distil_large_v3 |  |  |  |  |  |  |  |
-| speaches_large_v3_turbo |  |  |  |  |  |  |  |
-| voxtral_realtime |  |  |  |  |  |  |  |
+| Candidate                      | WER ↓ | RTF ↓ | First partial p95 ↓ | Final p95 ↓ | Revision count ↓ | GPU MB | Verdict |
+| ------------------------------ | ----: | ----: | ------------------: | ----------: | ---------------: | -----: | ------- |
+| whisperlivekit_large_v3_turbo  |       |       |                     |             |                  |        |         |
+| whisperlivekit_distil_large_v3 |       |       |                     |             |                  |        |         |
+| speaches_large_v3_turbo        |       |       |                     |             |                  |        |         |
+| voxtral_realtime               |       |       |                     |             |                  |        |         |
 ```
 
 ## 4. Translation benchmark

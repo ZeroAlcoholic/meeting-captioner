@@ -11,11 +11,7 @@ vi.mock('../config.js', () => ({
 }));
 
 import Fastify from 'fastify';
-import {
-  _resetHealthForTests,
-  recordOpenAIReachability,
-  registerHealthz,
-} from './healthz.js';
+import { _resetHealthForTests, recordOpenAIReachability, registerHealthz } from './healthz.js';
 
 beforeEach(() => {
   _resetHealthForTests();

@@ -63,35 +63,33 @@ describe('toPlainText', () => {
 
   it('emits source then translation per segment when both present', () => {
     const out = toPlainText(
-      meta(
-        [seg('a', 'Hello.', 0), seg('b', 'World.', 5000)],
-        { a: tr('a', '你好。'), b: tr('b', '世界。') },
-      ),
+      meta([seg('a', 'Hello.', 0), seg('b', 'World.', 5000)], {
+        a: tr('a', '你好。'),
+        b: tr('b', '世界。'),
+      }),
     );
     expect(out).toBe('Hello.\n你好。\n\nWorld.\n世界。');
   });
 
   it('respects includeSource=false (translation-only export)', () => {
-    const out = toPlainText(
-      meta([seg('a', 'Hello.', 0)], { a: tr('a', '你好。') }),
-      { includeSource: false },
-    );
+    const out = toPlainText(meta([seg('a', 'Hello.', 0)], { a: tr('a', '你好。') }), {
+      includeSource: false,
+    });
     expect(out).toBe('你好。');
   });
 
   it('respects includeTranslation=false (source-only export)', () => {
-    const out = toPlainText(
-      meta([seg('a', 'Hello.', 0)], { a: tr('a', '你好。') }),
-      { includeTranslation: false },
-    );
+    const out = toPlainText(meta([seg('a', 'Hello.', 0)], { a: tr('a', '你好。') }), {
+      includeTranslation: false,
+    });
     expect(out).toBe('Hello.');
   });
 
   it('omits segments that produce no lines after filtering', () => {
-    const out = toPlainText(
-      meta([seg('a', 'Hello.', 0)], {}),
-      { includeSource: false, includeTranslation: true },
-    );
+    const out = toPlainText(meta([seg('a', 'Hello.', 0)], {}), {
+      includeSource: false,
+      includeTranslation: true,
+    });
     expect(out).toBe('');
   });
 });
@@ -119,9 +117,7 @@ describe('toSrt', () => {
   });
 
   it('stacks source and translation in one cue when both included', () => {
-    const out = toSrt(
-      meta([seg('a', 'Hello.', 0, 1000)], { a: tr('a', '你好。') }),
-    );
+    const out = toSrt(meta([seg('a', 'Hello.', 0, 1000)], { a: tr('a', '你好。') }));
     expect(out).toContain('Hello.\n你好。');
   });
 
@@ -145,18 +141,15 @@ describe('toMarkdown', () => {
   });
 
   it('renders translation as a blockquote under source', () => {
-    const out = toMarkdown(
-      meta([seg('a', 'Hello.', 0)], { a: tr('a', '你好。') }),
-    );
+    const out = toMarkdown(meta([seg('a', 'Hello.', 0)], { a: tr('a', '你好。') }));
     expect(out).toContain('**[0:00]** Hello.');
     expect(out).toContain('> 你好。');
   });
 
   it('shows translation as primary line when includeSource=false', () => {
-    const out = toMarkdown(
-      meta([seg('a', 'Hello.', 0)], { a: tr('a', '你好。') }),
-      { includeSource: false },
-    );
+    const out = toMarkdown(meta([seg('a', 'Hello.', 0)], { a: tr('a', '你好。') }), {
+      includeSource: false,
+    });
     expect(out).toContain('**[0:00]** 你好。');
     expect(out).not.toContain('Hello.');
   });

@@ -71,39 +71,40 @@ lifecycle don't mix. Future Electron will spawn Python the same way.
 
 ## 3. Task Breakdown (P0)
 
-| # | Task | Output | Verification |
-|---|------|--------|--------------|
-| 0.1 | git init + root files (.gitignore, .env.example, README, AGENTS, MEMORY) | First commit | `git log` shows 1 commit |
-| 0.2 | 11 docs/*.md skeletons (purpose / scope / open questions sections) | 11 md files | each has 3 named sections |
-| 0.3 | pnpm monorepo + tsconfig.base + eslint + prettier | root configs | `pnpm install` clean |
-| 0.4 | packages/contracts: TS types + zod schemas + Vitest | published-shape package | `pnpm -F contracts test` green |
-| 0.5 | apps/web Vite + React + TS skeleton | runs | `pnpm -F web dev` shows title |
-| 0.6 | caption store (bounded ring buffer, default 500) + Vitest | store module | covers partial/revised/final + eviction |
-| 0.7 | FakeReplayProvider + fake-transcript.json | provider module | events visible in console |
-| 0.8 | CaptionBoard component (large bilingual, last-5 history) | React component | live captions via fake replay |
-| 0.9 | services/online Fastify stub: POST /session, GET /healthz | Node server | curl returns 200 |
-| 0.10 | services/offline FastAPI stub: GET /healthz | Python server | curl returns 200 |
-| 0.11 | Playwright e2e: open page, click Start Fake Replay, assert ≥1 final caption | spec file | `pnpm test:e2e` green |
-| 0.12 | RUNBOOK + PROJECT_STATE update | docs | new dev sees board in 5 min |
-| 0.13 | bootstrap scripts (setup + doctor for Win/Unix) | 4 scripts | clean machine → setup → dev works |
+| #    | Task                                                                        | Output                  | Verification                            |
+| ---- | --------------------------------------------------------------------------- | ----------------------- | --------------------------------------- |
+| 0.1  | git init + root files (.gitignore, .env.example, README, AGENTS, MEMORY)    | First commit            | `git log` shows 1 commit                |
+| 0.2  | 11 docs/\*.md skeletons (purpose / scope / open questions sections)         | 11 md files             | each has 3 named sections               |
+| 0.3  | pnpm monorepo + tsconfig.base + eslint + prettier                           | root configs            | `pnpm install` clean                    |
+| 0.4  | packages/contracts: TS types + zod schemas + Vitest                         | published-shape package | `pnpm -F contracts test` green          |
+| 0.5  | apps/web Vite + React + TS skeleton                                         | runs                    | `pnpm -F web dev` shows title           |
+| 0.6  | caption store (bounded ring buffer, default 500) + Vitest                   | store module            | covers partial/revised/final + eviction |
+| 0.7  | FakeReplayProvider + fake-transcript.json                                   | provider module         | events visible in console               |
+| 0.8  | CaptionBoard component (large bilingual, last-5 history)                    | React component         | live captions via fake replay           |
+| 0.9  | services/online Fastify stub: POST /session, GET /healthz                   | Node server             | curl returns 200                        |
+| 0.10 | services/offline FastAPI stub: GET /healthz                                 | Python server           | curl returns 200                        |
+| 0.11 | Playwright e2e: open page, click Start Fake Replay, assert ≥1 final caption | spec file               | `pnpm test:e2e` green                   |
+| 0.12 | RUNBOOK + PROJECT_STATE update                                              | docs                    | new dev sees board in 5 min             |
+| 0.13 | bootstrap scripts (setup + doctor for Win/Unix)                             | 4 scripts               | clean machine → setup → dev works       |
 
 ---
 
 ## 4. Confirmed Decisions
 
-| # | Topic | Choice |
-|---|-------|--------|
-| D1 | Workspace tool | **pnpm workspaces** |
-| D2 | Styling | **plain CSS / CSS Modules** (CLAUDE.md L77) |
-| D3 | Schema validation | **zod** (TS types inferred from schemas) |
-| D4 | Caption state | **Zustand vanilla** (decoupled from React render) |
-| D5 | Fake transcript | JSON `{ tMs, kind, segmentId, status, text }` |
-| D6 | Python env | **uv** + `pyproject.toml` |
-| D7 | Lint/format | ESLint + Prettier (TS), Ruff (Py) |
-| D8 | Commit style | Conventional Commits |
-| D9 | No Docker for dev/runtime | bootstrap scripts instead |
+| #   | Topic                     | Choice                                            |
+| --- | ------------------------- | ------------------------------------------------- |
+| D1  | Workspace tool            | **pnpm workspaces**                               |
+| D2  | Styling                   | **plain CSS / CSS Modules** (CLAUDE.md L77)       |
+| D3  | Schema validation         | **zod** (TS types inferred from schemas)          |
+| D4  | Caption state             | **Zustand vanilla** (decoupled from React render) |
+| D5  | Fake transcript           | JSON `{ tMs, kind, segmentId, status, text }`     |
+| D6  | Python env                | **uv** + `pyproject.toml`                         |
+| D7  | Lint/format               | ESLint + Prettier (TS), Ruff (Py)                 |
+| D8  | Commit style              | Conventional Commits                              |
+| D9  | No Docker for dev/runtime | bootstrap scripts instead                         |
 
 Pre-flight (user environment):
+
 - `npm install -g pnpm`
 - `winget install --id=astral-sh.uv -e` (or `pip install uv`)
 
@@ -112,6 +113,7 @@ Pre-flight (user environment):
 ## 5. Out of Scope for P0 (explicit)
 
 Not in P0 — each has its own future phase:
+
 - OpenAI Realtime (P2)
 - WhisperLiveKit spike (P3)
 - WASAPI loopback (P3)
@@ -142,13 +144,13 @@ Not in P0 — each has its own future phase:
 
 ### Install matrix by phase
 
-| Phase | Required | Approx size | Network |
-|-------|----------|-------------|---------|
-| **P0** | git, Node 22 LTS, pnpm, Python 3.11+, uv | ~600 MB | one-time `pnpm install` + `uv sync` |
-| P2 | + OpenAI API key | same | runtime to OpenAI |
-| P3 | + ffmpeg + Whisper model (small ~500MB / medium ~1.5GB) | +2 GB | first model download |
-| P3 (Win) | + PyAudioWPatch | +20 MB | — |
-| P7 | + Electron Builder | +200 MB | at packaging time |
+| Phase    | Required                                                | Approx size | Network                             |
+| -------- | ------------------------------------------------------- | ----------- | ----------------------------------- |
+| **P0**   | git, Node 22 LTS, pnpm, Python 3.11+, uv                | ~600 MB     | one-time `pnpm install` + `uv sync` |
+| P2       | + OpenAI API key                                        | same        | runtime to OpenAI                   |
+| P3       | + ffmpeg + Whisper model (small ~500MB / medium ~1.5GB) | +2 GB       | first model download                |
+| P3 (Win) | + PyAudioWPatch                                         | +20 MB      | —                                   |
+| P7       | + Electron Builder                                      | +200 MB     | at packaging time                   |
 
 P0 has light install footprint (no ML models, no native extensions).
 
@@ -164,6 +166,7 @@ P0 has light install footprint (no ML models, no native extensions).
 5. Print next-step commands
 
 Principles:
+
 - Print "please run X manually" rather than fail silently
 - No project-specific environment magic (no PATH edits, no registry writes, no service installs)
 - Idempotent
@@ -205,6 +208,7 @@ cd services/offline && uv run uvicorn app.main:app --port 8000
 ### Why not Docker
 
 Considered Docker Compose for "easy install everywhere" but rejected:
+
 - Docker Desktop adds >2 GB
 - WASAPI loopback (P3) is essentially impossible inside Windows containers
 - Slows dev iteration
@@ -216,6 +220,7 @@ Bootstrap scripts get the same effect at lower cost.
 ## 8. Self-Review
 
 ### Aligned with CLAUDE.md
+
 - Caption path is sacred → fake-replay path stands up first; failures elsewhere can't take it down
 - Online and Offline both first-class → both services have stubs from day one
 - Provider Abstraction → contracts package exists before any UI consumer
@@ -223,12 +228,14 @@ Bootstrap scripts get the same effect at lower cost.
 - No premature Electron → Electron deferred to P7
 
 ### Risks acknowledged but accepted
+
 - Monorepo overhead for one developer — paid back fast by shared contracts
 - 11 doc skeletons — required by CLAUDE.md anyway
 - zod runtime cost — negligible vs the bug-prevention value at provider boundaries
 - FastAPI stub before real STT — only `/healthz`, ~10 lines
 
 ### What P0 buys you
+
 1. **Spine of the caption path:** contracts + store + fake replay
 2. **First visible product shape:** CaptionBoard fullscreen UI
 3. **In-repo constitution:** 11 doc skeletons future agents can fill in
@@ -237,12 +244,12 @@ Bootstrap scripts get the same effect at lower cost.
 
 ## 9. Phases After P0 (preview)
 
-| Phase | Focus |
-|-------|-------|
-| P1 | Scenario picker UI + audio level meter |
-| P2 | OpenAI Realtime mic path (WebRTC + session bridge) |
-| P3 | WhisperLiveKit spike + OfflineSTTProvider + WASAPI loopback |
-| P4 | Argos Translate (English → zh-Hant) + glossary |
-| P5 | Summary draft / refined / stable pipeline |
-| P6 | Reliability + long-running stability tests |
-| P7 | Electron packaging |
+| Phase | Focus                                                       |
+| ----- | ----------------------------------------------------------- |
+| P1    | Scenario picker UI + audio level meter                      |
+| P2    | OpenAI Realtime mic path (WebRTC + session bridge)          |
+| P3    | WhisperLiveKit spike + OfflineSTTProvider + WASAPI loopback |
+| P4    | Argos Translate (English → zh-Hant) + glossary              |
+| P5    | Summary draft / refined / stable pipeline                   |
+| P6    | Reliability + long-running stability tests                  |
+| P7    | Electron packaging                                          |

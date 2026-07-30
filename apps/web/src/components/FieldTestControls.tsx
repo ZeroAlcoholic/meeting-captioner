@@ -80,7 +80,11 @@ export function FieldTestControls({ sessionActive }: FieldTestControlsProps) {
         className={styles.export}
         onClick={exportHistory}
         disabled={!hasHistory}
-        title={hasHistory ? `Export ${state.history.length} field-test run(s)` : 'No field-test runs recorded yet'}
+        title={
+          hasHistory
+            ? `Export ${state.history.length} field-test run(s)`
+            : 'No field-test runs recorded yet'
+        }
         data-testid="field-test-export"
       >
         ⬇ Test

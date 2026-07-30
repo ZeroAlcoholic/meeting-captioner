@@ -20,10 +20,10 @@ the content here — link to it.
 ## Authoritative References
 
 - Constitution: [`CLAUDE.md`](CLAUDE.md)
-- Tech index:   [`REFERENCE.md`](REFERENCE.md)
+- Tech index: [`REFERENCE.md`](REFERENCE.md)
 - Architecture: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
-- Decisions:    [`docs/DECISIONS.md`](docs/DECISIONS.md)
-- State:        [`docs/PROJECT_STATE.md`](docs/PROJECT_STATE.md)
+- Decisions: [`docs/DECISIONS.md`](docs/DECISIONS.md)
+- State: [`docs/PROJECT_STATE.md`](docs/PROJECT_STATE.md)
 
 ---
 

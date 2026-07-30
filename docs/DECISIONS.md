@@ -1,6 +1,6 @@
 # DECISIONS.md
 
-> Architectural decisions, with the *why*. Decisions are append-only;
+> Architectural decisions, with the _why_. Decisions are append-only;
 > if a decision is reversed, add a new entry that supersedes the old one
 > rather than editing history.
 
@@ -40,7 +40,7 @@ projector-readable text), no runtime style cost.
 **Date:** P0
 **Status:** Accepted
 **Context:** Provider Abstraction (CLAUDE.md) requires UI to consume
-*normalized* events. We need both compile-time TS types and runtime
+_normalized_ events. We need both compile-time TS types and runtime
 validation at provider boundaries.
 **Decision:** Use **zod** in `packages/contracts` to define schemas, then
 infer TS types from the schemas.

@@ -1,6 +1,6 @@
 # 04 Claude Code / Codex 指揮 Prompt
 
-```text
+````text
 你是資深 realtime audio / ASR / local inference / desktop app 架構師。請重構現有 offline 即時會議翻譯系統。目標是讓筆電可以在完全 offline 狀態下聽現場會議或視訊會議音訊，產生英文即時字幕與台灣繁中穩定翻譯字幕。
 
 # 背景
@@ -235,18 +235,24 @@ audio/
 ## Commands to run
 ```bash
 ...
-```
+````
 
 ## Benchmark status
+
 - ASR: ...
 - MT: ...
 - E2E: ...
 
 ## Remaining blockers
+
 - ...
 
 ## Evidence
+
 - logs
 - screenshots if UI changed
 - generated reports
+
+```
+
 ```

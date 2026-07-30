@@ -16,8 +16,7 @@ import { config } from '../config.js';
 // in the token was verified to make the Live WS close with 1011 "Internal
 // error" once the client also sends a setup — so locking is intentionally NOT
 // used. Blast radius is bounded by uses:1 + the short newSession window.
-const GEMINI_AUTH_TOKENS_URL =
-  'https://generativelanguage.googleapis.com/v1alpha/auth_tokens';
+const GEMINI_AUTH_TOKENS_URL = 'https://generativelanguage.googleapis.com/v1alpha/auth_tokens';
 
 // Token lifetimes. `newSessionExpireTime` bounds how long the browser has to
 // OPEN the session; `expireTime` bounds the token's total validity. Generous
@@ -81,15 +80,21 @@ export async function registerGemini(app: FastifyInstance): Promise<void> {
 
     let res: Response;
     try {
-      res = await fetch(`${GEMINI_AUTH_TOKENS_URL}?key=${encodeURIComponent(config.GEMINI_API_KEY)}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(config.OPENAI_TIMEOUT_MS),
-      });
+      res = await fetch(
+        `${GEMINI_AUTH_TOKENS_URL}?key=${encodeURIComponent(config.GEMINI_API_KEY)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(config.OPENAI_TIMEOUT_MS),
+        },
+      );
     } catch (err) {
       const isAbort = err instanceof Error && err.name === 'TimeoutError';
-      req.log.warn({ err: err instanceof Error ? err.message : String(err) }, 'Gemini auth_tokens fetch failed');
+      req.log.warn(
+        { err: err instanceof Error ? err.message : String(err) },
+        'Gemini auth_tokens fetch failed',
+      );
       if (isAbort) return reply.status(504).send({ error: 'Gemini token mint timed out' });
       return reply.status(502).send({ error: 'Gemini token mint failed' });
     }
@@ -97,7 +102,10 @@ export async function registerGemini(app: FastifyInstance): Promise<void> {
     if (!res.ok) {
       // Log upstream detail server-side only; never forward (may carry quota/project hints).
       const bodyText = await res.text().catch(() => '<unreadable>');
-      req.log.warn({ status: res.status, body: bodyText.slice(0, 1_000) }, 'Gemini auth_tokens non-2xx');
+      req.log.warn(
+        { status: res.status, body: bodyText.slice(0, 1_000) },
+        'Gemini auth_tokens non-2xx',
+      );
       const sanitized =
         res.status === 401 || res.status === 403
           ? 'Upstream rejected the Gemini API key'

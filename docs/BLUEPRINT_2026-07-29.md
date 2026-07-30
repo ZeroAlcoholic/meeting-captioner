@@ -18,22 +18,26 @@
 ## 2. 三路延遲深稽核補充結論（2026-07-28，file:line 已親驗）
 
 ### 線上
+
 - OpenAI 上行近理論最佳（WebRTC 原生軌 ~+20ms，不經 worklet；`openai-realtime-provider.ts:451`）。852ms 首字為模型端，客戶端無可再壓。
 - Gemini 現行 32ms chunk（`gemini-live-provider.ts:28`）是實測較慢組態（3927ms vs 100ms 組 3313ms）；setup 1007 回歸在 `:414-424`。
 - **Failover 是冷備**：standby token 不預鑄（`use-openai-realtime.ts:96`、`use-gemini-live.ts:71`）、麥克風不跨 provider 共用、Gemini failed 訊號需 ~31s（5 次 backoff）。
 - OpenAI 排程續期近無縫；故障觸發續期有真實斷字幕窗（首次重試 backoff 30s）。
 
 ### Web 熱路徑（大多已最佳化，勿重做）
+
 僅存三個停頓源：`caption-store.ts:475-479` 連續講話每 ~5s 在 final 內同步 stringify+localStorage（持久化改 opt-in 即消除）；`latency-monitor.ts:193-206` 每 15s 內聯 summary+localStorage（移 idle callback）；`CaptionBoard.tsx:379-383` 每 delta scrollHeight 回流（sub-ms，觀察即可）。
 已確認良好：live/history memo 隔離、33ms coalesce、字幕文字零 CSS transition、O(400) capped 段落分組、token 預鑄＋TLS preconnect、make-before-break。
 
 ### Offline
+
 - 最大未調校槓桿：**WHL min_chunk/step 從未設定**（內部 ~1s 累積主導 partial 延遲）。
 - 瀏覽器 offline chunk 256ms（Gemini 為 32ms）；MT 無啟動預熱（首句吃 CT2 載入，最多 5s）。
 - S-1 精確化：MT 飽和阻塞時當則訊息 caption 已先送（`asr.py:227-228` 先於 `:233`），阻的是下一則；修法仍是 cap-wait 移出 recv_loop。
 - production 啟動腳本帶 `--reload`（dev 模式），需移除。
 
 ### 最新模型保證現狀
+
 - OpenAI：已硬編鎖死（`session.ts:159/146`）✅
 - Gemini：唯一缺口 `services/online/src/config.ts` 的 `GEMINI_LIVE_MODEL: z.string()` 任意覆寫＋瀏覽器端 native-audio 靜默 fallback（`gemini-live-provider.ts:429-438`）→ 待修（階段 1.2）
 
@@ -46,38 +50,44 @@
 ## 4. 分階段工作清單
 
 ### 階段 0：基準固定（0.5 天）
-| # | 任務 | 驗收 |
-|---|------|------|
+
+| #   | 任務                                                                                  | 驗收                     |
+| --- | ------------------------------------------------------------------------------------- | ------------------------ |
 | 0.1 | 工作樹依功能切可驗證 commit（含 3. 的 key failover）；Gemini setup 回歸段不照現狀提交 | 每 commit 測試綠、可歸因 |
-| 0.2 | 真實 upstream smoke 腳本（雙 provider），錄去敏 golden frames 入 repo | 本機可跑、frames 落檔 |
+| 0.2 | 真實 upstream smoke 腳本（雙 provider），錄去敏 golden frames 入 repo                 | 本機可跑、frames 落檔    |
 
 ### 階段 1：P0——正確性、隱私、最新模型（2–3 天）
-| # | 任務 | 依據 |
-|---|------|------|
-| 1.1 | Gemini transcription 欄位還原 setup 頂層；connect() 等 setupComplete；fixture 改由 golden frames 生成 | O-1＋O-3 |
-| 1.2 | Gemini model allowlist（zod enum 僅允許最新 translate model）；native-audio fallback 改啟動即失敗 | O-7、最新模型保證 |
-| 1.3 | 字幕持久化改 opt-in 預設關閉（同時消除 F4/F5 熱路徑停頓） | F-1 |
-| 1.4 | running 期間鎖 mode/scenario/backend 切換；Stop 保證釋放 mic/WS | O-2、O-12 |
-| 1.5 | MT cap-wait 移出 recv_loop（獨立 dispatcher＋bounded queue＋drop-oldest＋degraded 事件） | S-1 |
-| 1.6 | 預設綁 127.0.0.1（run_whl.py＋start scripts）；移除 production `--reload` | S-3 |
+
+| #   | 任務                                                                                                  | 依據              |
+| --- | ----------------------------------------------------------------------------------------------------- | ----------------- |
+| 1.1 | Gemini transcription 欄位還原 setup 頂層；connect() 等 setupComplete；fixture 改由 golden frames 生成 | O-1＋O-3          |
+| 1.2 | Gemini model allowlist（zod enum 僅允許最新 translate model）；native-audio fallback 改啟動即失敗     | O-7、最新模型保證 |
+| 1.3 | 字幕持久化改 opt-in 預設關閉（同時消除 F4/F5 熱路徑停頓）                                             | F-1               |
+| 1.4 | running 期間鎖 mode/scenario/backend 切換；Stop 保證釋放 mic/WS                                       | O-2、O-12         |
+| 1.5 | MT cap-wait 移出 recv_loop（獨立 dispatcher＋bounded queue＋drop-oldest＋degraded 事件）              | S-1               |
+| 1.6 | 預設綁 127.0.0.1（run_whl.py＋start scripts）；移除 production `--reload`                             | S-3               |
 
 ### 階段 2：即時性強化（2–3 天）
-| # | 任務 |
-|---|------|
+
+| #   | 任務                                                                                                                |
+| --- | ------------------------------------------------------------------------------------------------------------------- |
 | 2.1 | 可稽核 speech→paint 延遲管線（marker → normalized event → DOM paint；JSONL＋p50/p95 入 repo）——一切調校的量尺，先建 |
-| 2.2 | Failover 熱備：standby token 預鑄（至少 degraded 時）、麥克風 stream 跨 provider 共用、Gemini failed 訊號提前 |
-| 2.3 | Gemini chunk A/B（32 vs 100ms，足量樣本）採勝者；同管線驗證 AUDIO 確實比 TEXT 快（判準＝延遲） |
-| 2.4 | Offline 三連：WHL min_chunk 調校、瀏覽器 chunk 降階測試、MT 啟動預熱 |
-| 2.5 | 熱路徑停頓清除：latency-monitor persist 移 idle callback；opt-in 持久化開啟時 flush 非同步排程 |
-| 2.6 | OpenAI 故障續期斷字幕窗量測與收斂 |
+| 2.2 | Failover 熱備：standby token 預鑄（至少 degraded 時）、麥克風 stream 跨 provider 共用、Gemini failed 訊號提前       |
+| 2.3 | Gemini chunk A/B（32 vs 100ms，足量樣本）採勝者；同管線驗證 AUDIO 確實比 TEXT 快（判準＝延遲）                      |
+| 2.4 | Offline 三連：WHL min_chunk 調校、瀏覽器 chunk 降階測試、MT 啟動預熱                                                |
+| 2.5 | 熱路徑停頓清除：latency-monitor persist 移 idle callback；opt-in 持久化開啟時 flush 非同步排程                      |
+| 2.6 | OpenAI 故障續期斷字幕窗量測與收斂                                                                                   |
 
 ### 階段 3：可靠性與誠實性（約 2 天）
+
 3.1 Gemini stop 送 audioStreamEnd＋drain；MT pending session fence（O-5、S-2）。3.2 音訊初始化失敗轉 failed、source metadata 修真（O-4、O-11）。3.3 healthz/start scripts 支援 OpenAI-only／Gemini-only／both（O-8）。3.4 下架不實文案，延遲宣稱改用 2.1 實測值（F-2、F-3、O-13）。3.5 Offline MT readiness 檢查與 UI 顯示（S-4）。
 
 ### 階段 4：驗證與收尾（2–3 天）
+
 4.1 30–60 分鐘真實會議 E2E＋1h soak＋bounded heap。4.2 Gemini v1beta 遷移＋constrained token 1011 重測矩陣。4.3 OpenAI 續期改 `session.created.session.expires_at`＋margin（保留 fallback）。4.4 供應鏈 7 high 升級、format/ruff。4.5 stabilizer `_slices` prune（S-6）。
 
 ### 明確 Defer
+
 TEXT/AUDIO 費用 A/B（決策只看延遲，併入 2.3）；Electron；summary pipeline 實作；Hybrid separate tracks 實作；多語向／多人統計矩陣；4h soak（降 1h）。
 
 ## 5. Release gate（校準單機部署形態後）

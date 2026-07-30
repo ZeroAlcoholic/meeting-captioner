@@ -309,16 +309,12 @@ export function createSettingsStore(): SettingsStore {
   // If a previous full-build session left an offline mode persisted but the
   // current build is online-only, fall back to defaults — otherwise the user
   // would land on a disabled (greyed-out) selection they couldn't easily fix.
-  const isEnabled = (
-    list: { id: string; enabled: boolean }[],
-    id: string | undefined,
-  ): boolean => Boolean(id && list.find((o) => o.id === id)?.enabled);
+  const isEnabled = (list: { id: string; enabled: boolean }[], id: string | undefined): boolean =>
+    Boolean(id && list.find((o) => o.id === id)?.enabled);
   const safeScenario = isEnabled(SCENARIO_OPTIONS, hydrated?.scenarioId)
     ? hydrated!.scenarioId!
     : DEFAULT_SCENARIO;
-  const safeMode = isEnabled(MODE_OPTIONS, hydrated?.modeId)
-    ? hydrated!.modeId!
-    : DEFAULT_MODE;
+  const safeMode = isEnabled(MODE_OPTIONS, hydrated?.modeId) ? hydrated!.modeId! : DEFAULT_MODE;
   const store = createStore<SettingsState>((set) => ({
     scenarioId: safeScenario,
     modeId: safeMode,
@@ -377,9 +373,7 @@ export function createSettingsStore(): SettingsStore {
 
     stopSession: () =>
       set((state) => {
-        const elapsedMin = state.sessionStartAt
-          ? (Date.now() - state.sessionStartAt) / 60_000
-          : 0;
+        const elapsedMin = state.sessionStartAt ? (Date.now() - state.sessionStartAt) / 60_000 : 0;
         const wasBilingual = state.activeSessionBilingual === true;
         return {
           translateMinutesAccum: state.translateMinutesAccum + elapsedMin,

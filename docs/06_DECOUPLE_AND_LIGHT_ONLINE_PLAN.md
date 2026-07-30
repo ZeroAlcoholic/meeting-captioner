@@ -5,6 +5,7 @@
 > （TranslateGemma、Voxtral、Speaches、glossary 擴張）可繼續推進。
 >
 > 配套閱讀：
+>
 > - [`../CLAUDE.md`](../CLAUDE.md)
 > - [`PROJECT_STATE.md`](PROJECT_STATE.md)
 > - [`ARCHITECTURE.md`](ARCHITECTURE.md)
@@ -26,9 +27,9 @@
 
 ```yaml
 packages:
-  - "apps/*"
-  - "packages/*"
-  - "services/online"
+  - 'apps/*'
+  - 'packages/*'
+  - 'services/online'
 ```
 
 `services/offline` 雖然不是 pnpm workspace 成員（它是 Python + uv 專案），
@@ -129,16 +130,17 @@ online + fake replay。一旦 P4 把 e2e 也加入 offline 流程，CI runner �
 
 ## 2. 解耦目標
 
-| # | 目標 | 量測方式 |
-|---|------|----------|
-| G1 | Online 產品可在「無 Python、無 conda、無 WHL、無 CT2、無 OpenCC、無 glossary、無 WASAPI」環境完整 build + 啟動 + 顯示字幕 | 在乾淨 Windows VM 安裝後跑 `pnpm install && pnpm -F web build:online` 並完成 OpenAI Realtime 字幕 demo |
-| G2 | Offline 仍可消費同一份 `apps/web` UI shell,不需要 fork UI 程式碼 | Full Offline build 與 Online build 共用 `caption-board/`、`store/`、`settings/`、`packages/contracts` 一字不差 |
-| G3 | `packages/contracts` 維持唯一事件 schema 來源；Python 端的 events 仍是手寫但加入 schema 版本檢查 | Contracts repo / 套件版本號嵌入每個 NormalizedEvent；mismatch 時 UI 顯示 health.degraded |
-| G4 | Online artifact 可作為小型 Electron 或 SPA + serverless 出貨,安裝包 ≤ 50 MB(不含 Electron runtime) | `pnpm -F web build:online` 產出 `dist/` 與 `services/online/dist/` 總和；CI 設 size-budget |
-| G5 | 兩個模式在 CLAUDE.md 規範下仍是 first-class——解耦只影響**交付**,不刪 offline 程式碼,也不在 lightweight build 假裝 offline 存在 | Lightweight Online build 將 `full_offline` ModeOption 在 UI 隱藏(或標 `unavailable in this build`),不是 throw error |
-| G6 | Offline P4+ 工作(TranslateGemma、Voxtral、Speaches)在解耦後可獨立 PR,不阻塞 Online release | Offline 與 Online 各自有 release tag,例如 `online@v0.1.0` 與 `offline@v0.4.0` |
+| #   | 目標                                                                                                                           | 量測方式                                                                                                            |
+| --- | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| G1  | Online 產品可在「無 Python、無 conda、無 WHL、無 CT2、無 OpenCC、無 glossary、無 WASAPI」環境完整 build + 啟動 + 顯示字幕      | 在乾淨 Windows VM 安裝後跑 `pnpm install && pnpm -F web build:online` 並完成 OpenAI Realtime 字幕 demo              |
+| G2  | Offline 仍可消費同一份 `apps/web` UI shell,不需要 fork UI 程式碼                                                               | Full Offline build 與 Online build 共用 `caption-board/`、`store/`、`settings/`、`packages/contracts` 一字不差      |
+| G3  | `packages/contracts` 維持唯一事件 schema 來源；Python 端的 events 仍是手寫但加入 schema 版本檢查                               | Contracts repo / 套件版本號嵌入每個 NormalizedEvent；mismatch 時 UI 顯示 health.degraded                            |
+| G4  | Online artifact 可作為小型 Electron 或 SPA + serverless 出貨,安裝包 ≤ 50 MB(不含 Electron runtime)                             | `pnpm -F web build:online` 產出 `dist/` 與 `services/online/dist/` 總和；CI 設 size-budget                          |
+| G5  | 兩個模式在 CLAUDE.md 規範下仍是 first-class——解耦只影響**交付**,不刪 offline 程式碼,也不在 lightweight build 假裝 offline 存在 | Lightweight Online build 將 `full_offline` ModeOption 在 UI 隱藏(或標 `unavailable in this build`),不是 throw error |
+| G6  | Offline P4+ 工作(TranslateGemma、Voxtral、Speaches)在解耦後可獨立 PR,不阻塞 Online release                                     | Offline 與 Online 各自有 release tag,例如 `online@v0.1.0` 與 `offline@v0.4.0`                                       |
 
 非目標(不在本計畫範圍):
+
 - 不重構 offline pipeline 內部(`services/offline/app/pipeline/*`)。
 - 不更換 Online provider(仍是 OpenAI Realtime Translation / Whisper)。
 - 不引進新的 LLM、不評估中國來源模型(CLAUDE.md 明令禁止)。
@@ -150,6 +152,7 @@ online + fake replay。一旦 P4 把 e2e 也加入 offline 流程，CI runner �
 ### Option A — 同 monorepo + Build Profile + 動態 Provider Registry
 
 維持現有 `pnpm-workspace.yaml`，在 `apps/web` 加：
+
 - `vite.config.ts` 增加 `mode === 'online-only'` flag。
 - `apps/web/src/providers/registry.ts`（新增）依 build flag 用 `import()` 動態載入 provider。
 - `apps/web/package.json` 增加 `build:online`、`build:full`。
@@ -164,13 +167,13 @@ meeting_audio/
 └── packages/contracts/               (single source of truth)
 ```
 
-| 面向 | 評估 |
-|------|------|
-| Pros | 變動最小；`packages/contracts` 自然共用；P3 的程式碼幾乎不動；e2e 可分兩條 profile 跑 |
-| Cons | Repo 還是一坨；CI 默契仍易踩坑；offline 大模型雖不打包但仍在 git history（需確認 `.gitignore` 已排除 `models/`、`*.bin`，需實測）|
-| 遷移成本 | 低：1–2 sprint |
-| 對 P3 風險 | 極低：不改 offline 程式碼 |
-| Launcher 形態 | `start-online.bat`（只啟 web + online）、`start-full.bat`（=現 `start-dev.bat`）|
+| 面向          | 評估                                                                                                                              |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| Pros          | 變動最小；`packages/contracts` 自然共用；P3 的程式碼幾乎不動；e2e 可分兩條 profile 跑                                             |
+| Cons          | Repo 還是一坨；CI 默契仍易踩坑；offline 大模型雖不打包但仍在 git history（需確認 `.gitignore` 已排除 `models/`、`*.bin`，需實測） |
+| 遷移成本      | 低：1–2 sprint                                                                                                                    |
+| 對 P3 風險    | 極低：不改 offline 程式碼                                                                                                         |
+| Launcher 形態 | `start-online.bat`（只啟 web + online）、`start-full.bat`（=現 `start-dev.bat`）                                                  |
 
 ### Option B — 拆三個 repo，contracts 走 npm
 
@@ -181,13 +184,13 @@ meeting-audio-offline/      (services/offline + Offline provider plugin)
 @meeting-audio/contracts    (npm published)
 ```
 
-| 面向 | 評估 |
-|------|------|
-| Pros | 釋出邊界最清楚；CI 完全獨立；可分授權方收費（hypothetical）|
-| Cons | 對 contracts 變更要 publish + bump 三個 repo；目前團隊規模（看起來是個人或小團隊）負擔過大；refactor cost 高；P3 程式碼搬遷時容易踩 import 路徑 |
-| 遷移成本 | 高：3–5 sprint，含 publish pipeline |
-| 對 P3 風險 | 中：所有路徑改寫，e2e 重設 |
-| Launcher 形態 | 每個 repo 自己 `npm start`；shell 用 plugin discovery |
+| 面向          | 評估                                                                                                                                            |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| Pros          | 釋出邊界最清楚；CI 完全獨立；可分授權方收費（hypothetical）                                                                                     |
+| Cons          | 對 contracts 變更要 publish + bump 三個 repo；目前團隊規模（看起來是個人或小團隊）負擔過大；refactor cost 高；P3 程式碼搬遷時容易踩 import 路徑 |
+| 遷移成本      | 高：3–5 sprint，含 publish pipeline                                                                                                             |
+| 對 P3 風險    | 中：所有路徑改寫，e2e 重設                                                                                                                      |
+| Launcher 形態 | 每個 repo 自己 `npm start`；shell 用 plugin discovery                                                                                           |
 
 ### Option C — 同 monorepo 雙 app
 
@@ -198,19 +201,20 @@ apps/
 └── web-shared/    (caption-board, store, settings, components)  [packages/]
 ```
 
-| 面向 | 評估 |
-|------|------|
-| Pros | UI 差異透過 entry 區隔，build 結果完全分離；不需 dynamic import |
-| Cons | UI 程式碼搬到 `packages/web-shared` 是大手術；React 元件的 settings store 是 module-level singleton，搬動時需要謹慎；`apps/web/src/settings/use-settings-store.ts` 的 `settingsStore` singleton 模式需要重構 |
-| 遷移成本 | 中：2–3 sprint |
-| 對 P3 風險 | 中：UI 重新組織後 P3 的 Settings/AudioSourceSelector 會被搬 |
-| Launcher 形態 | 兩個獨立的 vite dev server，連 port 都不同 |
+| 面向          | 評估                                                                                                                                                                                                         |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Pros          | UI 差異透過 entry 區隔，build 結果完全分離；不需 dynamic import                                                                                                                                              |
+| Cons          | UI 程式碼搬到 `packages/web-shared` 是大手術；React 元件的 settings store 是 module-level singleton，搬動時需要謹慎；`apps/web/src/settings/use-settings-store.ts` 的 `settingsStore` singleton 模式需要重構 |
+| 遷移成本      | 中：2–3 sprint                                                                                                                                                                                               |
+| 對 P3 風險    | 中：UI 重新組織後 P3 的 Settings/AudioSourceSelector 會被搬                                                                                                                                                  |
+| Launcher 形態 | 兩個獨立的 vite dev server，連 port 都不同                                                                                                                                                                   |
 
 ### 建議
 
 **選 Option A，並把它規劃成「將來能升級到 Option B」的中間態。**
 
 理由：
+
 1. 目前 P3 剛 done，P4 還沒開工，**最珍貴的資源是「不要打斷 P3 已驗證的事情」**。Option A 對既有檔案改動最少。
 2. `apps/web` 的 UI 狀態與 store 高度耦合於 module singleton（`settingsStore`、`captionStore`），Option C 的程式搬遷風險高、收益低。
 3. Contracts 已是 `workspace:*` 真共用，Option A 直接沿用，無需 publish pipeline。
@@ -223,6 +227,7 @@ apps/
 
 Online 真正需要的東西（從 `services/online/src/server.ts` 與
 `services/online/src/routes/session.ts:27-72` 可看出）：
+
 - Browser：mic / WebRTC、React caption shell。
 - 一個極小 token broker 端點：`POST /session` 換取 OpenAI ephemeral
   `client_secret`，外加 `GET /session/info` 與 `GET /healthz`。
@@ -236,28 +241,28 @@ Online 真正需要的東西（從 `services/online/src/server.ts` 與
 `registerSession` 抽成 serverless function（Cloudflare Workers / Vercel
 Functions / AWS Lambda）。`OPENAI_API_KEY` 放在 secret manager。
 
-| 面向 | 評估 |
-|------|------|
-| 安裝大小 | 客端：SPA bundle（gzip < 500 KB 預估，**需實測**）；伺服器端：0（serverless）|
-| Key 隔離 | 高：key 永遠在 serverless env，符合 CLAUDE.md 「Never expose API keys in browser code」|
-| 延遲 | `/session` 一次 ephemeral token 換手；之後 WebRTC 直連 OpenAI；額外 cold start 約 50–300 ms（**需實測**）|
-| 託管成本 | 極低：每月 < $5（OpenAI 用量另計）|
-| 企業 IT 安裝阻力 | 高：客戶要連外網、CDN 可能被擋；無法跑於 air-gapped 內網 |
-| Time-to-ship | 1–2 週 |
+| 面向             | 評估                                                                                                      |
+| ---------------- | --------------------------------------------------------------------------------------------------------- |
+| 安裝大小         | 客端：SPA bundle（gzip < 500 KB 預估，**需實測**）；伺服器端：0（serverless）                             |
+| Key 隔離         | 高：key 永遠在 serverless env，符合 CLAUDE.md 「Never expose API keys in browser code」                   |
+| 延遲             | `/session` 一次 ephemeral token 換手；之後 WebRTC 直連 OpenAI；額外 cold start 約 50–300 ms（**需實測**） |
+| 託管成本         | 極低：每月 < $5（OpenAI 用量另計）                                                                        |
+| 企業 IT 安裝阻力 | 高：客戶要連外網、CDN 可能被擋；無法跑於 air-gapped 內網                                                  |
+| Time-to-ship     | 1–2 週                                                                                                    |
 
 ### (ii) 單一 Node binary（Fastify 同時 serve 靜態 + `/session`）
 
 維持現狀但去除 Python 依賴。`services/online` 加 `@fastify/static` plugin，
 直接 serve `apps/web/dist/`。封成單一 `node` 程序或 pkg/nexe binary。
 
-| 面向 | 評估 |
-|------|------|
-| 安裝大小 | Node 22 runtime + node_modules（Fastify + openai SDK + zod 約 30–50 MB）+ SPA dist 數 MB。**需實測**。|
-| Key 隔離 | 高：key 在 Node process env，不入 browser |
-| 延遲 | 與 (i) 相當；少了 cold start 但多了使用者要自己跑 server |
-| 託管成本 | 0（使用者自架）；或部署到 single VPS 約 $5–10/mo |
-| 企業 IT 安裝阻力 | 中：要授權跑 Node；可在企業內網跑、可離線安裝 node_modules |
-| Time-to-ship | 1 週（最接近現狀）|
+| 面向             | 評估                                                                                                   |
+| ---------------- | ------------------------------------------------------------------------------------------------------ |
+| 安裝大小         | Node 22 runtime + node_modules（Fastify + openai SDK + zod 約 30–50 MB）+ SPA dist 數 MB。**需實測**。 |
+| Key 隔離         | 高：key 在 Node process env，不入 browser                                                              |
+| 延遲             | 與 (i) 相當；少了 cold start 但多了使用者要自己跑 server                                               |
+| 託管成本         | 0（使用者自架）；或部署到 single VPS 約 $5–10/mo                                                       |
+| 企業 IT 安裝阻力 | 中：要授權跑 Node；可在企業內網跑、可離線安裝 node_modules                                             |
+| Time-to-ship     | 1 週（最接近現狀）                                                                                     |
 
 ### (iii) Electron-only desktop（main process 持 key）
 
@@ -265,20 +270,21 @@ Functions / AWS Lambda）。`OPENAI_API_KEY` 放在 secret manager。
 keytar / OS keychain 保管，main process 透過 IPC 把 ephemeral token 傳給
 renderer。
 
-| 面向 | 評估 |
-|------|------|
-| 安裝大小 | Electron runtime ~ 90 MB + 應用程式 ~ 5 MB |
-| Key 隔離 | 中：renderer 仍只看 ephemeral；main process 須做好 contextIsolation。實作上需注意 `node_integration: false` 與 IPC 邊界 |
-| 延遲 | 與 (i)/(ii) 相當 |
-| 託管成本 | 0；發行成本：code-signing 證書（Win + Mac 約 $200/yr）|
-| 企業 IT 安裝阻力 | 中：未簽名安裝包會被擋；簽名後最容易讓非工程使用者安裝 |
-| Time-to-ship | 3–4 週（含 packaging、auto-update、簽名）|
+| 面向             | 評估                                                                                                                    |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| 安裝大小         | Electron runtime ~ 90 MB + 應用程式 ~ 5 MB                                                                              |
+| Key 隔離         | 中：renderer 仍只看 ephemeral；main process 須做好 contextIsolation。實作上需注意 `node_integration: false` 與 IPC 邊界 |
+| 延遲             | 與 (i)/(ii) 相當                                                                                                        |
+| 託管成本         | 0；發行成本：code-signing 證書（Win + Mac 約 $200/yr）                                                                  |
+| 企業 IT 安裝阻力 | 中：未簽名安裝包會被擋；簽名後最容易讓非工程使用者安裝                                                                  |
+| Time-to-ship     | 3–4 週（含 packaging、auto-update、簽名）                                                                               |
 
 ### 建議
 
 **主推 (ii) 單一 Node binary 作為 v0.1 Online release，並把 (iii) Electron 排在 v0.2。**
 
 理由：
+
 1. (ii) 是現狀的最小變動：`services/online` 已是 Fastify，加 `@fastify/static` 即可同時 serve UI；省去 Vite dev server 在生產環境出現。
 2. CLAUDE.md 「Preferred Stable Stack」已寫 `Electron for stable packaged desktop distribution`，但同時允許 `Local web app is acceptable during MVP development`——(ii) 完美對應 MVP→packaged 的中間態。
 3. (i) Serverless 雖然輕，但會卡到部分客戶的「不能連外」需求；本案目標客戶是會議場景，內網 / air-gap 是真實情境。
@@ -298,6 +304,7 @@ TypeScript schema 留在 `packages/contracts/src/index.ts`，由
 ### 5.2 Python 端的鏡像
 
 `services/offline/app/pipeline/events.py` 是手寫鏡像。建議流程：
+
 - 在 `packages/contracts` 加 `scripts/emit-json-schema.ts`（**規劃中，不本次實作**），產出 `packages/contracts/dist/schema.json`。
 - offline 服務於啟動時讀 `schema.json`，比對自家 events 的 shape，不符就在 `/healthz` 顯示 `degraded` 並列出欄位差異。
 - 不引入 `datamodel-code-generator` 自動產 Python 程式碼（避免 build 時相依 Node）；只用 schema 做 runtime 驗證。
@@ -305,6 +312,7 @@ TypeScript schema 留在 `packages/contracts/src/index.ts`，由
 ### 5.3 跨 artifact 的版本策略
 
 採 **lockstep minor + tolerant minor**：
+
 - contracts package version 採 SemVer，例如 `0.2.x`。
 - Online build 與 Offline build 各自把 contracts version 寫入自家 NormalizedEvent metadata 欄位（**需在 contracts 加一個 `schemaVersion` 欄位，規劃 phase 2 完成**）。
 - UI 看到 source mismatch 時不 crash，只在 `HealthEvent` 標 `degraded` 並 log。
@@ -440,13 +448,13 @@ online 開發者 `git clone` 仍會下載 158 MB+ 模型。**必須在 Phase 1 �
 
 ### 使用者必須在 Phase 1 開始前決策的事
 
-| ID | 決策 | 預設建議 |
-|----|------|----------|
-| D-1 | 採用 Option A 還是 B 還是 C | A |
-| D-2 | Lightweight Online 部署選 (i)(ii)(iii) | (ii) |
-| D-3 | R3：unavailable mode 隱藏 vs disabled 顯示 | disabled 顯示 |
-| D-4 | `start-dev.bat` 是否更名為 `start-full.bat` | 是 |
-| D-5 | Phase 0–4 期間 contracts 是否凍結 | 是 |
+| ID  | 決策                                                             | 預設建議             |
+| --- | ---------------------------------------------------------------- | -------------------- |
+| D-1 | 採用 Option A 還是 B 還是 C                                      | A                    |
+| D-2 | Lightweight Online 部署選 (i)(ii)(iii)                           | (ii)                 |
+| D-3 | R3：unavailable mode 隱藏 vs disabled 顯示                       | disabled 顯示        |
+| D-4 | `start-dev.bat` 是否更名為 `start-full.bat`                      | 是                   |
+| D-5 | Phase 0–4 期間 contracts 是否凍結                                | 是                   |
 | D-6 | Online v0.1.0 是否需含 Hybrid Privacy（hybrid 需要 offline STT） | 不含；只 Online Full |
 
 ---

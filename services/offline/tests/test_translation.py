@@ -12,12 +12,10 @@ import pytest
 
 from app.pipeline.postprocess import (
     apply_source_glossary,
-    load_glossary,
     process,
     restore_placeholders,
 )
 from app.pipeline.translation import translate
-
 
 # ── postprocess ───────────────────────────────────────────────────────────────
 

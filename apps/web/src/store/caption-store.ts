@@ -282,10 +282,9 @@ function applyHydratedSnapshot(store: CaptionStore, snap: HydratedSnapshot): voi
 export function createCaptionStore(options: CreateCaptionStoreOptions = {}): CaptionStore {
   const maxSegments = options.maxSegments ?? DEFAULT_MAX_SEGMENTS;
   const persistenceKey =
-    options.persistKey === null ? null : options.persistKey ?? DEFAULT_PERSIST_KEY;
+    options.persistKey === null ? null : (options.persistKey ?? DEFAULT_PERSIST_KEY);
   const persistenceEnabled =
-    options.persistenceEnabled ??
-    (options.persistKey !== undefined && options.persistKey !== null);
+    options.persistenceEnabled ?? (options.persistKey !== undefined && options.persistKey !== null);
   const persistence = createCaptionPersistenceController({
     enabled: persistenceEnabled,
     key: persistenceKey,
@@ -419,10 +418,7 @@ export function createCaptionStore(options: CreateCaptionStoreOptions = {}): Cap
       set((state) => {
         // If this translation matches the live partial, keep it OFF the main
         // translations map so HistoryStream does not re-render at draft rate.
-        if (
-          state.livePartial &&
-          state.livePartial.segmentId === event.sourceSegmentId
-        ) {
+        if (state.livePartial && state.livePartial.segmentId === event.sourceSegmentId) {
           return { liveTranslation: eventToTranslation(event) };
         }
         return {
@@ -458,7 +454,9 @@ export function createCaptionStore(options: CreateCaptionStoreOptions = {}): Cap
         if (state.sessionPhase === phase) return {};
         return {
           sessionPhase: phase,
-          ...(phase === 'ended' && state.sessionEndedAt === null ? { sessionEndedAt: Date.now() } : {}),
+          ...(phase === 'ended' && state.sessionEndedAt === null
+            ? { sessionEndedAt: Date.now() }
+            : {}),
         };
       }),
 
@@ -524,11 +522,7 @@ export function createCaptionStore(options: CreateCaptionStoreOptions = {}): Cap
   // Emergency synchronous flush before the page goes away. The controller is
   // a no-op while retention is disabled, so listeners can remain stable across
   // opt-in transitions.
-  if (
-    persistenceKey &&
-    typeof window !== 'undefined' &&
-    !lifecycleBoundKeys.has(persistenceKey)
-  ) {
+  if (persistenceKey && typeof window !== 'undefined' && !lifecycleBoundKeys.has(persistenceKey)) {
     lifecycleBoundKeys.add(persistenceKey);
     const flushOnExit = () => {
       try {

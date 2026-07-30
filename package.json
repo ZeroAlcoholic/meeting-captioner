@@ -18,7 +18,7 @@
     "test:e2e": "playwright test --config tests/e2e/playwright.config.ts",
     "lint": "eslint .",
     "format": "prettier --write \"**/*.{ts,tsx,js,json,md,css}\"",
-    "format:check": "prettier --check \"**/*.{ts,tsx,js,json,md,css}\"",
+    "format:check": "prettier --check --end-of-line auto \"**/*.{ts,tsx,js,json,md,css}\"",
     "typecheck": "pnpm -r typecheck"
   },
   "devDependencies": {

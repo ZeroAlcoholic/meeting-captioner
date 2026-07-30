@@ -30,7 +30,10 @@ const EN_WORDS = ['revenue', 'grew', 'the', 'project', 'is', 'done', 'meeting', 
 const ZH_ENDERS = ['。', '！', '？', '…'];
 const EN_ENDERS = ['.', '!', '?', '…'];
 
-function randomSegments(rand: () => number): { segments: CaptionSegment[]; translations: Record<string, CaptionTranslation> } {
+function randomSegments(rand: () => number): {
+  segments: CaptionSegment[];
+  translations: Record<string, CaptionTranslation>;
+} {
   const n = Math.floor(rand() * 30);
   const segments: CaptionSegment[] = [];
   const translations: Record<string, CaptionTranslation> = {};
@@ -60,7 +63,8 @@ function randomSegments(rand: () => number): { segments: CaptionSegment[]; trans
       endMs: startMs + Math.floor(rand() * 1200),
     };
     // ~25% of segments carry a low-confidence score.
-    if (rand() < 0.25) seg.confidence = rand() * 0.6; // < CONF_LOW_THRESHOLD
+    if (rand() < 0.25)
+      seg.confidence = rand() * 0.6; // < CONF_LOW_THRESHOLD
     else if (rand() < 0.5) seg.confidence = 0.6 + rand() * 0.4;
     segments.push(seg);
     if (zh) {
@@ -85,8 +89,13 @@ describe('tailSegments — properties', () => {
     for (let iter = 0; iter < 500; iter++) {
       const len = Math.floor(rand() * 60);
       const segments: CaptionSegment[] = Array.from({ length: len }, (_, i) => ({
-        segmentId: `s${i}`, provider: 'p', source: 'microphone', mode: 'online_full',
-        status: 'final', text: `t${i}`, startMs: i,
+        segmentId: `s${i}`,
+        provider: 'p',
+        source: 'microphone',
+        mode: 'online_full',
+        status: 'final',
+        text: `t${i}`,
+        startMs: i,
       }));
       // Limit spans negative, zero, in-range and over-range.
       const limit = Math.floor(rand() * 80) - 5;
@@ -111,8 +120,13 @@ describe('tailSegments — properties', () => {
     for (let iter = 0; iter < 50; iter++) {
       const len = HISTORY_RENDER_SEGMENTS + Math.floor(rand() * 2000);
       const segments: CaptionSegment[] = Array.from({ length: len }, (_, i) => ({
-        segmentId: `s${i}`, provider: 'p', source: 'microphone', mode: 'online_full',
-        status: 'final', text: 't', startMs: i,
+        segmentId: `s${i}`,
+        provider: 'p',
+        source: 'microphone',
+        mode: 'online_full',
+        status: 'final',
+        text: 't',
+        startMs: i,
       }));
       const out = tailSegments(segments, HISTORY_RENDER_SEGMENTS);
       expect(out.length).toBe(HISTORY_RENDER_SEGMENTS);
@@ -134,7 +148,9 @@ describe('groupParagraphsForSide — properties', () => {
         const { segments, translations } = randomSegments(rand);
         const paras = groupParagraphsForSide({ segments, translations, side, accessor });
 
-        const nonEmpty = segments.filter((s) => accessor(s, translations[s.segmentId]).trim().length > 0);
+        const nonEmpty = segments.filter(
+          (s) => accessor(s, translations[s.segmentId]).trim().length > 0,
+        );
 
         // 1. Never more paragraphs than contributing segments.
         expect(paras.length).toBeLessThanOrEqual(nonEmpty.length);

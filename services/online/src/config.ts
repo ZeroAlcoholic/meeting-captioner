@@ -59,7 +59,11 @@ const ConfigSchema = z.object({
   SESSION_RATE_LIMIT_PER_MIN: z.coerce.number().int().positive().default(30),
   // OpenAI Realtime translation sessions cap around 30 min. We tell the client
   // to renew earlier so users never hit the silent freeze.
-  SESSION_RENEW_MS: z.coerce.number().int().positive().default(25 * 60 * 1000),
+  SESSION_RENEW_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(25 * 60 * 1000),
   /**
    * Optional path (absolute or relative to cwd) to a built `apps/web/dist`
    * directory. When set, the server serves the web app as static files at

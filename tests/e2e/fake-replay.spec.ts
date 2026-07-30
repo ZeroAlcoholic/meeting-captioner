@@ -18,11 +18,9 @@ test.describe('fake replay caption path', () => {
 
     await expect(current).toHaveAttribute('data-status', 'final', { timeout: 12_000 });
 
-    await expect(page.getByTestId('caption-target')).toHaveAttribute(
-      'data-status',
-      'final',
-      { timeout: 12_000 },
-    );
+    await expect(page.getByTestId('caption-target')).toHaveAttribute('data-status', 'final', {
+      timeout: 12_000,
+    });
 
     await expect(page.locator('body')).toContainText('歡迎參加會議。', { timeout: 15_000 });
     await expect(page.locator('body')).toContainText('First, the quarterly review.', {
@@ -80,9 +78,13 @@ test.describe('fake replay caption path', () => {
     });
     // online_full mode shows audio / transport / translation (no 'stt' row —
     // that's a hybrid/offline component). Assert the translation row heals too.
-    await expect(page.getByTestId('health-translation')).toHaveAttribute('data-state', 'connected', {
-      timeout: 8_000,
-    });
+    await expect(page.getByTestId('health-translation')).toHaveAttribute(
+      'data-state',
+      'connected',
+      {
+        timeout: 8_000,
+      },
+    );
     // Once levels flow, the meter mounts.
     await expect(page.getByTestId('audio-level-meter')).toBeVisible({ timeout: 5_000 });
   });

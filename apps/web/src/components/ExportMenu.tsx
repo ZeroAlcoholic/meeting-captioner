@@ -5,10 +5,10 @@ import { triggerDownload } from '../export/download.js';
 import styles from './ExportMenu.module.css';
 
 const FORMATS: Array<{ id: ExportFormat; label: string; hint: string }> = [
-  { id: 'md',   label: 'Markdown',   hint: '.md — meeting notes' },
-  { id: 'txt',  label: 'Plain text', hint: '.txt — clean transcript' },
-  { id: 'srt',  label: 'SRT',        hint: '.srt — video subtitle' },
-  { id: 'json', label: 'JSON',       hint: '.json — full backup' },
+  { id: 'md', label: 'Markdown', hint: '.md — meeting notes' },
+  { id: 'txt', label: 'Plain text', hint: '.txt — clean transcript' },
+  { id: 'srt', label: 'SRT', hint: '.srt — video subtitle' },
+  { id: 'json', label: 'JSON', hint: '.json — full backup' },
 ];
 
 export interface ExportMenuProps {
@@ -52,10 +52,7 @@ export function ExportMenu({ disabled = false }: ExportMenuProps) {
   }, [open]);
 
   const handleExport = (format: ExportFormat): void => {
-    const artifact = buildExport(
-      { segments, translations, sessionStartMs },
-      format,
-    );
+    const artifact = buildExport({ segments, translations, sessionStartMs }, format);
     triggerDownload(artifact.body, artifact.filename, artifact.mime);
     setOpen(false);
   };

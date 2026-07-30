@@ -82,7 +82,12 @@ export class MicrophoneAudioProvider implements AudioSource {
   constructor(private readonly micDistance: MicDistance = 'meeting') {}
 
   async acquire(onHealth: (e: HealthEvent) => void): Promise<MediaStream> {
-    onHealth({ kind: 'health', component: 'audio', state: 'requesting_permission', timestamp: now() });
+    onHealth({
+      kind: 'health',
+      component: 'audio',
+      state: 'requesting_permission',
+      timestamp: now(),
+    });
     try {
       this.stream = await navigator.mediaDevices.getUserMedia({
         audio: audioConstraints(this.micDistance),
