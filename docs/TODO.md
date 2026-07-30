@@ -7,7 +7,7 @@
 
 ## Now
 
-### Phase 1 closure — one external verification remains (2026-07-30)
+### Phase 1 closure — complete (2026-07-30)
 
 - [x] Gemini setup waits for `setupComplete`, uses only the exact dedicated
       translate model, and has no silent native-audio fallback (`13f6311`).
@@ -23,11 +23,10 @@
       (`171c05b`).
 - [x] The live probe is statically checked and generated fixtures are read back
       through a fail-closed verifier (`3089e3d`, `3e6a30d`).
-- [ ] With explicit credential authorization, run
-      `pnpm -F @meeting-audio/online probe:upstream-contracts`, inspect the two
-      redacted fixtures, make the Gemini provider test compare `clientFrame`
-      and the E2E mock consume `serverFrame`, run `verify:upstream-contracts`,
-      rerun the matrix, and only then mark Phase 1 complete.
+- [x] With explicit credential authorization, the minimal OpenAI/Gemini live
+      probe passed; two redacted fixtures were inspected and verified, the
+      provider unit/E2E mock consume their golden frames, and the full release
+      matrix was rerun (`b8029e6`).
 
 **Gemini latency root-cause closure (2026-07-02) complete.**
 

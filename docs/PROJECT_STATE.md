@@ -8,29 +8,29 @@
 
 ## Current Phase
 
-### Phase 1 closure — implementation complete; live upstream evidence pending (2026-07-30)
+### Phase 1 closure — complete (2026-07-30)
 
 The Phase 1 correctness, privacy, lifecycle, caption-path, and loopback changes
-are implemented and locally verified. The phase is **not yet accepted as
-complete** because the real OpenAI/Gemini upstream contract probe has not been
-authorized or run, so the redacted golden fixtures required by Blueprint 0.2
-and 1.1 do not yet exist.
+are implemented and verified. With explicit authorization, the minimal live
+probe created one OpenAI translation client secret and one one-use Gemini token,
+completed the Gemini `setupComplete` handshake, and sent no audio or transcript
+content. Both redacted fixtures are checked in and consumed by tests.
 
-| Item                         | Current evidence                                                                                                                                                                                                               | Status                   |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------ |
-| 0.2 / 1.1 upstream contracts | `3089e3d`/`3e6a30d`: probe, four redaction/schema/read-back tests, scripts typecheck, and fail-closed verifier are ready; live fixtures plus provider-test/E2E-mock golden consumption await explicit credential authorization | ⏳ pending live evidence |
-| 1.1 / 1.2 Gemini correctness | `13f6311`: exact `models/gemini-3.5-live-translate-preview`, top-level transcription fields, `setupComplete` required before connect, close/timeout fail, no native-audio fallback                                             | ✅ locally verified      |
-| 1.3 transcript privacy       | `c587fc2`: retention is explicit opt-in and defaults off; disabling it serially clears IndexedDB without a late-write race                                                                                                     | ✅ locally verified      |
-| 1.4 session switching        | `7dd2362`: mode/scenario/backend/language are locked while running; Stop releases capture and transports before switching                                                                                                      | ✅ locally verified      |
-| 1.5 caption-path isolation   | `b67d810`: one bounded FIFO MT dispatcher (capacity 10), drop-oldest under pressure, visible `translation:degraded`, cancellation prevents late emits                                                                          | ✅ locally verified      |
-| 1.6 local-only launch        | `2adcd78`: WHL and FastAPI production launchers bind `127.0.0.1`; production reload removed; both launchers share `run_whl.py`                                                                                                 | ✅ locally verified      |
-| Release-gate hygiene         | `171c05b`: Prettier, ESLint, Ruff, duplicate-test collection, and cross-platform EOL gate repaired                                                                                                                             | ✅ verified              |
-| Online test lifecycle        | `68125d4`: test Fastify instances no longer accumulate `pino-pretty` process listeners; production/dev logging is unchanged                                                                                                    | ✅ verified              |
+| Item                         | Current evidence                                                                                                                                                                         | Status              |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- |
+| 0.2 / 1.1 upstream contracts | `b8029e6`: live OpenAI/Gemini probe passed; two redacted fixtures pass fail-closed read-back and source-key scans; provider unit compares `clientFrame`, E2E mock consumes `serverFrame` | ✅ live verified    |
+| 1.1 / 1.2 Gemini correctness | `13f6311`: exact `models/gemini-3.5-live-translate-preview`, top-level transcription fields, `setupComplete` required before connect, close/timeout fail, no native-audio fallback       | ✅ locally verified |
+| 1.3 transcript privacy       | `c587fc2`: retention is explicit opt-in and defaults off; disabling it serially clears IndexedDB without a late-write race                                                               | ✅ locally verified |
+| 1.4 session switching        | `7dd2362`: mode/scenario/backend/language are locked while running; Stop releases capture and transports before switching                                                                | ✅ locally verified |
+| 1.5 caption-path isolation   | `b67d810`: one bounded FIFO MT dispatcher (capacity 10), drop-oldest under pressure, visible `translation:degraded`, cancellation prevents late emits                                    | ✅ locally verified |
+| 1.6 local-only launch        | `2adcd78`: WHL and FastAPI production launchers bind `127.0.0.1`; production reload removed; both launchers share `run_whl.py`                                                           | ✅ locally verified |
+| Release-gate hygiene         | `171c05b`: Prettier, ESLint, Ruff, duplicate-test collection, and cross-platform EOL gate repaired                                                                                       | ✅ verified         |
+| Online test lifecycle        | `68125d4`: test Fastify instances no longer accumulate `pino-pretty` process listeners; production/dev logging is unchanged                                                              | ✅ verified         |
 
 Current automated evidence: contracts **19**, online **65**, web **293**,
 offline **81**, Playwright **30**; `pnpm lint`, `pnpm format:check`,
-`pnpm typecheck`, and `pnpm build` exit 0. These checks prove local behavior;
-they do not substitute for the pending live upstream contract probe.
+`pnpm typecheck`, `pnpm build`, Ruff, Bash syntax, fixture verification, and
+build/fixture source-key scans exit 0.
 
 **Gemini latency — root-cause closure + perceived-latency fix** ✅ **COMPLETE** (2026-07-02)
 

@@ -176,9 +176,12 @@ that no source API key, ephemeral token, session id, or unstable timestamp
 remains. The verifier reads both stored artifacts and fails if either file is
 missing or violates the exact model/schema contract. The provider unit test
 must also compare its emitted setup with the recorded `clientFrame`, and the
-E2E mock must source its acknowledgement from the recorded `serverFrame`. As
-of this entry, the probe is **not run** and those golden imports cannot yet be
-added, so Phase 1 is not accepted.
+E2E mock must source its acknowledgement from the recorded `serverFrame`.
+
+Completed 2026-07-30 with explicit authorization: both live calls passed, no
+audio/transcript was sent, `b8029e6` records the redacted fixtures and golden
+consumers, the verifier and source-key scans passed, and the complete matrix
+above was rerun successfully.
 
 ---
 

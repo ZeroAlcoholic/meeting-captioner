@@ -100,6 +100,11 @@ imports and compares the recorded `clientFrame`, and `tests/e2e/online-mock.ts`
 imports the recorded `serverFrame`; a standalone validator is not a substitute
 for those consumers.
 
+Last accepted recording: 2026-07-30 (`b8029e6`). The minimal OpenAI and Gemini
+calls passed with explicit authorization; verifier, source-key scans, provider
+golden comparison, E2E golden acknowledgement, and the full release matrix all
+passed. No audio or transcript content was sent.
+
 ---
 
 ## Project KEEPALIVE — manual verification (needs live keys / a real meeting)
