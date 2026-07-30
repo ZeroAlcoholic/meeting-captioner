@@ -96,6 +96,17 @@ describe('online service', () => {
     expect(configSrc).not.toMatch(/require\(\s*['"]dotenv['"]\s*\)/);
   });
 
+  it('does not accumulate process exit listeners across test app lifecycles', async () => {
+    const listenersBefore = process.listenerCount('exit');
+
+    for (let index = 0; index < 2; index += 1) {
+      const app = await buildApp();
+      await app.close();
+    }
+
+    expect(process.listenerCount('exit')).toBe(listenersBefore);
+  });
+
   describe('static SPA fallback (slim release)', () => {
     let tmpDir: string;
 
