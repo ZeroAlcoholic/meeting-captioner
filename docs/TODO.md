@@ -25,8 +25,9 @@
       through a fail-closed verifier (`3089e3d`, `3e6a30d`).
 - [ ] With explicit credential authorization, run
       `pnpm -F @meeting-audio/online probe:upstream-contracts`, inspect the two
-      redacted fixtures, run `verify:upstream-contracts`, rerun the matrix, and
-      only then mark Phase 1 complete.
+      redacted fixtures, make the Gemini provider test compare `clientFrame`
+      and the E2E mock consume `serverFrame`, run `verify:upstream-contracts`,
+      rerun the matrix, and only then mark Phase 1 complete.
 
 **Gemini latency root-cause closure (2026-07-02) complete.**
 

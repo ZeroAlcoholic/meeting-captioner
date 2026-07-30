@@ -69,19 +69,20 @@
 
 #### 階段 1 收尾狀態（2026-07-30）
 
-| 項目                                     | 證據                                                                                                                                    | 狀態               |
-| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
-| 0.2 / 1.1 real upstream golden contracts | `3089e3d`/`3e6a30d`；probe、4 個去敏/shape/read-back 測試與 fail-closed fixture verifier 已備妥；尚未取得憑證使用授權、尚未產生 fixture | ⏳ 未驗證          |
-| 1.1 / 1.2 Gemini setup/model             | `13f6311`；setupComplete/close/timeout、exact model、無 fallback 測試                                                                   | ✅ local gate 通過 |
-| 1.3 retention opt-in                     | `c587fc2`；default-off、race-safe clear、UI/E2E                                                                                         | ✅ local gate 通過 |
-| 1.4 active-session lock                  | `7dd2362`；mode/scenario/backend/language lock、Stop 資源計數                                                                           | ✅ local gate 通過 |
-| 1.5 MT dispatcher                        | `b67d810`；FIFO、drop-oldest、degraded、cancel/no-late-emit                                                                             | ✅ local gate 通過 |
-| 1.6 loopback launch                      | `2adcd78`；8 policy tests、Bash syntax                                                                                                  | ✅ local gate 通過 |
-| release hygiene                          | `171c05b`/`68125d4`；format/lint/Ruff/typecheck/build、完整測試矩陣與無 process-listener 測試洩漏                                       | ✅ 通過            |
+| 項目                                     | 證據                                                                                                                                                                      | 狀態               |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
+| 0.2 / 1.1 real upstream golden contracts | `3089e3d`/`3e6a30d`；probe、4 個去敏/shape/read-back 測試與 fail-closed verifier 已備妥；live fixture、provider test clientFrame 比對與 E2E mock serverFrame 消費仍待完成 | ⏳ 未驗證          |
+| 1.1 / 1.2 Gemini setup/model             | `13f6311`；setupComplete/close/timeout、exact model、無 fallback 測試                                                                                                     | ✅ local gate 通過 |
+| 1.3 retention opt-in                     | `c587fc2`；default-off、race-safe clear、UI/E2E                                                                                                                           | ✅ local gate 通過 |
+| 1.4 active-session lock                  | `7dd2362`；mode/scenario/backend/language lock、Stop 資源計數                                                                                                             | ✅ local gate 通過 |
+| 1.5 MT dispatcher                        | `b67d810`；FIFO、drop-oldest、degraded、cancel/no-late-emit                                                                                                               | ✅ local gate 通過 |
+| 1.6 loopback launch                      | `2adcd78`；8 policy tests、Bash syntax                                                                                                                                    | ✅ local gate 通過 |
+| release hygiene                          | `171c05b`/`68125d4`；format/lint/Ruff/typecheck/build、完整測試矩陣與無 process-listener 測試洩漏                                                                         | ✅ 通過            |
 
 因此目前是「程式實作完成、外部契約證據未完成」，**不得宣告階段 1
 完成**。只有真實 probe 成功、兩份去敏 fixture 通過 read-back verifier 與
-人工去敏檢查，並重跑完整 gate 後，才能把 0.2/1.1 與整個階段改為完成。
+人工去敏檢查、provider unit/E2E mock 直接消費 golden frames，並重跑完整
+gate 後，才能把 0.2/1.1 與整個階段改為完成。
 
 ### 階段 2：即時性強化（2–3 天）
 

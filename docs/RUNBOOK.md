@@ -95,7 +95,10 @@ unauthorized probe is an explicit unverified release operation, not a passing
 Phase 1 result. The second command reads both fixtures back through the exact
 contract validators and exits non-zero if either file is missing, malformed, or
 records a non-dedicated model; it is required in addition to manual secret
-inspection.
+inspection. Before accepting Phase 1, also confirm the Gemini provider unit test
+imports and compares the recorded `clientFrame`, and `tests/e2e/online-mock.ts`
+imports the recorded `serverFrame`; a standalone validator is not a substitute
+for those consumers.
 
 ---
 
