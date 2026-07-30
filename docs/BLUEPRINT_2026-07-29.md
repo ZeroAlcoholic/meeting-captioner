@@ -69,15 +69,16 @@
 
 #### 階段 1 收尾狀態（2026-07-30）
 
-| 項目                                     | 證據                                                                                                                                          | 狀態               |
-| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
-| 0.2 / 1.1 real upstream golden contracts | `b8029e6`；OpenAI/Gemini 最小 live probe 通過，兩份去敏 fixture 通過 verifier/原始 key scan，provider unit 與 E2E mock 直接消費 golden frames | ✅ live gate 通過  |
-| 1.1 / 1.2 Gemini setup/model             | `13f6311`；setupComplete/close/timeout、exact model、無 fallback 測試                                                                         | ✅ local gate 通過 |
-| 1.3 retention opt-in                     | `c587fc2`；default-off、race-safe clear、UI/E2E                                                                                               | ✅ local gate 通過 |
-| 1.4 active-session lock                  | `7dd2362`；mode/scenario/backend/language lock、Stop 資源計數                                                                                 | ✅ local gate 通過 |
-| 1.5 MT dispatcher                        | `b67d810`；FIFO、drop-oldest、degraded、cancel/no-late-emit                                                                                   | ✅ local gate 通過 |
-| 1.6 loopback launch                      | `2adcd78`；8 policy tests、Bash syntax                                                                                                        | ✅ local gate 通過 |
-| release hygiene                          | `171c05b`/`68125d4`；format/lint/Ruff/typecheck/build、完整測試矩陣與無 process-listener 測試洩漏                                             | ✅ 通過            |
+| 項目                                     | 證據                                                                                                                                                                                                               | 狀態               |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------ |
+| 0.2 / 1.1 real upstream golden contracts | `b8029e6`；OpenAI/Gemini 最小 live probe 通過，兩份去敏 fixture 通過 verifier/原始 key scan，provider unit 與 E2E mock 直接消費 golden frames                                                                      | ✅ live gate 通過  |
+| 1.1 / 1.2 Gemini setup/model             | `13f6311`；setupComplete/close/timeout、exact model、無 fallback 測試                                                                                                                                              | ✅ local gate 通過 |
+| 1.3 retention opt-in                     | `c587fc2`；default-off、race-safe clear、UI/E2E                                                                                                                                                                    | ✅ local gate 通過 |
+| 1.4 active-session lock                  | `7dd2362`；mode/scenario/backend/language lock、Stop 資源計數                                                                                                                                                      | ✅ local gate 通過 |
+| 1.5 MT dispatcher                        | `b67d810`；FIFO、drop-oldest、degraded、cancel/no-late-emit                                                                                                                                                        | ✅ local gate 通過 |
+| 1.6 loopback launch                      | `2adcd78`；8 policy tests、Bash syntax                                                                                                                                                                             | ✅ local gate 通過 |
+| release hygiene                          | `171c05b`/`68125d4`；format/lint/Ruff/typecheck/build、完整測試矩陣與無 process-listener 測試洩漏                                                                                                                  | ✅ 通過            |
+| 1.1 收尾：setup 中止語意                 | 外部審查（Codex, 2026-07-30）在 1.1 新路徑上找到殘留缺陷：teardown 關 socket 後 pending setup promise 不 settle，15s 幽靈 timer 事後噴假 api_error／reconnecting；已加 teardown sentinel＋2 個先證偽再修的回歸測試 | ✅ 修復並回歸      |
 
 階段 1 已完成。2026-07-30 經明確授權執行小量 live probe：兩個上游皆
 接受精確契約，未傳送音訊或逐字稿；兩份 fixture 通過 read-back verifier、

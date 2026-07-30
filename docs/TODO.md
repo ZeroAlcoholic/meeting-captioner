@@ -27,6 +27,13 @@
       probe passed; two redacted fixtures were inspected and verified, the
       provider unit/E2E mock consume their golden frames, and the full release
       matrix was rerun (`b8029e6`).
+- [x] External review (Codex) caught one residual defect in the new Gemini setup
+      path: teardown before `setupComplete` left the handshake promise pending
+      behind the stale-socket guard, so its 15 s timer emitted a phantom
+      setup-timeout `api_error` (and, on the reconnect ladder, a `reconnecting`
+      state) onto whatever session was running by then. Fixed with a teardown
+      sentinel that settles the handshake; both regression tests were confirmed
+      to fail before the fix.
 
 **Gemini latency root-cause closure (2026-07-02) complete.**
 

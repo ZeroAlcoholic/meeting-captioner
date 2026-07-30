@@ -505,6 +505,68 @@ describe('GeminiLiveProvider — reconnect + wedge detection (#16)', () => {
     );
   });
 
+  it('stop() during the setup handshake settles it silently — no phantom timeout later', async () => {
+    vi.useFakeTimers();
+    wsEmitSetup = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(tokenResponse())),
+    );
+
+    const { provider, health } = makeHarness();
+    const start = provider.start();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+
+    // User presses Stop while the handshake is still open.
+    provider.stop();
+    await start;
+
+    // Well past the 15 s setup deadline: the abandoned handshake must be dead,
+    // not sitting on a timer that fires an api_error onto the next session.
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(provider.status).toBe('stopped');
+    expect(FakeAudioWorkletNode.instances).toHaveLength(0);
+    expect(health.filter((e) => e.state === 'api_error')).toHaveLength(0);
+    expect(health.filter((e) => e.state === 'failed')).toHaveLength(0);
+    expect(health).toContainEqual(
+      expect.objectContaining({ component: 'transport', state: 'stopped' }),
+    );
+  });
+
+  it('stop() during a RECONNECT handshake does not re-arm the ladder or emit reconnecting', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(tokenResponse())),
+    );
+
+    const { provider, health } = makeHarness();
+    await provider.start();
+    expect(FakeWebSocket.instances).toHaveLength(1);
+
+    // Drop the live socket so the reconnect ladder arms, then let it dial out
+    // with setupComplete withheld so the new handshake stays open.
+    wsEmitSetup = false;
+    FakeWebSocket.instances[0]!.close();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+
+    const healthBefore = health.length;
+    provider.stop();
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    // No third socket, and nothing after the stop pair claims the transport is
+    // reconnecting or broken.
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    const after = health.slice(healthBefore);
+    expect(after.filter((e) => e.state === 'reconnecting')).toHaveLength(0);
+    expect(after.filter((e) => e.state === 'api_error')).toHaveLength(0);
+    expect(after.filter((e) => e.state === 'failed')).toHaveLength(0);
+  });
+
   it('rejects a non-translate Gemini model before opening a socket or audio worklet', async () => {
     vi.stubGlobal(
       'fetch',

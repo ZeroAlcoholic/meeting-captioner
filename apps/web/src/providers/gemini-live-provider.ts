@@ -36,6 +36,17 @@ const GEMINI_WS_BASE =
 const PROVIDER = 'gemini-live';
 const GEMINI_TRANSLATE_MODEL = 'models/gemini-3.5-live-translate-preview';
 
+// Sentinel for "the setup handshake was torn down on purpose" (Stop / restart
+// before setupComplete). It travels the same rejection path as a real setup
+// failure but must NOT be reported as one: cleanup() has already run and the
+// user asked for this. See connect()/start().
+class SetupAbortedError extends Error {
+  constructor() {
+    super('Gemini Live setup aborted by teardown');
+    this.name = 'SetupAbortedError';
+  }
+}
+
 // ── Receive-side wedge detection (parity with OpenAIRealtimeProvider) ─────────
 // A Gemini WS can stay OPEN while the server silently stops emitting
 // serverContent — captions freeze with a "connected" health state and no error.
@@ -195,6 +206,11 @@ export class GeminiLiveProvider implements CaptionProvider {
 
   private reconnectAttempts = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  // Settles the in-flight setup handshake, if any. cleanup() must call this:
+  // closing the socket alone leaves connect()'s promise pending behind the
+  // stale-socket guard, and its 15 s timer then fires a phantom setup-timeout
+  // that lands on whatever session is running by then.
+  private settleSetupOnTeardown: (() => void) | null = null;
 
   // Receive-side wedge detector state. `lastServerContentAt === 0` means the
   // detector is DISABLED (not connected yet / between reconnects); it arms on
@@ -284,6 +300,10 @@ export class GeminiLiveProvider implements CaptionProvider {
       await this.startAudioCapture();
       this.startLevelPolling();
     } catch (err) {
+      // Teardown-initiated abort is not a failure: stop() already set the status
+      // and ran cleanup(). Reporting it would paint a false api_error — possibly
+      // onto a session the user has already restarted.
+      if (err instanceof SetupAbortedError) return;
       const message = err instanceof Error ? err.message : 'Unknown error starting Gemini Live';
       this.emitHealth('transport', 'api_error', message);
       this._status = 'stopped';
@@ -326,14 +346,19 @@ export class GeminiLiveProvider implements CaptionProvider {
         settled = true;
         setupReady = true;
         clearTimeout(timeout);
+        this.settleSetupOnTeardown = null;
         resolve();
       };
       const fail = (error: Error) => {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
+        this.settleSetupOnTeardown = null;
         reject(error);
       };
+      // Intentional teardown (Stop / provider switch) while the handshake is
+      // still open: settle now with the sentinel so the 15 s timer dies with it.
+      this.settleSetupOnTeardown = () => fail(new SetupAbortedError());
       const handleText = (text: string) => {
         let message: GeminiServerMessage;
         try {
@@ -644,7 +669,12 @@ export class GeminiLiveProvider implements CaptionProvider {
         .then(({ token, model }) => this.connect(token, model))
         // Mint/connect failed — continue the backoff. scheduleReconnect emits
         // the user-facing reconnecting/failed state, so no extra emit here.
-        .catch(() => this.scheduleReconnect());
+        .catch((err: unknown) => {
+          // Teardown aborted this handshake: re-arming the ladder here would
+          // leak a timer and emit a reconnecting state after Stop.
+          if (err instanceof SetupAbortedError) return;
+          this.scheduleReconnect();
+        });
     }, delayMs);
   }
 
@@ -775,6 +805,9 @@ export class GeminiLiveProvider implements CaptionProvider {
   }
 
   private cleanup(): void {
+    // Settle any pending handshake BEFORE dropping the socket reference — after
+    // `this.ws = null` the onclose stale-socket guard can no longer settle it.
+    this.settleSetupOnTeardown?.();
     if (this.levelInterval !== null) {
       clearInterval(this.levelInterval);
       this.levelInterval = null;
