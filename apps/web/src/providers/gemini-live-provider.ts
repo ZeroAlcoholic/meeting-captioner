@@ -85,6 +85,20 @@ const RECONNECT_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000];
 // on the 1 s rung and never trips this — without making a real outage wait.
 const FAILOVER_SIGNAL_AFTER_MS = 2_000;
 
+// ── Stop drain ────────────────────────────────────────────────────────────────
+// Gemini keeps translating after the last audio frame — roughly 2-3 s of lag is
+// structural to the model (measured 2026-07-02; there is no parameter to tune).
+// Closing the socket the instant Stop is pressed therefore throws away the tail,
+// and the tail is the last thing anyone said in the meeting.
+//
+// audioStreamEnd tells the server the microphone went off so it flushes what it
+// is holding (Live API reference: BidiGenerateContentRealtimeInput.
+// audioStreamEnd, bool — valid while automatic activity detection is enabled,
+// which we never disable). The cap bounds how long we wait for that flush; the
+// dedicated translate model streams continuously and rarely sends turnComplete,
+// so in practice this cap is what ends the drain, not the server.
+const STOP_DRAIN_CAP_MS = 3_000;
+
 function iso(): string {
   return new Date().toISOString();
 }
@@ -218,6 +232,10 @@ export class GeminiLiveProvider implements CaptionProvider {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   // Armed when an outage starts; fires once to surface the failover affordance.
   private failoverSignalTimer: ReturnType<typeof setTimeout> | null = null;
+  // Post-Stop drain: capture is already released, the socket is held open only
+  // to collect the tail the server still owes us.
+  private drainTimer: ReturnType<typeof setTimeout> | null = null;
+  private draining = false;
   // Latches once the outage has been surfaced, so later backoff rungs keep
   // reporting 'failed' instead of flipping back to 'reconnecting' — which would
   // make the failover banner blink out from under the operator's cursor.
@@ -282,6 +300,9 @@ export class GeminiLiveProvider implements CaptionProvider {
 
   async start(): Promise<void> {
     if (this._status === 'running') return;
+    // A restart cancels any drain still in flight. Left running, its timer
+    // would fire finishStop() into the NEW session and tear down a live socket.
+    if (this.draining) this.finishStop();
     this._status = 'running';
     try {
       this.emitHealth('transport', 'connecting');
@@ -330,14 +351,62 @@ export class GeminiLiveProvider implements CaptionProvider {
   stop(): void {
     if (this._status === 'stopped') return;
     this._status = 'stopped';
+
+    // The microphone goes off NOW. Whatever the socket still owes us, Stop has
+    // to mean stopped from the user's point of view.
+    this.stopCapture();
+    this.emitHealth('audio', 'stopped');
+    this.emitHealth('transport', 'stopped');
+
+    // Tell the server the audio stream ended so it flushes what it is still
+    // holding, then give that flush a bounded window to arrive.
+    if (this.sendAudioStreamEnd()) {
+      this.draining = true;
+      this.drainTimer = setTimeout(() => this.finishStop(), STOP_DRAIN_CAP_MS);
+      return;
+    }
+    this.finishStop();
+  }
+
+  /**
+   * Signal end-of-audio so the server flushes its buffer instead of discarding
+   * it when we close. Returns whether the frame actually went out — with no
+   * live socket there is nothing to drain and Stop completes immediately.
+   */
+  private sendAudioStreamEnd(): boolean {
+    // A setup handshake still in flight is not a session that can flush
+    // anything. Worse, draining would postpone cleanup() — and with it the
+    // teardown settle that resolves connect()'s promise — so Stop would hang
+    // instead of returning.
+    if (this.settleSetupOnTeardown !== null) return false;
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    try {
+      ws.send(JSON.stringify({ realtimeInput: { audioStreamEnd: true } }));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Close out a stopped session: commit whatever the drain produced, then tear
+   * down. finalizeTurn runs LAST, not before the drain — committing first would
+   * split the final sentence across two segments, with the half that arrived
+   * during the drain orphaned in a segment nothing else references.
+   */
+  private finishStop(): void {
+    if (this.drainTimer !== null) {
+      clearTimeout(this.drainTimer);
+      this.drainTimer = null;
+    }
+    this.draining = false;
     // Commit any in-flight utterance BEFORE teardown. Without this, the text
     // spoken right before Pause/Stop (a) never reaches history, (b) is missing
     // from Export, and (c) stays on the board as a stale partial with a
     // pulsing "live" cursor even though nothing is running.
     this.finalizeTurn();
     this.cleanup();
-    this.emitHealth('audio', 'stopped');
-    this.emitHealth('transport', 'stopped');
   }
 
   private async mintToken(): Promise<{ token: string; model: string }> {
@@ -523,7 +592,12 @@ export class GeminiLiveProvider implements CaptionProvider {
       this.maybeFinalizeOnSentence();
     }
     // Honour explicit turn markers defensively if the service emits them.
-    if (sc.turnComplete || sc.generationComplete) this.finalizeTurn();
+    if (sc.turnComplete || sc.generationComplete) {
+      this.finalizeTurn();
+      // If we are draining after Stop, that marker IS the flush completing —
+      // close out now instead of holding the socket for the rest of the cap.
+      if (this.draining) this.finishStop();
+    }
   }
 
   /**
@@ -853,14 +927,33 @@ export class GeminiLiveProvider implements CaptionProvider {
     }, 100);
   }
 
-  private cleanup(): void {
-    // Settle any pending handshake BEFORE dropping the socket reference — after
-    // `this.ws = null` the onclose stale-socket guard can no longer settle it.
-    this.settleSetupOnTeardown?.();
+  /**
+   * Release everything on the capture side. Split out of cleanup() because Stop
+   * has to cut the microphone immediately while the socket stays open a moment
+   * longer to collect the tail — Stop must mean the OS mic indicator goes out
+   * now, not in three seconds. Idempotent: cleanup() calls it again.
+   */
+  private stopCapture(): void {
     if (this.levelInterval !== null) {
       clearInterval(this.levelInterval);
       this.levelInterval = null;
     }
+    this.workletNode?.disconnect();
+    this.workletNode?.port.close();
+    this.sourceNode?.disconnect?.();
+    // Do NOT close the context — it is the shared engine context reused next
+    // session. Closing it would force a cold rebuild + worklet recompile.
+    this.workletNode = null;
+    this.sourceNode = null;
+    this.audioCtx = null;
+    this.mic.release();
+    this.stream = null;
+  }
+
+  private cleanup(): void {
+    // Settle any pending handshake BEFORE dropping the socket reference — after
+    // `this.ws = null` the onclose stale-socket guard can no longer settle it.
+    this.settleSetupOnTeardown?.();
     if (this.reconnectTimer !== null) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -873,18 +966,9 @@ export class GeminiLiveProvider implements CaptionProvider {
     this.audioActiveSamplesSinceContent = 0;
     this.wsBackpressureDropCount = 0;
     this.wsBackpressureConsecutiveDrops = 0;
-    this.workletNode?.disconnect();
-    this.workletNode?.port.close();
-    this.sourceNode?.disconnect?.();
-    // Do NOT close the context — it is the shared engine context reused next
-    // session. Closing it would force a cold rebuild + worklet recompile.
-    this.workletNode = null;
-    this.sourceNode = null;
-    this.audioCtx = null;
+    this.stopCapture();
     this.ws?.close();
     this.ws = null;
-    this.mic.release();
-    this.stream = null;
   }
 
   private emitHealth(component: string, state: string, message?: string): void {

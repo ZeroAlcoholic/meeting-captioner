@@ -588,6 +588,52 @@ describe('GeminiLiveProvider — reconnect + wedge detection (#16)', () => {
     );
   });
 
+  it('Stop signals end-of-audio and keeps the socket open long enough to land the tail', async () => {
+    // A4. Gemini keeps translating for seconds after the last audio frame, so
+    // closing on the Stop click drops the final sentence of the meeting.
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(tokenResponse())),
+    );
+
+    const { provider, translations } = makeHarness();
+    await provider.start();
+    const ws = FakeWebSocket.instances.at(-1)!;
+
+    provider.handleServerObject({
+      serverContent: { inputTranscription: { text: 'And that concludes the update' } },
+    });
+    provider.handleServerObject({
+      serverContent: { outputTranscription: { text: '以上就是報告' } },
+    });
+
+    provider.stop();
+
+    // The server is told the microphone went off, so it flushes rather than
+    // discarding what it is still holding.
+    const sentEnd = ws.sent.some((frame) => {
+      const parsed = JSON.parse(frame) as { realtimeInput?: { audioStreamEnd?: boolean } };
+      return parsed.realtimeInput?.audioStreamEnd === true;
+    });
+    expect(sentEnd).toBe(true);
+    // Still open to receive that flush…
+    expect(ws.readyState).toBe(1);
+    // …but the session already reads as stopped to the rest of the app.
+    expect(provider.status).toBe('stopped');
+
+    // The tail arrives after the click and must still reach history.
+    provider.handleServerObject({
+      serverContent: { outputTranscription: { text: '，謝謝大家。' } },
+    });
+    const finals = translations.filter((t) => t.status === 'final');
+    expect(finals.at(-1)!.targetText).toContain('謝謝大家');
+
+    // The drain is bounded — the socket does not linger past the cap.
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(ws.readyState).toBe(3);
+  });
+
   it('outage surfaces the failover affordance on a clock, not on the backoff ladder', async () => {
     // A1. The affordance used to be tied to the attempt counter, whose rungs
     // fall at 1, 3, 7, 15 and 31 s — so the operator waited 31 s to learn they
