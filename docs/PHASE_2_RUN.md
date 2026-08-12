@@ -1,5 +1,11 @@
-# 階段 2 長任務執行契約
+# P2-ONLINE 長跑執行契約
 
+> **任務代號**：`P2-ONLINE`
+> **全名**：階段 2 線上路徑長跑 —— failover 斷窗 ≤3 s、講話時 0 個 >50 ms 停頓、UI 零跨級宣稱
+> **範圍界線**：只有 OpenAI Realtime 與 Gemini Live Translate 兩條線上路徑。
+> Offline／Hybrid／summary／Electron 全部不在此代號之下（代號寫死範圍，避免長跑中途擴張）。
+> **規模**：14 項，三段（S1 自動 12 項／S2 人工 1 項／S3 收尾 1 項）加兩道閘門。
+>
 > 建立 2026-08-12。目標文件＝[GOAL_PHASE_2.md](GOAL_PHASE_2.md)（分支 `docs/goal-phase-2`，`bfe2bdd`）。
 > 本檔是**執行面**契約與進度總帳：把 14 項任務包成一次長跑，並定義中斷後如何續跑。
 > GOAL 定義「做什麼、憑什麼算數」；本檔定義「怎麼跑、在哪停、怎麼接回來」。
@@ -72,7 +78,10 @@ C1 延遲文案，依 S2 產出的實測數字改寫。跑完整套驗收，寫�
 
 1. 改動 → 跑該層測試（web／online／contracts／e2e 擇相關者）。
 2. 新增的回歸測試須先在未修狀態失敗，貼修前／修後兩份輸出。
-3. commit（conventional commits，一項一 commit，訊息寫清「為何」不只「做了什麼」）。
+3. commit（conventional commits，一項一 commit，訊息寫清「為何」不只「做了什麼」），
+   **body 末尾固定帶一行 `Run: P2-ONLINE / <序>-<ID>`**（例：`Run: P2-ONLINE / 2-A1`）。
+   代號進 commit 的用意是可稽核：`git log --grep='Run: P2-ONLINE'` 一次撈出整條長跑，
+   壓縮後重建進度不必依賴記憶，也不會跟同分支上的其他改動混在一起。
 4. 回填下方總帳：狀態、commit sha、證據位置。
 
 ## 總帳（唯一真相，續跑時先讀這裡）
