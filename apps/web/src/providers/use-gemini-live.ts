@@ -2,8 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ONLINE_SERVICE_URL } from '../config.js';
 import { settingsStore, useSettingsStore } from '../settings/use-settings-store.js';
 import { GeminiLiveProvider, prewarmGeminiSession } from './gemini-live-provider.js';
-import { MicrophoneAudioProvider } from './microphone-audio-provider.js';
-import { DisplayMediaAudioProvider } from './display-media-audio-provider.js';
+import { leaseCapture } from './capture-lease.js';
 import { createStoreBoundHandlers } from './coalesce-handlers.js';
 import type { AudioSource, ProviderStatus } from './types.js';
 
@@ -73,6 +72,16 @@ export function useGeminiLive(): UseGeminiLive {
     prewarmGeminiSession(TOKEN_URL);
   }, [geminiStatus, modeId, onlineProvider, status]);
 
+  // Same mint, for when this backend is the STANDBY rather than the selection —
+  // the other model is live and this one has to be ready to take over without a
+  // token round-trip. The caller owns the schedule because only it knows what is
+  // running; warm tokens expire, so a one-shot mint at session start would be
+  // stale long before the failure it exists for.
+  const prewarmStandby = useCallback(() => {
+    if (geminiStatus !== 'available') return;
+    prewarmGeminiSession(TOKEN_URL);
+  }, [geminiStatus]);
+
   const start = useCallback(async (): Promise<boolean> => {
     setError(null);
     const previous = providerRef.current;
@@ -101,15 +110,14 @@ export function useGeminiLive(): UseGeminiLive {
     // irrelevant there — the signal is pre-mixed), 'mic' uses getUserMedia
     // with the selected acoustic profile. Without this branch the 🔊 chip
     // would claim system capture while Gemini silently recorded the mic.
-    let audio: AudioSource;
-    let effectiveMicDistance: 'meeting' | 'close' | 'far' | 'off';
-    if (audioSource === 'system') {
-      audio = new DisplayMediaAudioProvider();
-      effectiveMicDistance = 'off';
-    } else {
-      audio = new MicrophoneAudioProvider(micDistance);
-      effectiveMicDistance = micDistance;
-    }
+    const effectiveMicDistance: 'meeting' | 'close' | 'far' | 'off' =
+      audioSource === 'system' ? 'off' : micDistance;
+    // Leased, not constructed: a failover handoff reuses the capture that is
+    // already running instead of re-opening the device mid-meeting.
+    const audio: AudioSource = leaseCapture({
+      kind: audioSource === 'system' ? 'system' : 'mic',
+      micDistance: effectiveMicDistance,
+    });
     const provider = new GeminiLiveProvider(
       TOKEN_URL,
       handlers,
@@ -142,5 +150,13 @@ export function useGeminiLive(): UseGeminiLive {
     setStatus('stopped');
   }, []);
 
-  return { status, error, geminiStatus, available: geminiStatus === 'available', start, stop };
+  return {
+    status,
+    error,
+    geminiStatus,
+    available: geminiStatus === 'available',
+    start,
+    stop,
+    prewarmStandby,
+  };
 }

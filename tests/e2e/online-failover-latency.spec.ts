@@ -11,21 +11,22 @@ import { installOnlineMocks, type OnlineMockController } from './online-mock.js'
  * timestamps — fault injection versus the observable recovery event — because
  * "felt slow" is not a number anyone can regress against.
  *
- * Both tests measure a DIFFERENT failure shape, and both currently exceed the
- * budget by an order of magnitude. That is the point: they were written to
- * fail against the unfixed code so that passing them later means something.
+ * The two tests measure DIFFERENT failure shapes, and both were written to fail
+ * against the unfixed code so that passing them later means something.
  *
- *   A1 — Gemini's outage is persistent, so the question is how long until the
- *        UI offers a way out. Gemini re-mints its token on every reconnect, so
- *        the broker has to stay broken for the outage to persist.
- *   A3 — OpenAI's outage is transient: upstream is healthy again a second
- *        later. Nothing external is keeping captions down at that point —
- *        only our own retry backoff is.
+ *   A1+A2 — Gemini's outage is persistent, so the meeting has to move. Nobody
+ *           clicks anything: the person running a meeting is looking at the
+ *           room, not the laptop, so an affordance that waits for a click is
+ *           not a recovery path. Gemini re-mints its token on every reconnect,
+ *           so the broker has to stay broken for the outage to persist.
+ *   A3    — OpenAI's outage is transient: upstream is healthy again a second
+ *           later. Nothing external is keeping captions down at that point —
+ *           only our own retry backoff is.
  *
- * Deliberately NOT asserted here: recovery without a human clicking the
- * failover banner. That behaviour does not exist yet (A2 builds it), and a
- * test asserting an unbuilt affordance would fail for the wrong reason. When
- * A2 lands, the auto-handoff assertion belongs in this file.
+ * A1's own guarantee — that the outage is noticed on a 2 s clock rather than at
+ * the end of the backoff ladder — is pinned precisely in the provider's unit
+ * test. Here it is one DOM transition away from A2's, so measuring it twice
+ * would be the same number under two names.
  */
 
 /** Stamp left inside the page by armDomProbe. */
@@ -117,7 +118,7 @@ test.describe('數字① — failover caption gap', () => {
   // measurement before it produced a number.
   test.setTimeout(120_000);
 
-  test('A1 — a persistent Gemini outage offers a switch within the gap budget', async ({
+  test('A1+A2 — a dead Gemini hands the meeting to OpenAI with nobody clicking', async ({
     page,
   }) => {
     await page.goto('/');
@@ -125,29 +126,50 @@ test.describe('數字① — failover caption gap', () => {
     await expect.poll(() => mock.geminiOpenSockets(), { timeout: 10_000 }).toBeGreaterThan(0);
 
     // Prove captions were flowing before the fault, otherwise a measurement of
-    // "captions stopped" is meaningless.
+    // "captions came back" is meaningless.
     await mock.geminiServerContent({
-      inputTranscription: { text: 'Baseline before the outage.', languageCode: 'en-US' },
-      outputTranscription: { text: '故障前的基準句。' },
+      inputTranscription: { text: 'Before the handoff.', languageCode: 'en-US' },
+      outputTranscription: { text: '交接前的句子。' },
       turnComplete: true,
     });
-    await expect(page.locator('body')).toContainText('故障前的基準句。', { timeout: 5_000 });
+    await expect(page.locator('body')).toContainText('交接前的句子。', { timeout: 5_000 });
+    const capturesBefore = await mock.micAcquisitions();
+    expect(capturesBefore).toBe(1);
 
     // Break the token broker FIRST: Gemini mints a fresh token on every
     // reconnect, so leaving it healthy would let the first backoff tick heal
     // the session and there would be no outage to measure.
     mock.setGeminiSessionFailing(true);
-
-    // The switchable signal is the failover banner — that is the moment the
-    // operator can actually do something, which is what the budget is about.
-    await armDomProbe(page, 'failover-banner', 'appears');
+    // No click anywhere in this test. The app is expected to move the meeting
+    // itself and say so.
+    await armDomProbe(page, 'autoswitch-notice', 'appears');
     const t0 = await pageNow(page);
     await mock.geminiClose();
 
-    await expect(page.getByTestId('failover-banner')).toBeVisible({ timeout: OUTAGE_CEILING_MS });
+    await expect(page.getByTestId('autoswitch-notice')).toBeVisible({ timeout: OUTAGE_CEILING_MS });
     const elapsed = (await readProbeMark(page)) - t0;
 
-    await reportGap('Gemini 持續故障 → 可切換訊號', elapsed);
+    // The switch must be visible: captions silently coming from a different
+    // model, at different quality and cost, is a lie of omission.
+    await expect(page.getByTestId('autoswitch-notice')).toContainText('Gemini');
+    await expect(page.getByTestId('autoswitch-notice')).toContainText('OpenAI');
+
+    // The capture was handed over, not re-opened. On a real machine a second
+    // acquisition means a device open — and for system audio, a share dialog
+    // in the middle of the meeting.
+    expect(await mock.micAcquisitions()).toBe(capturesBefore);
+
+    // CLAUDE.md: a provider switch must not clear the transcript.
+    await expect(page.locator('body')).toContainText('交接前的句子。');
+
+    // And the new backend really is captioning, not merely connected.
+    await expect.poll(() => mock.oaiReady(), { timeout: 10_000 }).toBe(true);
+    await mock.oaiOutput('交接後的句子。');
+    await expect(page.getByTestId('caption-target')).toContainText('交接後的句子。', {
+      timeout: 5_000,
+    });
+
+    await reportGap('Gemini 故障 → 自動接手完成', elapsed);
     expect(elapsed).toBeLessThanOrEqual(GAP_BUDGET_MS);
   });
 

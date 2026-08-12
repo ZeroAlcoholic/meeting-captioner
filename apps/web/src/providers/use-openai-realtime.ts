@@ -6,8 +6,7 @@ import {
   prewarmOpenAISession,
   sessionRequestBody,
 } from './openai-realtime-provider.js';
-import { MicrophoneAudioProvider } from './microphone-audio-provider.js';
-import { DisplayMediaAudioProvider } from './display-media-audio-provider.js';
+import { leaseCapture } from './capture-lease.js';
 import { createStoreBoundHandlers } from './coalesce-handlers.js';
 import type { AudioSource, ProviderStatus } from './types.js';
 
@@ -96,9 +95,7 @@ export function useOpenAIRealtime(): UseOpenAIRealtime {
   // + key-matched (see WarmTokenCache); any mismatch falls back to a live fetch,
   // so the worst case is exactly today's behaviour. Hard-gated by the selected
   // online mode/backend so Full Offline never mints a cloud token while idle.
-  useEffect(() => {
-    if (modeId !== 'online_full' || onlineProvider !== 'openai') return;
-    if (apiKeyStatus !== 'present' || status === 'running') return;
+  const mintWarmToken = useCallback(() => {
     const { langPair, includeSourceTranscript, micDistance, audioSource } =
       settingsStore.getState();
     // Mirror the live path's effective mic distance (system capture → 'off').
@@ -107,7 +104,23 @@ export function useOpenAIRealtime(): UseOpenAIRealtime {
       SESSION_URL,
       sessionRequestBody(langPair, includeSourceTranscript, effective),
     );
-  }, [apiKeyStatus, modeId, onlineProvider, status]);
+  }, []);
+
+  useEffect(() => {
+    if (modeId !== 'online_full' || onlineProvider !== 'openai') return;
+    if (apiKeyStatus !== 'present' || status === 'running') return;
+    mintWarmToken();
+  }, [apiKeyStatus, modeId, onlineProvider, status, mintWarmToken]);
+
+  // Same mint, for when this backend is the STANDBY rather than the selection —
+  // the other model is live and this one has to be ready to take over without a
+  // token round-trip. The caller owns the schedule because only it knows what is
+  // running; warm tokens expire, so a one-shot mint at session start would be
+  // stale long before the failure it exists for.
+  const prewarmStandby = useCallback(() => {
+    if (apiKeyStatus !== 'present') return;
+    mintWarmToken();
+  }, [apiKeyStatus, mintWarmToken]);
 
   const start = useCallback(async (): Promise<boolean> => {
     setError(null);
@@ -160,15 +173,14 @@ export function useOpenAIRealtime(): UseOpenAIRealtime {
     // SettingsPanel mirrors this by greying out the mic-distance buttons
     // when audioSource === 'system', so the UI and the actual /session
     // payload stay in sync.
-    let audio: AudioSource;
-    let effectiveMicDistance: 'meeting' | 'close' | 'far' | 'off';
-    if (audioSource === 'system') {
-      audio = new DisplayMediaAudioProvider();
-      effectiveMicDistance = 'off';
-    } else {
-      audio = new MicrophoneAudioProvider(micDistance);
-      effectiveMicDistance = micDistance;
-    }
+    const effectiveMicDistance: 'meeting' | 'close' | 'far' | 'off' =
+      audioSource === 'system' ? 'off' : micDistance;
+    // Leased, not constructed: a failover handoff reuses the capture that is
+    // already running instead of re-opening the device mid-meeting.
+    const audio: AudioSource = leaseCapture({
+      kind: audioSource === 'system' ? 'system' : 'mic',
+      micDistance: effectiveMicDistance,
+    });
     const provider = new OpenAIRealtimeProvider(
       SESSION_URL,
       handlers,
@@ -231,5 +243,5 @@ export function useOpenAIRealtime(): UseOpenAIRealtime {
     return providerRef.current?.getRenewalEtaMs() ?? null;
   }, []);
 
-  return { status, error, apiKeyStatus, start, stop, retry, getRenewalEtaMs };
+  return { status, error, apiKeyStatus, start, stop, retry, getRenewalEtaMs, prewarmStandby };
 }

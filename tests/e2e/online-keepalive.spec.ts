@@ -386,7 +386,7 @@ test.describe('KEEPALIVE — online reliability (mock backend)', () => {
     expect(await mock.geminiOpenSockets()).toBe(0);
   });
 
-  test('OpenAI renewal failure surfaces failover banner → switch to Gemini keeps transcript', async ({
+  test('OpenAI renewal failure hands the meeting to Gemini on its own, transcript intact', async ({
     page,
   }) => {
     // Initial connect succeeds (incl. the idle pre-mint).
@@ -396,21 +396,24 @@ test.describe('KEEPALIVE — online reliability (mock backend)', () => {
     await mock.oaiOutput('營收成長百分之九。');
     await mock.oaiComplete();
     await expect(page.locator('body')).toContainText('營收成長百分之九。', { timeout: 5_000 });
+    const capturesBefore = await mock.micAcquisitions();
 
     // Now make the token broker 500, then force a renewal — it fails and the
     // provider drops to 'failed' health (while still retrying in the background).
     mock.setOaiSessionFailing(true);
     await mock.oaiClosed();
 
-    const banner = page.getByTestId('failover-banner');
-    await expect(banner).toBeVisible({ timeout: 10_000 });
-    await expect(banner).toContainText('Gemini');
-
-    // One click continues on the other backend.
-    await page.getByTestId('failover-switch').click();
+    // No click. The app moves the meeting itself and says so — a switch the
+    // operator cannot see is a switch they cannot account for.
+    const notice = page.getByTestId('autoswitch-notice');
+    await expect(notice).toBeVisible({ timeout: 10_000 });
+    await expect(notice).toContainText('Gemini');
 
     // Gemini socket comes up.
     await expect.poll(() => mock.geminiOpenSockets(), { timeout: 10_000 }).toBeGreaterThan(0);
+
+    // The capture was handed over rather than re-acquired.
+    expect(await mock.micAcquisitions()).toBe(capturesBefore);
 
     // CLAUDE.md: a provider switch must NOT clear the transcript.
     await expect(page.locator('body')).toContainText('營收成長百分之九。');
@@ -422,8 +425,11 @@ test.describe('KEEPALIVE — online reliability (mock backend)', () => {
       turnComplete: true,
     });
     await expect(page.locator('body')).toContainText('Gemini 上的新句子。', { timeout: 5_000 });
-    // Banner clears once the new backend is connected.
-    await expect(banner).toBeHidden({ timeout: 5_000 });
+
+    // The notice is a notice, not a modal: it can be dismissed and the meeting
+    // carries on underneath it.
+    await page.getByTestId('autoswitch-dismiss').click();
+    await expect(notice).toBeHidden();
   });
 
   test('Gemini renders captions and auto-reconnects after a server-side drop', async ({ page }) => {

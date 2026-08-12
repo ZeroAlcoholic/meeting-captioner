@@ -12,11 +12,13 @@ import {
   SessionLauncher,
   ContinueBanner,
   FailoverBanner,
+  AutoSwitchNotice,
   type LauncherOption,
 } from './components/SessionLauncher.js';
 import { computeFailover } from './providers/failover.js';
 import { fieldTestRecorder } from './providers/field-test-recorder.js';
 import { prewarmCapture } from './providers/audio-engine.js';
+import { armCaptureHandoff } from './providers/capture-lease.js';
 import { useOpenAIRealtime } from './providers/use-openai-realtime.js';
 import { useGeminiLive } from './providers/use-gemini-live.js';
 import { useOfflineSTT } from './providers/use-offline-stt.js';
@@ -26,6 +28,26 @@ import { useSettingsStore } from './settings/use-settings-store.js';
 import { captionStore, useCaptionStore } from './store/use-caption-store.js';
 import type { SessionMode } from './store/caption-store.js';
 import { IS_ONLINE_ONLY } from './deployment.js';
+
+// Human-readable backend names, shared by the auto-switch notice and the manual
+// banner so the two can never disagree about what switched to what. Module
+// scope: an object literal in the body would change identity every render and
+// silently defeat the memoisation of everything that depends on it.
+const LABEL_OF: Record<'openai' | 'gemini', string> = { openai: 'OpenAI', gemini: 'Gemini' };
+
+/**
+ * How often the standby backend's token is re-minted while the other one runs.
+ * Warm tokens go stale in 45 s, so a single mint at session start would be long
+ * expired by the time a mid-meeting failure actually needs it.
+ */
+const STANDBY_TOKEN_REFRESH_MS = 30_000;
+
+/**
+ * Minimum spacing between automatic handoffs. One failure is something the app
+ * can route around; two in a row means both backends are unhappy, and bouncing
+ * the meeting between them helps nobody. After this the operator decides.
+ */
+const AUTO_HANDOFF_COOLDOWN_MS = 30_000;
 
 export function App() {
   const fake = useFakeReplay();
@@ -63,6 +85,10 @@ export function App() {
   // Forwarded to SettingsPanel so its outside-click detector knows to
   // ignore clicks on the ⚙ toggle itself (otherwise close+reopen race).
   const settingsToggleRef = useRef<HTMLButtonElement>(null);
+  // Set when the app switched backends by itself. Captions carry on either way;
+  // this exists so the switch is not silent — the operator has to be able to see
+  // that the captions in front of them now come from a different model.
+  const [autoSwitch, setAutoSwitch] = useState<{ fromLabel: string; toLabel: string } | null>(null);
 
   const markFieldTest = useCallback((label: string) => {
     if (!fieldTestRecorder.current()) return;
@@ -367,11 +393,11 @@ export function App() {
     }
   };
 
-  // ─── Cross-model one-click failover ───────────────────────────────────────
+  // ─── Cross-model failover ─────────────────────────────────────────────────
   // When the active online backend has surfaced a 'failed' transport health
-  // (its own auto-retry is still running in the background), let the operator
-  // jump to the OTHER model in one click — preserving the transcript. This is
-  // the make-it-never-go-dark escape hatch: self-heal first, manual failover
+  // (its own auto-retry is still running in the background), move the meeting
+  // to the OTHER model — preserving the transcript. This is the
+  // make-it-never-go-dark escape hatch: self-heal first, cross-model handoff
   // second. Uses startRealCore(true)/gemini.start() (NO beginSession) so the
   // existing history is kept and new captions append on the new backend.
   const onlineBackendAvailable = useCallback(
@@ -380,51 +406,136 @@ export function App() {
     [realtime.apiKeyStatus, gemini.available],
   );
 
-  const handleFailover = useCallback(() => {
-    // Derive the live backend exactly as the banner's computeFailover does
-    // (runningBackend), so the action can never switch in a different direction
-    // than the banner shows. If nothing is live, there's nothing to fail over.
-    const from =
-      realtime.status === 'running' ? 'openai' : gemini.status === 'running' ? 'gemini' : null;
-    if (from === null) return;
-    const target = from === 'gemini' ? 'openai' : 'gemini';
+  // In the online-slim distribution, hybrid/offline modes are filtered out of
+  // MODE_OPTIONS so modeId can only ever be 'online_full'. Guard with the
+  // build flag rather than runtime probing — keeps the React tree predictable.
+  // Online realtime backend is provider-selectable: OpenAI (WebRTC) or Gemini
+  // (WebSocket). Both live under mode 'online_full'; the picker is in Settings.
+  const isOnlineMode = IS_ONLINE_ONLY || modeId === 'online_full';
 
-    // Do not stop a self-retrying backend unless the destination is actually
-    // startable. Turning a degraded-but-recoverable session into no captions is
-    // worse than leaving the current provider retrying in place.
-    if (!onlineBackendAvailable(target)) return;
+  // Decision logic lives in providers/failover.ts so the "when, and in which
+  // direction?" rules stay unit-testable without a renderer. Computed here,
+  // above the handoff effect that consumes it.
+  const runningBackend =
+    realtime.status === 'running' ? 'openai' : gemini.status === 'running' ? 'gemini' : null;
+  const failover = computeFailover({
+    isOnlineMode,
+    runningBackend,
+    paused: pausedMode !== null,
+    transportState,
+    availableBackends: {
+      openai: onlineBackendAvailable('openai'),
+      gemini: onlineBackendAvailable('gemini'),
+    },
+  });
+  const failoverOffered = failover.show;
 
-    // Preserve the transcript (no beginSession) but record the NEW backend so a
-    // later crash-Continue resumes the model we switched TO, not the failed one.
-    captionStore.getState().setSessionPhase('running');
-    captionStore.getState().setSessionMode(target === 'gemini' ? 'gemini' : 'real');
-    setOnlineProvider(target);
-    if (target === 'gemini') {
-      // Leaving OpenAI: drain its billed minutes before switching.
-      fake.stop();
-      realtime.stop();
-      stopSession();
-      offline.stop();
-      hybrid.stop();
-      void gemini.start();
-    } else {
-      fake.stop();
-      gemini.stop();
-      offline.stop();
-      hybrid.stop();
-      void startRealCore(true); // continueSession — preserves transcript
+  const handleFailover = useCallback(
+    (reason: 'manual' | 'auto' = 'manual') => {
+      // Derive the live backend exactly as the banner's computeFailover does
+      // (runningBackend), so the action can never switch in a different direction
+      // than the banner shows. If nothing is live, there's nothing to fail over.
+      const from =
+        realtime.status === 'running' ? 'openai' : gemini.status === 'running' ? 'gemini' : null;
+      if (from === null) return;
+      const target = from === 'gemini' ? 'openai' : 'gemini';
+
+      // Do not stop a self-retrying backend unless the destination is actually
+      // startable. Turning a degraded-but-recoverable session into no captions is
+      // worse than leaving the current provider retrying in place.
+      if (!onlineBackendAvailable(target)) return;
+
+      // Preserve the transcript (no beginSession) but record the NEW backend so a
+      // later crash-Continue resumes the model we switched TO, not the failed one.
+      captionStore.getState().setSessionPhase('running');
+      captionStore.getState().setSessionMode(target === 'gemini' ? 'gemini' : 'real');
+      setOnlineProvider(target);
+      // Hold the live capture open across the swap. Without this the outgoing
+      // provider stops the tracks and the incoming one re-opens the device —
+      // seconds of dead air, and for system audio a share dialog the operator has
+      // to click through mid-meeting.
+      armCaptureHandoff();
+      if (reason === 'auto') {
+        setAutoSwitch({ fromLabel: LABEL_OF[from], toLabel: LABEL_OF[target] });
+      }
+      if (target === 'gemini') {
+        // Leaving OpenAI: drain its billed minutes before switching.
+        fake.stop();
+        realtime.stop();
+        stopSession();
+        offline.stop();
+        hybrid.stop();
+        void gemini.start();
+      } else {
+        fake.stop();
+        gemini.stop();
+        offline.stop();
+        hybrid.stop();
+        void startRealCore(true); // continueSession — preserves transcript
+      }
+    },
+    [
+      realtime,
+      gemini,
+      onlineBackendAvailable,
+      setOnlineProvider,
+      fake,
+      offline,
+      hybrid,
+      stopSession,
+      startRealCore,
+    ],
+  );
+
+  // ─── Standby: keep the other backend ready to take over ───────────────────
+  // A failover that begins with a token round-trip has already spent a chunk of
+  // its budget before it does anything. While one backend runs, keep the other
+  // one's token warm. Only ever mints for a backend that is actually available,
+  // and only in an online mode — Full Offline must never touch a cloud endpoint.
+  const standbyBackend: 'openai' | 'gemini' | null =
+    realtime.status === 'running' ? 'gemini' : gemini.status === 'running' ? 'openai' : null;
+  const standbyReady = standbyBackend !== null && onlineBackendAvailable(standbyBackend);
+  const prewarmGeminiStandby = gemini.prewarmStandby;
+  const prewarmOpenAIStandby = realtime.prewarmStandby;
+
+  useEffect(() => {
+    if (!isOnlineMode || !standbyReady || standbyBackend === null) return;
+    const mint = standbyBackend === 'gemini' ? prewarmGeminiStandby : prewarmOpenAIStandby;
+    mint();
+    const timer = setInterval(mint, STANDBY_TOKEN_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [isOnlineMode, standbyBackend, standbyReady, prewarmGeminiStandby, prewarmOpenAIStandby]);
+
+  // ─── Automatic handoff ────────────────────────────────────────────────────
+  // The banner alone was not enough. It only helps an operator who is looking
+  // at the laptop, and the person running a meeting is usually looking at the
+  // room. Captions stayed frozen until someone noticed and clicked. Now the app
+  // hands the meeting over itself the moment the live backend reports a failure
+  // it could not heal, and the banner becomes the fallback for when that fails.
+  //
+  // The ref makes it fire once per outage: the health state stays 'failed'
+  // while the old backend keeps retrying underneath, and re-entering would tear
+  // down the new session we just started.
+  //
+  // The cooldown is what stops it becoming a loop. If the backend we just moved
+  // to is also down, switching again lands back on the first one, and the app
+  // would bounce the meeting between two dead backends forever. After one
+  // automatic attempt the operator gets the banner instead — at that point the
+  // problem is not something automation can fix, and pretending otherwise just
+  // hides it.
+  const autoHandoffDone = useRef(false);
+  const lastAutoHandoffAt = useRef(0);
+  useEffect(() => {
+    if (!failoverOffered) {
+      autoHandoffDone.current = false;
+      return;
     }
-  }, [
-    realtime,
-    gemini,
-    onlineBackendAvailable,
-    setOnlineProvider,
-    fake,
-    offline,
-    hybrid,
-    stopSession,
-    startRealCore,
-  ]);
+    if (autoHandoffDone.current) return;
+    if (Date.now() - lastAutoHandoffAt.current < AUTO_HANDOFF_COOLDOWN_MS) return;
+    autoHandoffDone.current = true;
+    lastAutoHandoffAt.current = Date.now();
+    handleFailover('auto');
+  }, [failoverOffered, handleFailover]);
 
   const handleStop = () => {
     if (fake.status === 'running') fake.stop();
@@ -446,12 +557,6 @@ export function App() {
     captionStore.getState().flushNow();
   };
 
-  // In the online-slim distribution, hybrid/offline modes are filtered out of
-  // MODE_OPTIONS so modeId can only ever be 'online_full'. Guard with the
-  // build flag rather than runtime probing — keeps the React tree predictable.
-  // Online realtime backend is provider-selectable: OpenAI (WebRTC) or Gemini
-  // (WebSocket). Both live under mode 'online_full'; the picker is in Settings.
-  const isOnlineMode = IS_ONLINE_ONLY || modeId === 'online_full';
   const showRealButton = isOnlineMode && onlineProvider === 'openai';
   const showGeminiButton = isOnlineMode && onlineProvider === 'gemini';
   const showHybridButton = !IS_ONLINE_ONLY && modeId === 'hybrid_privacy';
@@ -566,20 +671,6 @@ export function App() {
   // When a session is restored, the transcript stays visible and the slim
   // ContinueBanner sits above it instead.
   const showLauncher = idle && segmentCount === 0;
-
-  // Cross-model failover affordance (decision logic in providers/failover.ts).
-  const runningBackend =
-    realtime.status === 'running' ? 'openai' : gemini.status === 'running' ? 'gemini' : null;
-  const failover = computeFailover({
-    isOnlineMode,
-    runningBackend,
-    paused: pausedMode !== null,
-    transportState,
-    availableBackends: {
-      openai: onlineBackendAvailable('openai'),
-      gemini: onlineBackendAvailable('gemini'),
-    },
-  });
 
   return (
     <main className="app-shell">
@@ -792,12 +883,23 @@ export function App() {
 
       {resumable && <ContinueBanner resumable={resumable} onContinue={handleContinue} />}
 
+      {autoSwitch && (
+        <AutoSwitchNotice
+          fromLabel={autoSwitch.fromLabel}
+          toLabel={autoSwitch.toLabel}
+          onDismiss={() => setAutoSwitch(null)}
+        />
+      )}
+
+      {/* The automatic handoff covers the normal case. This is what is left when
+          it could not act — most often because the new backend also failed to
+          start — so the operator still has a way through. */}
       {failover.show && (
         <FailoverBanner
           fromLabel={failover.fromLabel}
           toLabel={failover.toLabel}
           message={transportMessage}
-          onFailover={handleFailover}
+          onFailover={() => handleFailover('manual')}
         />
       )}
 

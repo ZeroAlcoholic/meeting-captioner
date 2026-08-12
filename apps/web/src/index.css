@@ -258,6 +258,30 @@ body {
   color: #fff;
 }
 
+/* The meeting is already back on the other backend, so this reports rather than
+   alarms: the calm blue of an informational chip, not the red of the failover
+   banner. It still has to be READABLE across a room — a switch nobody notices
+   is a silent one — so it keeps the same size and layout as the banner and
+   differs only in colour weight. */
+.autoswitch-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1.5rem;
+  padding: 0.875rem 1.125rem;
+  border-radius: 0.5rem;
+  background: rgba(70, 140, 220, 0.12);
+  border: 1px solid rgba(70, 140, 220, 0.5);
+}
+.autoswitch-bar .launcher-continue-text strong {
+  color: #7fb2f0;
+}
+.autoswitch-bar .launcher-continue-btn {
+  background: transparent;
+  border-color: rgba(70, 140, 220, 0.6);
+  color: #7fb2f0;
+}
+
 .launcher-continue-text {
   display: flex;
   flex-direction: column;

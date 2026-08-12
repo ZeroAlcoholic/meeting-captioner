@@ -88,6 +88,47 @@ export function ContinueBanner({ resumable, onContinue }: ContinueBannerProps) {
   );
 }
 
+export interface AutoSwitchNoticeProps {
+  /** Backend that failed (e.g. "OpenAI"). */
+  fromLabel: string;
+  /** Backend the meeting was moved to (e.g. "Gemini"). */
+  toLabel: string;
+  onDismiss: () => void;
+}
+
+/**
+ * Shown after the app moved the meeting to the other backend by itself.
+ *
+ * Silently changing which model produces the captions would be a lie of
+ * omission — the operator would have no way to know that the text on the
+ * projector is now coming from somewhere else, at different quality and
+ * different cost. So the switch is always visible.
+ *
+ * It is a notice, not an alert: no role="alert", nothing to act on, dismissible.
+ * The captions are already back; interrupting the meeting to announce that would
+ * be its own kind of failure.
+ */
+export function AutoSwitchNotice({ fromLabel, toLabel, onDismiss }: AutoSwitchNoticeProps) {
+  return (
+    <div className="continue-bar autoswitch-bar" data-testid="autoswitch-notice">
+      <div className="launcher-continue-text">
+        <strong>
+          {fromLabel} 中斷，已自動改用 {toLabel} 繼續
+        </strong>
+        <span>字幕記錄完整保留；{fromLabel} 仍在背景重試</span>
+      </div>
+      <button
+        type="button"
+        className="launcher-continue-btn"
+        onClick={onDismiss}
+        data-testid="autoswitch-dismiss"
+      >
+        知道了
+      </button>
+    </div>
+  );
+}
+
 export interface FailoverBannerProps {
   /** Human label of the backend that is currently failing (e.g. "OpenAI"). */
   fromLabel: string;
