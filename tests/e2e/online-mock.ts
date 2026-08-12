@@ -264,6 +264,10 @@ export interface OnlineMockController {
   /** Toggle whether the /session broker returns 500 (deterministic, timing-
    *  independent — survives the idle pre-mint that also hits /session). */
   setOaiSessionFailing(failing: boolean): void;
+  /** Toggle whether the /session/gemini broker returns 500. Gemini re-mints on
+   *  every reconnect, so this is what makes a Gemini outage PERSIST rather than
+   *  heal on the first backoff tick. */
+  setGeminiSessionFailing(failing: boolean): void;
   /** Total getUserMedia + getDisplayMedia acquisitions so far. */
   micAcquisitions(): Promise<number>;
   /** Microphone capture acquisitions so far. */
@@ -302,6 +306,7 @@ export interface OnlineMockController {
 export async function installOnlineMocks(page: Page): Promise<OnlineMockController> {
   const state = {
     oaiSessionFailing: false,
+    geminiSessionFailing: false,
     oaiSessionCalls: 0,
     geminiSessionCalls: 0,
     availableProviders: ['openai', 'gemini'] as Array<'openai' | 'gemini'>,
@@ -318,6 +323,13 @@ export async function installOnlineMocks(page: Page): Promise<OnlineMockControll
   );
   await page.route(/\/session\/gemini$/, (route) => {
     state.geminiSessionCalls += 1;
+    if (state.geminiSessionFailing) {
+      return route.fulfill({
+        status: 500,
+        contentType: 'text/plain',
+        body: 'mock /session/gemini failure',
+      });
+    }
     return route.fulfill({
       json: {
         token: 'gemini-mock-token',
@@ -374,6 +386,9 @@ export async function installOnlineMocks(page: Page): Promise<OnlineMockControll
     },
     setOaiSessionFailing: (failing) => {
       state.oaiSessionFailing = failing;
+    },
+    setGeminiSessionFailing: (failing) => {
+      state.geminiSessionFailing = failing;
     },
     oaiSessionCalls: () => state.oaiSessionCalls,
     geminiSessionCalls: () => state.geminiSessionCalls,
