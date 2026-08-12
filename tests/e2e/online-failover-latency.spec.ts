@@ -28,6 +28,13 @@ import { installOnlineMocks, type OnlineMockController } from './online-mock.js'
  * A2 lands, the auto-handoff assertion belongs in this file.
  */
 
+/** Stamp left inside the page by armDomProbe. */
+declare global {
+  interface Window {
+    __gapProbe: { mark: number | null };
+  }
+}
+
 /** Captions must come back within this long after the backend dies. */
 const GAP_BUDGET_MS = 3_000;
 /**
@@ -49,6 +56,53 @@ test.beforeEach(async ({ page }) => {
  */
 function pageNow(page: import('@playwright/test').Page): Promise<number> {
   return page.evaluate(() => performance.now());
+}
+
+/**
+ * Watch the DOM from inside the page and stamp the instant an element appears.
+ *
+ * Polling from Node cannot do this honestly. Playwright backs its poll interval
+ * off (100 ms, then 250, 500, 1000…), so waiting for a banner reports whenever
+ * the next poll happened to land, not when the banner showed up — worth close
+ * to a second of phantom latency. Against a 3 s budget that is the difference
+ * between a pass and a fail, and it would move test-to-test, which is how a
+ * yardstick turns into a flaky test that gets "fixed" by loosening it.
+ *
+ * A MutationObserver inside the page stamps the transition itself.
+ */
+async function armDomProbe(
+  page: import('@playwright/test').Page,
+  testId: string,
+  mode: 'appears' | 'vanishes',
+): Promise<void> {
+  await page.evaluate(
+    ([id, wanted]) => {
+      const selector = `[data-testid="${id}"]`;
+      window.__gapProbe = { mark: null };
+      const probe = window.__gapProbe;
+      const satisfied = (): boolean =>
+        (document.querySelector(selector) !== null) === (wanted === 'appears');
+      if (satisfied()) {
+        probe.mark = performance.now();
+        return;
+      }
+      const observer = new MutationObserver(() => {
+        if (probe.mark === null && satisfied()) {
+          probe.mark = performance.now();
+          observer.disconnect();
+        }
+      });
+      observer.observe(document.documentElement, { childList: true, subtree: true });
+    },
+    [testId, mode] as const,
+  );
+}
+
+/** Read the stamp left by armDomProbe. */
+async function readProbeMark(page: import('@playwright/test').Page): Promise<number> {
+  const mark = await page.evaluate(() => window.__gapProbe.mark);
+  expect(mark, 'appearance probe never fired').not.toBeNull();
+  return mark!;
 }
 
 /** Record the measurement where both the console and the HTML report show it. */
@@ -84,13 +138,14 @@ test.describe('數字① — failover caption gap', () => {
     // the session and there would be no outage to measure.
     mock.setGeminiSessionFailing(true);
 
+    // The switchable signal is the failover banner — that is the moment the
+    // operator can actually do something, which is what the budget is about.
+    await armDomProbe(page, 'failover-banner', 'appears');
     const t0 = await pageNow(page);
     await mock.geminiClose();
 
-    // The switchable signal is the failover banner — that is the moment the
-    // operator can actually do something, which is what the budget is about.
     await expect(page.getByTestId('failover-banner')).toBeVisible({ timeout: OUTAGE_CEILING_MS });
-    const elapsed = (await pageNow(page)) - t0;
+    const elapsed = (await readProbeMark(page)) - t0;
 
     await reportGap('Gemini 持續故障 → 可切換訊號', elapsed);
     expect(elapsed).toBeLessThanOrEqual(GAP_BUDGET_MS);
@@ -126,6 +181,10 @@ test.describe('數字① — failover caption gap', () => {
     // before that point would race the failure and leave no gap to measure.
     await expect(page.getByTestId('reconnect-pill')).toBeVisible({ timeout: 15_000 });
 
+    // The pill going away is the operator-visible "we are back". Arm the probe
+    // before healing upstream so the stamp is the transition itself.
+    await armDomProbe(page, 'reconnect-pill', 'vanishes');
+
     // Upstream is healthy again. From here on, the only thing standing between
     // the meeting and its captions is our own retry schedule — which is
     // exactly the interval this test measures.
@@ -134,7 +193,7 @@ test.describe('數字① — failover caption gap', () => {
     // A second peer means the renewal finally went through and the caption
     // path is live again.
     await expect.poll(() => mock.oaiPeerCount(), { timeout: OUTAGE_CEILING_MS }).toBe(2);
-    const elapsed = (await pageNow(page)) - t0;
+    const elapsed = (await readProbeMark(page)) - t0;
 
     // Captions must actually flow on the rebuilt session, not just a peer that
     // exists on paper.
