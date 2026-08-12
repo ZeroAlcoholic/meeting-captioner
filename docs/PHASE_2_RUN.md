@@ -96,7 +96,7 @@ C1 延遲文案，依 S2 產出的實測數字改寫。跑完整套驗收，寫�
 | 0   | E1 上游型號實查           | S1  | completed | 0-E1   | `docs/MODEL_RECENCY_2026-08-12.md`                                 |
 | 0   | E2 pin 裁決               | S1  | completed | 0-E2   | 同上（E2 裁決節）；G1 未觸發                                       |
 | 1   | 數字① baseline 量測       | S1  | completed | 1-BASE | `docs/FAILOVER_BASELINE_2026-08-12.md`（A1 31162 ms／A3 30207 ms） |
-| 2   | A1 Gemini 故障訊號提前    | S1  | pending   | —      | —                                                                  |
+| 2   | A1 Gemini 故障訊號提前    | S1  | completed | 2-A1   | 31055 → **2014 ms**（同一把 DOM 探針；web 296 綠、e2e 32 綠）      |
 | 2   | A4 Gemini Stop 收尾       | S1  | pending   | —      | —                                                                  |
 | 3   | A2 Standby 熱備           | S1  | pending   | —      | —                                                                  |
 | 4   | A3 OpenAI 故障續期        | S1  | pending   | —      | —                                                                  |

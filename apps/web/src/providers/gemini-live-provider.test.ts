@@ -588,6 +588,41 @@ describe('GeminiLiveProvider — reconnect + wedge detection (#16)', () => {
     );
   });
 
+  it('outage surfaces the failover affordance on a clock, not on the backoff ladder', async () => {
+    // A1. The affordance used to be tied to the attempt counter, whose rungs
+    // fall at 1, 3, 7, 15 and 31 s — so the operator waited 31 s to learn they
+    // could switch. It is now driven by an independent 2 s outage clock.
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(tokenResponse())
+      .mockResolvedValue(new Response('upstream gone', { status: 503 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { provider, health } = makeHarness();
+    await provider.start();
+    FakeWebSocket.instances.at(-1)!.close();
+
+    // Just under the budget nothing is offered yet — a brief blip must not
+    // nag the operator to abandon a working backend.
+    await vi.advanceTimersByTimeAsync(1_900);
+    expect(health.some((e) => e.state === 'failed')).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(200);
+    const failed = health.filter((e) => e.component === 'transport' && e.state === 'failed');
+    expect(failed.length).toBeGreaterThan(0);
+    expect(failed.at(-1)!.message).toMatch(/switch backend/);
+
+    // Later rungs must not retract the offer. They still emit health, and if
+    // they reported 'reconnecting' again the banner would blink out from under
+    // the operator's cursor mid-click.
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(health.filter((e) => e.component === 'transport').at(-1)!.state).toBe('failed');
+    expect(provider.status).toBe('running'); // retrying underneath the whole time
+
+    provider.stop();
+  });
+
   it('persistent reconnect: keeps retrying past 5 attempts and surfaces a failed health state (never gives up / never stop()s)', async () => {
     vi.useFakeTimers();
     // Initial mint OK (so start connects), every subsequent mint fails so each
@@ -605,8 +640,7 @@ describe('GeminiLiveProvider — reconnect + wedge detection (#16)', () => {
     // Drop the live socket → triggers the reconnect ladder.
     FakeWebSocket.instances.at(-1)!.close();
 
-    // Walk through more than RECONNECT_FAILED_HEALTH_AFTER (5) attempts. The
-    // capped backoff is 1,2,4,8,16,30s — advance generously past all of them.
+    // Walk well past every rung of the capped backoff (1,2,4,8,16,30s).
     await vi.advanceTimersByTimeAsync(120_000);
 
     // A 'failed' transport health (the failover affordance) must have appeared…

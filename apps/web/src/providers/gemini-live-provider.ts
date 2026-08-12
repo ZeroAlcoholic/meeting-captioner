@@ -69,11 +69,21 @@ const STALE_AUDIO_ACTIVE_DB_BY_MIC: Record<'meeting' | 'close' | 'far' | 'off', 
 // The previous policy gave up PERMANENTLY after 5 attempts (called stop()) —
 // unacceptable for a long meeting, and it left no live session for the
 // cross-model failover to hand off from. Instead we retry FOREVER with a capped
-// backoff; after RECONNECT_FAILED_HEALTH_AFTER quick attempts we surface a
-// 'failed' health state so the UI can offer a one-click switch to the other
-// backend — while STILL retrying in the background (auto-heal never stops).
+// backoff — auto-heal never stops.
 const RECONNECT_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000];
-const RECONNECT_FAILED_HEALTH_AFTER = 5;
+
+// How long an outage may last before we tell the operator they can switch
+// backends. This is deliberately a CLOCK, not an attempt count. Counting
+// attempts ties the warning to the backoff ladder, whose rungs fall at 1, 3, 7,
+// 15 and 31 s — so "after five attempts" meant 31 s of frozen captions before
+// the failover affordance appeared (measured: 31162 ms, see
+// docs/FAILOVER_BASELINE_2026-08-12.md). A clock decouples the two: retries
+// keep climbing the ladder underneath while the operator learns within seconds
+// that this meeting has a problem and has an escape hatch.
+//
+// 2 s is chosen to clear a single transient drop — the common case reconnects
+// on the 1 s rung and never trips this — without making a real outage wait.
+const FAILOVER_SIGNAL_AFTER_MS = 2_000;
 
 function iso(): string {
   return new Date().toISOString();
@@ -206,6 +216,12 @@ export class GeminiLiveProvider implements CaptionProvider {
 
   private reconnectAttempts = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  // Armed when an outage starts; fires once to surface the failover affordance.
+  private failoverSignalTimer: ReturnType<typeof setTimeout> | null = null;
+  // Latches once the outage has been surfaced, so later backoff rungs keep
+  // reporting 'failed' instead of flipping back to 'reconnecting' — which would
+  // make the failover banner blink out from under the operator's cursor.
+  private outageSurfaced = false;
   // Settles the in-flight setup handshake, if any. cleanup() must call this:
   // closing the socket alone leaves connect()'s promise pending behind the
   // stale-socket guard, and its 15 s timer then fires a phantom setup-timeout
@@ -457,6 +473,10 @@ export class GeminiLiveProvider implements CaptionProvider {
       // Session is proven live — NOW reset the reconnect attempt counter (see
       // ws.onopen). Arm the receive-side wedge detector too.
       this.reconnectAttempts = 0;
+      // The outage is genuinely over (a socket that merely opened proves
+      // nothing — see the connect-then-wedge regression), so retract the
+      // failover offer and let the next outage start its clock from zero.
+      this.disarmFailoverSignal();
       this.lastServerContentAt = Date.now();
       this.audioActiveSamplesSinceContent = 0;
       return;
@@ -635,20 +655,49 @@ export class GeminiLiveProvider implements CaptionProvider {
   }
 
   /**
+   * Arm the outage clock. Fires once, FAILOVER_SIGNAL_AFTER_MS after the outage
+   * began, and flips health to 'failed' so the cross-model failover UI can offer
+   * a one-click switch — while the backoff ladder keeps retrying underneath.
+   * A reconnect that reaches setupComplete disarms it, so a transient drop never
+   * reaches the operator.
+   */
+  private armFailoverSignal(): void {
+    if (this.failoverSignalTimer !== null || this.outageSurfaced) return;
+    this.failoverSignalTimer = setTimeout(() => {
+      this.failoverSignalTimer = null;
+      if (this._status !== 'running') return;
+      this.outageSurfaced = true;
+      this.emitHealth(
+        'transport',
+        'failed',
+        `Gemini has been down for ${FAILOVER_SIGNAL_AFTER_MS / 1000}s (still retrying) — you can switch backend`,
+      );
+    }, FAILOVER_SIGNAL_AFTER_MS);
+  }
+
+  /** Outage over (or session torn down): stop reporting one. */
+  private disarmFailoverSignal(): void {
+    if (this.failoverSignalTimer !== null) {
+      clearTimeout(this.failoverSignalTimer);
+      this.failoverSignalTimer = null;
+    }
+    this.outageSurfaced = false;
+  }
+
+  /**
    * Persistent reconnect with capped backoff. NEVER gives up — a long meeting
-   * must heal itself even after many consecutive failures. After
-   * RECONNECT_FAILED_HEALTH_AFTER quick attempts we flip the health state to
-   * 'failed' so the cross-model failover UI can offer a one-click switch, while
-   * STILL retrying in the background. The early-return guard prevents a double
-   * arm when both ws.onclose AND a failed mint/connect attempt call us in the
-   * same tick.
+   * must heal itself even after many consecutive failures. The failover
+   * affordance is driven by the outage clock (armFailoverSignal), not by this
+   * ladder's rung count. The early-return guard prevents a double arm when both
+   * ws.onclose AND a failed mint/connect attempt call us in the same tick.
    */
   private scheduleReconnect(): void {
     if (this.reconnectTimer !== null) return; // already scheduled
+    this.armFailoverSignal();
     const idx = Math.min(this.reconnectAttempts, RECONNECT_BACKOFF_MS.length - 1);
     const delayMs = RECONNECT_BACKOFF_MS[idx]!;
     this.reconnectAttempts += 1;
-    if (this.reconnectAttempts > RECONNECT_FAILED_HEALTH_AFTER) {
+    if (this.outageSurfaced) {
       this.emitHealth(
         'transport',
         'failed',
@@ -816,6 +865,9 @@ export class GeminiLiveProvider implements CaptionProvider {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    // A stopped session has no outage to report; leaving this armed would fire
+    // 'failed' onto whatever session is running by then.
+    this.disarmFailoverSignal();
     this.reconnectAttempts = 0;
     this.lastServerContentAt = 0;
     this.audioActiveSamplesSinceContent = 0;
