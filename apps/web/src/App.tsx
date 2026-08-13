@@ -456,24 +456,35 @@ export function App() {
       // seconds of dead air, and for system audio a share dialog the operator has
       // to click through mid-meeting.
       armCaptureHandoff();
-      if (reason === 'auto') {
-        setAutoSwitch({ fromLabel: LABEL_OF[from], toLabel: LABEL_OF[target] });
-      }
-      if (target === 'gemini') {
-        // Leaving OpenAI: drain its billed minutes before switching.
-        fake.stop();
-        realtime.stop();
-        stopSession();
-        offline.stop();
-        hybrid.stop();
-        void gemini.start();
-      } else {
-        fake.stop();
-        gemini.stop();
-        offline.stop();
-        hybrid.stop();
-        void startRealCore(true); // continueSession — preserves transcript
-      }
+
+      // The notice is published only after the destination is demonstrably
+      // captioning. Announcing the switch up front and starting the new backend
+      // fire-and-forget meant that when the standby ALSO failed — an expired
+      // token, a handshake refused — the board said the meeting had continued
+      // on the other model while in fact nothing was running at all. A failure
+      // here leaves the provider's own error visible and the failover banner in
+      // place, so the operator sees the truth and still has a manual path.
+      return (async () => {
+        let switched: boolean;
+        if (target === 'gemini') {
+          // Leaving OpenAI: drain its billed minutes before switching.
+          fake.stop();
+          realtime.stop();
+          stopSession();
+          offline.stop();
+          hybrid.stop();
+          switched = await gemini.start();
+        } else {
+          fake.stop();
+          gemini.stop();
+          offline.stop();
+          hybrid.stop();
+          switched = await startRealCore(true); // continueSession — preserves transcript
+        }
+        if (switched && reason === 'auto') {
+          setAutoSwitch({ fromLabel: LABEL_OF[from], toLabel: LABEL_OF[target] });
+        }
+      })();
     },
     [
       realtime,
@@ -501,7 +512,13 @@ export function App() {
 
   useEffect(() => {
     if (!isOnlineMode || !standbyReady || standbyBackend === null) return;
-    const mint = standbyBackend === 'gemini' ? prewarmGeminiStandby : prewarmOpenAIStandby;
+    const prewarm = standbyBackend === 'gemini' ? prewarmGeminiStandby : prewarmOpenAIStandby;
+    // Re-mint anything older than the tick itself. Without that argument the
+    // cache treats a 30-second-old token as fresh and skips, so the tick did
+    // nothing, the token went stale at 45 seconds, and nothing replaced it
+    // until 60 — a recurring 15-second window in which the failover this
+    // standby exists for still paid for a token round-trip.
+    const mint = (): void => prewarm(STANDBY_TOKEN_REFRESH_MS);
     mint();
     const timer = setInterval(mint, STANDBY_TOKEN_REFRESH_MS);
     return () => clearInterval(timer);
@@ -535,7 +552,7 @@ export function App() {
     if (Date.now() - lastAutoHandoffAt.current < AUTO_HANDOFF_COOLDOWN_MS) return;
     autoHandoffDone.current = true;
     lastAutoHandoffAt.current = Date.now();
-    handleFailover('auto');
+    void handleFailover('auto');
   }, [failoverOffered, handleFailover]);
 
   const handleStop = () => {
@@ -900,7 +917,7 @@ export function App() {
           fromLabel={failover.fromLabel}
           toLabel={failover.toLabel}
           message={transportMessage}
-          onFailover={() => handleFailover('manual')}
+          onFailover={() => void handleFailover('manual')}
         />
       )}
 

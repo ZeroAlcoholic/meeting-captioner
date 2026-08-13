@@ -432,6 +432,44 @@ test.describe('KEEPALIVE — online reliability (mock backend)', () => {
     await expect(notice).toBeHidden();
   });
 
+  test('a handoff whose destination will not start does not claim the meeting continued', async ({
+    page,
+  }) => {
+    // Both keys are reported present, so the app offers and attempts the
+    // switch — but the destination's broker is down. Announcing the switch up
+    // front and starting the new backend fire-and-forget meant the board said
+    // the meeting had continued on the other model while nothing was running
+    // at all: the operator would read "已自動改用 OpenAI 繼續" over a frozen
+    // caption and have no reason to intervene.
+    mock.setOaiSessionFailing(true);
+
+    await page.goto('/');
+    await page.getByTestId('launch-gemini').click();
+    await expect.poll(() => mock.geminiOpenSockets(), { timeout: 10_000 }).toBeGreaterThan(0);
+
+    await mock.geminiServerContent({
+      inputTranscription: { text: 'Before both backends failed.', languageCode: 'en-US' },
+      outputTranscription: { text: '兩邊都掛掉之前。' },
+      turnComplete: true,
+    });
+    await expect(page.locator('body')).toContainText('兩邊都掛掉之前。', { timeout: 5_000 });
+
+    mock.setGeminiSessionFailing(true);
+    await mock.geminiClose();
+
+    // The failure is stated, with a way to try again…
+    await expect(page.locator('.app-error')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('retry-real')).toBeVisible();
+    // …and the success notice never appears, because nothing succeeded. The
+    // failover banner is gone too, and correctly so: it offers a switch FROM a
+    // live backend, and by now there is no live backend to switch from.
+    await expect(page.getByTestId('autoswitch-notice')).toBeHidden();
+
+    // The transcript is still there to export — losing the meeting on top of
+    // losing both backends would be the worse failure.
+    await expect(page.locator('body')).toContainText('兩邊都掛掉之前。');
+  });
+
   test('Gemini renders captions and auto-reconnects after a server-side drop', async ({ page }) => {
     await page.goto('/');
     // Launch Gemini directly from the idle launcher (selects backend + starts).

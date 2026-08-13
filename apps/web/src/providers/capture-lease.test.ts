@@ -187,6 +187,64 @@ describe('capture lease', () => {
     expect(stoppedTracks).toBe(1);
   });
 
+  it('overlapping starts share one capture instead of racing to own it', async () => {
+    // Two starts can overlap while permission is pending — a restart on top of
+    // a slow start, or a handoff racing a manual switch. If both opened their
+    // own device, whichever resolved LAST would take the shared slot and then
+    // release it, leaving the stream actually feeding the meeting untracked:
+    // Stop could not stop it and the microphone would outlive the meeting.
+    let resolveSecond: ((stream: MediaStream) => void) | null = null;
+    let call = 0;
+    vi.stubGlobal('navigator', {
+      mediaDevices: {
+        getUserMedia: () => {
+          getUserMediaCalls += 1;
+          call += 1;
+          if (call === 1) return Promise.resolve(fakeStream());
+          return new Promise<MediaStream>((resolve) => {
+            resolveSecond = resolve;
+          });
+        },
+      },
+    });
+
+    const a = leaseCapture(MIC);
+    const b = leaseCapture(MIC);
+    const [streamA, streamB] = await Promise.all([a.acquire(noHealth), b.acquire(noHealth)]);
+
+    // One device open, one stream, two holders.
+    expect(getUserMediaCalls).toBe(1);
+    expect(streamB).toBe(streamA);
+    expect(resolveSecond).toBeNull();
+
+    a.release();
+    expect(stoppedTracks).toBe(0);
+    b.release();
+    expect(stoppedTracks).toBe(1);
+  });
+
+  it('a stale release cannot stop a capture that replaced it', async () => {
+    const old = leaseCapture(MIC);
+    await old.acquire(noHealth);
+
+    // The operator switched source, so this acquisition supersedes the first.
+    const current = leaseCapture({ kind: 'mic', micDistance: 'close' });
+    await current.acquire(noHealth);
+    expect(getUserMediaCalls).toBe(2);
+    expect(stoppedTracks).toBe(0);
+
+    // The superseded lease lets go late. It takes its OWN capture with it…
+    old.release();
+    expect(stoppedTracks).toBe(1);
+
+    // …and leaves the live one both running and still tracked, so Stop can
+    // still stop it. Before the fix a late release decremented whatever
+    // happened to be in the shared slot, which is how the live microphone
+    // ended up outliving the meeting.
+    current.release();
+    expect(stoppedTracks).toBe(2);
+  });
+
   it('releasing a lease that never acquired cannot free someone else capture', async () => {
     const holder = leaseCapture(MIC);
     await holder.acquire(noHealth);

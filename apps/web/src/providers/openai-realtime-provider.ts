@@ -147,8 +147,17 @@ const warmKey = (url: string, body: SessionRequestBody): string => `${url}|${JSO
  * so the next matching Start skips the token round-trip. Best-effort + single-use
  * (see WarmTokenCache). Online-only caller (the hook gates on apiKeyStatus).
  */
-export function prewarmOpenAISession(url: string, body: SessionRequestBody): void {
-  void warmSession.prewarm(warmKey(url, body), () => postSession(url, body), sessionExpiryMs);
+export function prewarmOpenAISession(
+  url: string,
+  body: SessionRequestBody,
+  refreshIfOlderThanMs?: number,
+): void {
+  void warmSession.prewarm(
+    warmKey(url, body),
+    () => postSession(url, body),
+    sessionExpiryMs,
+    refreshIfOlderThanMs,
+  );
 }
 
 /** Test hook: drop any pre-warmed token so it can't leak across tests. */

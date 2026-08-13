@@ -44,7 +44,7 @@ export interface UseOpenAIRealtime {
    * not begin with a network round-trip. The caller drives the schedule: only it
    * knows what is running, and warm tokens expire.
    */
-  prewarmStandby: () => void;
+  prewarmStandby: (refreshIfOlderThanMs?: number) => void;
 }
 
 export function useOpenAIRealtime(): UseOpenAIRealtime {
@@ -101,7 +101,7 @@ export function useOpenAIRealtime(): UseOpenAIRealtime {
   // + key-matched (see WarmTokenCache); any mismatch falls back to a live fetch,
   // so the worst case is exactly today's behaviour. Hard-gated by the selected
   // online mode/backend so Full Offline never mints a cloud token while idle.
-  const mintWarmToken = useCallback(() => {
+  const mintWarmToken = useCallback((refreshIfOlderThanMs?: number) => {
     const { langPair, includeSourceTranscript, micDistance, audioSource } =
       settingsStore.getState();
     // Mirror the live path's effective mic distance (system capture → 'off').
@@ -109,6 +109,7 @@ export function useOpenAIRealtime(): UseOpenAIRealtime {
     prewarmOpenAISession(
       SESSION_URL,
       sessionRequestBody(langPair, includeSourceTranscript, effective),
+      refreshIfOlderThanMs,
     );
   }, []);
 
@@ -123,10 +124,13 @@ export function useOpenAIRealtime(): UseOpenAIRealtime {
   // token round-trip. The caller owns the schedule because only it knows what is
   // running; warm tokens expire, so a one-shot mint at session start would be
   // stale long before the failure it exists for.
-  const prewarmStandby = useCallback(() => {
-    if (apiKeyStatus !== 'present') return;
-    mintWarmToken();
-  }, [apiKeyStatus, mintWarmToken]);
+  const prewarmStandby = useCallback(
+    (refreshIfOlderThanMs?: number) => {
+      if (apiKeyStatus !== 'present') return;
+      mintWarmToken(refreshIfOlderThanMs);
+    },
+    [apiKeyStatus, mintWarmToken],
+  );
 
   const start = useCallback(async (): Promise<boolean> => {
     setError(null);

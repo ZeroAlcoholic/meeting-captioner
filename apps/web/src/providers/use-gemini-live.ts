@@ -27,7 +27,7 @@ export interface UseGeminiLive {
    * not begin with a network round-trip. The caller drives the schedule: only it
    * knows what is running, and warm tokens expire.
    */
-  prewarmStandby: () => void;
+  prewarmStandby: (refreshIfOlderThanMs?: number) => void;
 }
 
 export function useGeminiLive(): UseGeminiLive {
@@ -83,15 +83,23 @@ export function useGeminiLive(): UseGeminiLive {
   // token round-trip. The caller owns the schedule because only it knows what is
   // running; warm tokens expire, so a one-shot mint at session start would be
   // stale long before the failure it exists for.
-  const prewarmStandby = useCallback(() => {
-    if (geminiStatus !== 'available') return;
-    prewarmGeminiSession(TOKEN_URL);
-  }, [geminiStatus]);
+  const prewarmStandby = useCallback(
+    (refreshIfOlderThanMs?: number) => {
+      if (geminiStatus !== 'available') return;
+      prewarmGeminiSession(TOKEN_URL, refreshIfOlderThanMs);
+    },
+    [geminiStatus],
+  );
 
   const start = useCallback(async (): Promise<boolean> => {
     setError(null);
     const previous = providerRef.current;
-    if (previous && previous.status !== 'stopped') {
+    if (previous) {
+      // Unconditionally, including when it already reads as stopped. A stopped
+      // provider can still be draining its tail on an open socket, and each
+      // start builds a NEW instance — so skipping this would leave the old
+      // socket alive to deliver the previous meeting's last words into the new
+      // one, after beginSession() has cleared the board. stop() is idempotent.
       previous.stop();
       handlersRef.current?.flushPending();
     }

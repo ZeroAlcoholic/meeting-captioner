@@ -679,6 +679,38 @@ describe('GeminiLiveProvider — reconnect + wedge detection (#16)', () => {
     expect(ws.readyState).toBe(3);
   });
 
+  it('a second Stop ends the drain instead of leaving the socket open', async () => {
+    // The hook builds a NEW provider on every start, so the drain guard inside
+    // start() never sees the old instance. What the hook can reach is stop(),
+    // and it calls it on the previous provider — which already reads as
+    // stopped. If that call did nothing, the old socket would stay open and
+    // deliver the previous meeting's tail into the new one, after the board
+    // had been cleared for a fresh session.
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(tokenResponse())),
+    );
+
+    const { provider } = makeHarness();
+    await provider.start();
+    const ws = FakeWebSocket.instances.at(-1)!;
+
+    provider.handleServerObject({
+      serverContent: { inputTranscription: { text: 'Last words.' } },
+    });
+    provider.stop();
+    expect(ws.readyState).toBe(1); // draining
+
+    // This is the call the hook makes before starting the next session.
+    provider.stop();
+    expect(ws.readyState).toBe(3);
+
+    // And nothing is left on a timer to fire into whatever runs next.
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+  });
+
   it('outage surfaces the failover affordance on a clock, not on the backoff ladder', async () => {
     // A1. The affordance used to be tied to the attempt counter, whose rungs
     // fall at 1, 3, 7, 15 and 31 s — so the operator waited 31 s to learn they

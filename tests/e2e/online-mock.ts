@@ -68,6 +68,15 @@ const INIT_SCRIPT = `
         }
         return count;
       },
+      closeActivePeer: function () {
+        for (var i = this.pcs.length - 1; i >= 0; i--) {
+          if (this.pcs[i].connectionState !== 'closed') {
+            this.pcs[i].close();
+            return true;
+          }
+        }
+        return false;
+      },
       ready: function () {
         for (var i = this.dcs.length - 1; i >= 0; i--) {
           if (this.dcs[i].readyState === 'open' && this.dcs[i].onmessage) return true;
@@ -278,6 +287,16 @@ export interface OnlineMockController {
   oaiPeerCount(): Promise<number>;
   /** Number of OpenAI peers that have not been closed. */
   oaiOpenPeers(): Promise<number>;
+  /**
+   * Close the newest OpenAI peer, marking its DataChannel closed.
+   *
+   * A real session that has gone away cannot still deliver events, but
+   * `oaiClosed()` only injects the notification — the fake peer stays open
+   * underneath. Without this a test measuring "when do captions come back"
+   * could have its caption accepted by the dead channel and report an outage
+   * that never happened.
+   */
+  oaiCloseActivePeer(): Promise<void>;
   /** Number of currently-live mock media tracks. */
   activeCaptureTracks(): Promise<number>;
   /** True once the active DataChannel is open AND wired (safe to emit events). */
@@ -399,6 +418,7 @@ export async function installOnlineMocks(page: Page): Promise<OnlineMockControll
     displayMediaAcquisitions: () => page.evaluate(() => window.__mock.getDisplayMediaCalls),
     oaiPeerCount: () => page.evaluate(() => window.__mock.oai.dcCount()),
     oaiOpenPeers: () => page.evaluate(() => window.__mock.oai.openPeerCount()),
+    oaiCloseActivePeer: () => page.evaluate(() => window.__mock.oai.closeActivePeer()),
     activeCaptureTracks: () => page.evaluate(() => window.__mock.activeTrackCount()),
     oaiReady: () => page.evaluate(() => window.__mock.oai.ready()),
     geminiSend: (obj) => page.evaluate((o) => window.__mock.gemini.send(o), obj),
@@ -428,6 +448,7 @@ interface MockGlobal {
     emit(obj: Record<string, unknown>): boolean;
     dcCount(): number;
     openPeerCount(): number;
+    closeActivePeer(): boolean;
     ready(): boolean;
   };
   gemini: { send(obj: Record<string, unknown>): boolean; close(): boolean; openCount(): number };

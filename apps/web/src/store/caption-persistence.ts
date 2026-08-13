@@ -316,6 +316,10 @@ export function createCaptionPersistenceController(
   let pendingLocalWrite: PersistedState | null = null;
   let localWriteScheduled = false;
 
+  const cancelPendingLocalWrite = (): void => {
+    pendingLocalWrite = null;
+  };
+
   const scheduleLocalWrite = (payload: PersistedState): void => {
     pendingLocalWrite = payload;
     if (localWriteScheduled) return;
@@ -338,7 +342,7 @@ export function createCaptionPersistenceController(
    */
   const flush = (snapshot: CaptionState): void => {
     if (!enabled || disposed || !storage || !key) return;
-    pendingLocalWrite = null;
+    cancelPendingLocalWrite();
     const full = buildPersistPayload(snapshot, true);
     writeSnapshot(storage, key, tailPayload(full, LS_TAIL_SEGMENTS));
   };
@@ -403,6 +407,11 @@ export function createCaptionPersistenceController(
   const clear = async (): Promise<void> => {
     generation += 1;
     cancelTimer();
+    // Drop any write still waiting for idle time BEFORE purging. Otherwise its
+    // callback runs after the purge and writes the deleted transcript straight
+    // back — the meeting the user just erased reappears on the next reload,
+    // which is a broken privacy promise, not merely a stale cache.
+    cancelPendingLocalWrite();
     purgeLocal();
     await queueClear();
   };

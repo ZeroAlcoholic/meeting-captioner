@@ -35,15 +35,26 @@ export class WarmTokenCache<T> {
    * Best-effort pre-mint for `key` if there is no fresh cached entry already.
    * Never throws (pre-warm failures are silent — Start will fetch fresh). A mint
    * already in flight short-circuits, so repeated triggers don't pile up.
+   *
+   * `refreshIfOlderThanMs` re-mints an entry that is still technically fresh but
+   * getting on. A standby token has to be usable at any moment, and a caller
+   * that only re-mints once the entry has ALREADY gone stale leaves a window
+   * where the failover it exists for still pays for a round-trip. Pass a value
+   * below freshTtlMs to close that window.
    */
   async prewarm(
     key: string,
     mint: () => Promise<T>,
     expiresAtMs: (value: T) => number | null,
+    refreshIfOlderThanMs?: number,
   ): Promise<void> {
     if (this.inFlight) return;
     const nowMs = this.now();
-    if (this.entry && this.entry.key === key && this.isFresh(this.entry, nowMs)) return;
+    const aged =
+      refreshIfOlderThanMs !== undefined &&
+      this.entry !== null &&
+      nowMs - this.entry.mintedAt >= refreshIfOlderThanMs;
+    if (this.entry && this.entry.key === key && this.isFresh(this.entry, nowMs) && !aged) return;
     this.inFlight = true;
     try {
       const value = await mint();

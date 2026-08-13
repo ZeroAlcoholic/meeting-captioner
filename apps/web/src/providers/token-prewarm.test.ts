@@ -1,6 +1,46 @@
 import { describe, expect, it, vi } from 'vitest';
 import { WarmTokenCache } from './token-prewarm.js';
 
+describe('WarmTokenCache — standby refresh', () => {
+  it('re-mints an entry older than the caller cares about, before it goes stale', async () => {
+    // A standby token must be usable at any moment. Refreshing only once the
+    // entry has ALREADY expired leaves a window where the failover it exists
+    // for still pays for a round-trip: with a 45 s freshness and a 30 s tick,
+    // the tick was a no-op, the token died at 45 s, and nothing replaced it
+    // until 60 s.
+    let clock = 0;
+    const cache = new WarmTokenCache<string>(45_000, 0, () => clock);
+    const mint = vi.fn(async () => `token-${clock}`);
+
+    await cache.prewarm('k', mint, () => null, 30_000);
+    expect(mint).toHaveBeenCalledTimes(1);
+
+    // Still young: nothing to do.
+    clock = 20_000;
+    await cache.prewarm('k', mint, () => null, 30_000);
+    expect(mint).toHaveBeenCalledTimes(1);
+
+    // Past the caller's threshold but still technically fresh — this is the
+    // moment that used to be skipped.
+    clock = 30_000;
+    await cache.prewarm('k', mint, () => null, 30_000);
+    expect(mint).toHaveBeenCalledTimes(2);
+    expect(cache.consume('k')).toBe('token-30000');
+  });
+
+  it('without the threshold, a still-fresh entry is left alone', async () => {
+    let clock = 0;
+    const cache = new WarmTokenCache<string>(45_000, 0, () => clock);
+    const mint = vi.fn(async () => 'token');
+
+    await cache.prewarm('k', mint, () => null);
+    clock = 30_000;
+    await cache.prewarm('k', mint, () => null);
+
+    expect(mint).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('WarmTokenCache', () => {
   it('pre-mints once and hands the token to a matching consume (single-use)', async () => {
     const cache = new WarmTokenCache<string>();

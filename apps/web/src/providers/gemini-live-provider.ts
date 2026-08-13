@@ -208,11 +208,12 @@ async function postGeminiToken(url: string): Promise<GeminiToken> {
 const warmGemini = new WarmTokenCache<GeminiToken>();
 
 /** Pre-mint a Gemini token while idle so the next Start skips the mint RTT. */
-export function prewarmGeminiSession(url: string): void {
+export function prewarmGeminiSession(url: string, refreshIfOlderThanMs?: number): void {
   void warmGemini.prewarm(
     url,
     () => postGeminiToken(url),
     () => null,
+    refreshIfOlderThanMs,
   );
 }
 
@@ -360,7 +361,13 @@ export class GeminiLiveProvider implements CaptionProvider {
   }
 
   stop(): void {
-    if (this._status === 'stopped') return;
+    // Already stopped but still draining: a second Stop, or a new session
+    // starting, means the tail has run out of time. Close it out now rather
+    // than leaving a socket that will emit into whatever comes next.
+    if (this._status === 'stopped') {
+      if (this.draining) this.finishStop();
+      return;
+    }
     this._status = 'stopped';
 
     // The microphone goes off NOW. Whatever the socket still owes us, Stop has

@@ -45,6 +45,20 @@ interface LiveCapture {
 }
 
 let live: LiveCapture | null = null;
+/**
+ * An acquisition that has been requested but not yet resolved.
+ *
+ * Acquiring is async — a permission prompt, a device open, a share dialog — and
+ * two starts can overlap while one is pending (a restart on top of a slow
+ * start, or a handoff racing a manual switch). Without this, both would see no
+ * live capture, both would open a device, and whichever resolved LAST would
+ * overwrite the shared slot and then release it: the stream actually feeding
+ * the meeting would no longer be tracked, so Stop could not stop it and the
+ * microphone would stay live after the meeting ended.
+ *
+ * Concurrent callers share the in-flight acquisition instead.
+ */
+let acquiring: { spec: CaptureSpec; promise: Promise<LiveCapture> } | null = null;
 let handoffTimer: ReturnType<typeof setTimeout> | null = null;
 let handoffArmed = false;
 
@@ -92,30 +106,42 @@ export function armCaptureHandoff(): void {
  * knowledge of any of this.
  */
 export function leaseCapture(spec: CaptureSpec): AudioSource {
-  let held = false;
+  // The exact capture this lease took, so releasing can only ever give back
+  // what this lease holds. Comparing against the global slot instead would let
+  // a stale release decrement — and stop — a capture that belongs to a session
+  // started after it.
+  let heldCapture: LiveCapture | null = null;
+
+  const claim = (capture: LiveCapture, onHealth: (e: HealthEvent) => void): MediaStream => {
+    cancelHandoffTimer();
+    handoffArmed = false;
+    capture.holders += 1;
+    heldCapture = capture;
+    // Report connected so the UI reflects live audio, but never
+    // 'requesting_permission' — nothing is being requested.
+    onHealth({
+      kind: 'health',
+      component: 'audio',
+      state: 'connected',
+      timestamp: new Date().toISOString(),
+    });
+    return capture.stream;
+  };
 
   return {
     get analyser(): AnalyserNode | null {
-      return live?.source.analyser ?? null;
+      return heldCapture?.source.analyser ?? live?.source.analyser ?? null;
     },
 
     async acquire(onHealth: (e: HealthEvent) => void): Promise<MediaStream> {
       // Claim the parked capture from a handoff — no device open, no permission
       // round-trip, no picker dialog.
-      if (live && sameSpec(live.spec, spec)) {
-        cancelHandoffTimer();
-        handoffArmed = false;
-        live.holders += 1;
-        held = true;
-        // Report connected so the UI reflects live audio, but never
-        // 'requesting_permission' — nothing is being requested.
-        onHealth({
-          kind: 'health',
-          component: 'audio',
-          state: 'connected',
-          timestamp: new Date().toISOString(),
-        });
-        return live.stream;
+      if (live && sameSpec(live.spec, spec)) return claim(live, onHealth);
+
+      // Someone else is already opening this exact capture. Wait for theirs
+      // rather than opening a second device and racing to own the slot.
+      if (acquiring && sameSpec(acquiring.spec, spec)) {
+        return claim(await acquiring.promise, onHealth);
       }
 
       // A different capture is parked (the operator changed source or profile
@@ -123,19 +149,36 @@ export function leaseCapture(spec: CaptureSpec): AudioSource {
       // rather than leaving a second device open.
       if (live && live.holders === 0) releaseNow();
 
-      const source = createSource(spec);
-      const stream = await source.acquire(onHealth);
-      live = { spec, source, stream, holders: 1 };
-      held = true;
-      return stream;
+      const pending = (async (): Promise<LiveCapture> => {
+        const source = createSource(spec);
+        const stream = await source.acquire(onHealth);
+        const capture: LiveCapture = { spec, source, stream, holders: 0 };
+        live = capture;
+        return capture;
+      })();
+      acquiring = { spec, promise: pending };
+      try {
+        const capture = await pending;
+        // holders is incremented by claim(), never here, so an acquisition
+        // shared by several callers is counted once per caller.
+        return claim(capture, onHealth);
+      } finally {
+        if (acquiring?.promise === pending) acquiring = null;
+      }
     },
 
     release(): void {
-      if (!held) return;
-      held = false;
-      if (!live) return;
-      live.holders = Math.max(0, live.holders - 1);
-      if (live.holders > 0) return;
+      const capture = heldCapture;
+      if (!capture) return;
+      heldCapture = null;
+      capture.holders = Math.max(0, capture.holders - 1);
+      if (capture.holders > 0) return;
+      // Superseded by a newer capture: this one is nobody's now, so stop it
+      // outright — parking only makes sense for the capture still in the slot.
+      if (live !== capture) {
+        capture.source.release();
+        return;
+      }
       if (!handoffArmed) {
         releaseNow();
         return;
@@ -155,5 +198,6 @@ export function leaseCapture(spec: CaptureSpec): AudioSource {
 export function __resetCaptureLeaseForTests(): void {
   cancelHandoffTimer();
   handoffArmed = false;
+  acquiring = null;
   live = null;
 }

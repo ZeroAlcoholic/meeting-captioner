@@ -162,4 +162,40 @@ describe('caption persistence opt-in controller', () => {
       idbSave.mock.invocationCallOrder.at(-1)!,
     );
   });
+
+  it('a write still waiting for idle time cannot resurrect a cleared transcript', async () => {
+    // The routine local write is deferred to idle. If Clear lands in that
+    // window, the queued callback would run afterwards and put the deleted
+    // meeting straight back — so it survives the next reload. That is a broken
+    // privacy promise, not a stale cache.
+    // Hold the idle callbacks by hand. Fake timers alone cannot express this:
+    // the debounce and the idle write are both timers, and advancing past one
+    // runs the other, closing the very window the bug lives in.
+    const idleQueue: Array<() => void> = [];
+    vi.stubGlobal('requestIdleCallback', (cb: () => void) => void idleQueue.push(cb));
+    vi.useFakeTimers();
+
+    const storage = memoryStorage();
+    const controller = createCaptionPersistenceController({
+      enabled: true,
+      storage,
+      indexedDbAvailable: false,
+    });
+    controllers.push(controller);
+
+    controller.save(state('secret'));
+    // Fire the debounce so a write is queued for idle — and stop there.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(idleQueue).toHaveLength(1);
+
+    await controller.clear();
+    expect(storage.getItem('meeting-audio:captions:v4')).toBeNull();
+
+    // The queued write now runs, exactly as it would after the user cleared.
+    for (const run of idleQueue) run();
+    expect(storage.getItem('meeting-audio:captions:v4')).toBeNull();
+
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
 });

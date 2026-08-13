@@ -115,7 +115,11 @@ export function AutoSwitchNotice({ fromLabel, toLabel, onDismiss }: AutoSwitchNo
         <strong>
           {fromLabel} 中斷，已自動改用 {toLabel} 繼續
         </strong>
-        <span>字幕記錄完整保留；{fromLabel} 仍在背景重試</span>
+        {/* It used to say the failed backend was still retrying in the
+            background. It is not: the handoff stops it, which cancels its retry
+            loop. Switching back is a manual choice, so the notice says that
+            instead of describing recovery that will not happen. */}
+        <span>字幕記錄完整保留；{fromLabel} 已停止，可於設定中手動切回</span>
       </div>
       <button
         type="button"
