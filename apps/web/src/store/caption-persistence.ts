@@ -166,6 +166,23 @@ export function mergeSnapshots(
 
 let persistWriteWarned = false;
 
+/**
+ * Run `fn` when the browser is not busy, falling back to a macrotask where
+ * requestIdleCallback is missing (Safari, and jsdom under test). Deliberately a
+ * local copy rather than a shared utility — it is a six-line browser-API shim,
+ * and a utils layer that exists to hold two of these earns nothing. The twin
+ * lives in providers/latency-monitor.ts.
+ */
+function whenIdle(fn: () => void): void {
+  const ric = (globalThis as { requestIdleCallback?: (cb: () => void) => void })
+    .requestIdleCallback;
+  if (typeof ric === 'function') {
+    ric(fn);
+    return;
+  }
+  setTimeout(fn, 0);
+}
+
 function writeSnapshot(storage: Storage, key: string, payload: PersistedState): void {
   try {
     storage.setItem(key, JSON.stringify(payload));
@@ -294,16 +311,58 @@ export function createCaptionPersistenceController(
     return initialLoad;
   };
 
+  // A local-storage write waiting for idle time. Only the newest snapshot is
+  // worth writing, so a later one simply replaces it.
+  let pendingLocalWrite: PersistedState | null = null;
+  let localWriteScheduled = false;
+
+  const scheduleLocalWrite = (payload: PersistedState): void => {
+    pendingLocalWrite = payload;
+    if (localWriteScheduled) return;
+    localWriteScheduled = true;
+    whenIdle(() => {
+      localWriteScheduled = false;
+      const payloadToWrite = pendingLocalWrite;
+      pendingLocalWrite = null;
+      if (!payloadToWrite || !enabled || disposed || !storage || !key) return;
+      writeSnapshot(storage, key, payloadToWrite);
+    });
+  };
+
+  /**
+   * The durable write. Stays SYNCHRONOUS on purpose: its whole reason to exist
+   * is to beat a tab close, and deferring it would defeat that exactly when it
+   * matters. Any deferred write is dropped first — this snapshot is newer and
+   * includes the live line, so letting the older one land afterwards would
+   * overwrite the final transcript with a staler copy.
+   */
   const flush = (snapshot: CaptionState): void => {
     if (!enabled || disposed || !storage || !key) return;
+    pendingLocalWrite = null;
     const full = buildPersistPayload(snapshot, true);
     writeSnapshot(storage, key, tailPayload(full, LS_TAIL_SEGMENTS));
   };
 
-  const persist = (snapshot: CaptionState, forceIdb: boolean): Promise<void> => {
+  /**
+   * The routine write, debounced during a meeting. localStorage writes are
+   * synchronous and block the main thread, and this one runs while someone is
+   * talking, so the write itself goes to idle time. The IndexedDB half was
+   * already async.
+   */
+  const persist = (
+    snapshot: CaptionState,
+    forceIdb: boolean,
+    localWrite: 'idle' | 'now' = 'idle',
+  ): Promise<void> => {
     if (!enabled || disposed || !storage || !key) return idbChain;
     const full = buildPersistPayload(snapshot, false);
-    writeSnapshot(storage, key, tailPayload(full, LS_TAIL_SEGMENTS));
+    const payload = tailPayload(full, LS_TAIL_SEGMENTS);
+    if (localWrite === 'now') {
+      pendingLocalWrite = null;
+      writeSnapshot(storage, key, payload);
+    } else {
+      scheduleLocalWrite(payload);
+    }
     return queueSave(full, forceIdb);
   };
 
@@ -361,7 +420,10 @@ export function createCaptionPersistenceController(
     generation += 1;
     enabled = true;
     initialLoad = null;
-    await persist(snapshot, true);
+    // Opting in writes immediately, not at the next idle moment. The user just
+    // asked for their transcript to be kept; a crash in the seconds after that
+    // must not be the thing that proves the setting did nothing.
+    await persist(snapshot, true, 'now');
     return null;
   };
 

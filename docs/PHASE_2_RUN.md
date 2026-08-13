@@ -100,8 +100,8 @@ C1 延遲文案，依 S2 產出的實測數字改寫。跑完整套驗收，寫�
 | 2   | A4 Gemini Stop 收尾       | S1  | completed | 2-A4   | 修前紅／修後綠（web 297 綠、keepalive 14 綠）                                                                  |
 | 3   | A2 Standby 熱備           | S1  | completed | 3-A2   | 自動接手 **2020 ms**、擷取只開一次、逐字稿保留（web 305 綠）；A1 的 e2e 併入本項並補上 A2 一條，e2e 維持 32 條 |
 | 4   | A3 OpenAI 故障續期        | S1  | completed | 4-A3   | 30031 → **1028 ms**；**數字① 達成**（web 305 綠、e2e 32 綠）                                                   |
-| 5   | B1 latency-monitor 持久化 | S1  | pending   | —      | —                                                                                                              |
-| 5   | B2 保存寫入非同步         | S1  | pending   | —      | —                                                                                                              |
+| 5   | B1 latency-monitor 持久化 | S1  | completed | 5-B1   | 寫出移到 idle，取樣語意未動（web 305 綠、e2e 32 綠）                                                           |
+| 5   | B2 保存寫入非同步         | S1  | completed | 5-B2   | 例行寫入移到 idle；`flush` 維持同步（web 305 綠、e2e 32 綠）。**數字② 仍待 S2 人工錄製**                       |
 | 6   | D1 chunk 註解修真         | S1  | pending   | —      | —                                                                                                              |
 | 6   | C2 單 provider 啟動       | S1  | pending   | —      | —                                                                                                              |
 | 6   | C3 音訊失敗狀態           | S1  | pending   | —      | —                                                                                                              |

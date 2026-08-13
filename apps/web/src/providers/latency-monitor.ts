@@ -54,6 +54,21 @@ interface PersistedSessionSummary {
   byProvider: ProviderSummary[];
 }
 
+/**
+ * Run `fn` when the browser is not busy, falling back to a macrotask where
+ * requestIdleCallback is missing (Safari, and jsdom under test). Either way the
+ * point is the same: get off the caption path first.
+ */
+function whenIdle(fn: () => void): void {
+  const ric = (globalThis as { requestIdleCallback?: (cb: () => void) => void })
+    .requestIdleCallback;
+  if (typeof ric === 'function') {
+    ric(fn);
+    return;
+  }
+  setTimeout(fn, 0);
+}
+
 function percentile(sorted: number[], p: number): number | null {
   if (sorted.length === 0) return null;
   const idx = Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length));
@@ -67,6 +82,9 @@ export class LatencyMonitor {
   private readonly pending = new Map<string, SegmentTiming>();
   private samples: LatencySample[] = [];
   private lastPersistMs = 0;
+  // A write is already waiting for idle time. Without this a second throttle
+  // window could open before the first write ran, queueing duplicates.
+  private flushQueued = false;
 
   constructor(private readonly now: () => number = () => Date.now()) {}
 
@@ -200,22 +218,42 @@ export class LatencyMonitor {
     }
   }
 
+  /**
+   * Decide whether it is time to write, and if so hand the writing to idle time.
+   *
+   * The deciding stays here on the event path — it is a subtraction, and the
+   * throttle window has to be stamped synchronously or a burst of captions
+   * would queue several writes before the first one ran. The WORK does not: a
+   * JSON.stringify of the rolling history plus a synchronous localStorage.write
+   * plus a console line, every 15 s, landed in the middle of delivering a
+   * caption. localStorage writes block the main thread, and the caption path is
+   * hard realtime — measurement instrumentation must never be the thing that
+   * makes captions stutter.
+   *
+   * Sampling is untouched: what gets recorded and when it is measured are
+   * exactly as before, and this is load-bearing — the monitor is the only
+   * instrument behind the latency numbers the UI is allowed to quote.
+   */
   private maybePersist(nowMs: number): void {
     if (nowMs - this.lastPersistMs < PERSIST_THROTTLE_MS) return;
     this.lastPersistMs = nowMs;
-    this.persistNow();
-    // Surface a one-line summary into the console log so a field session leaves
-    // a forensic trail even without opening the export.
-    const s = this.summary();
-    console.info(
-      '[latency]',
-      s
-        .map(
-          (p) =>
-            `${p.provider}: ttfc=${p.ttfcMs ?? '–'}ms lagP50=${p.lagP50 ?? '–'}ms lagP95=${p.lagP95 ?? '–'}ms n=${p.samples}`,
-        )
-        .join(' | '),
-    );
+    if (this.flushQueued) return;
+    this.flushQueued = true;
+    whenIdle(() => {
+      this.flushQueued = false;
+      this.persistNow();
+      // Surface a one-line summary into the console log so a field session
+      // leaves a forensic trail even without opening the export.
+      console.info(
+        '[latency]',
+        this.summary()
+          .map(
+            (p) =>
+              `${p.provider}: ttfc=${p.ttfcMs ?? '–'}ms lagP50=${p.lagP50 ?? '–'}ms lagP95=${p.lagP95 ?? '–'}ms n=${p.samples}`,
+          )
+          .join(' | '),
+      );
+    });
   }
 
   /** Test hook. */
@@ -226,6 +264,7 @@ export class LatencyMonitor {
     this.pending.clear();
     this.samples = [];
     this.lastPersistMs = 0;
+    this.flushQueued = false;
   }
 }
 
