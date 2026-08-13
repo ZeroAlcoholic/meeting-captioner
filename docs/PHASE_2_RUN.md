@@ -96,23 +96,24 @@ C1 延遲文案 ＋ 全套驗收 ＋ 結案報告。已不依賴 S2。
 「commit」欄填 commit trailer 的 `<序>-<ID>`，不填 sha——sha 在寫這一行的當下還不存在，
 事後補填反而容易漏。用 `git log --grep='Run: P2-ONLINE / 0-E1'` 即可定位到該 commit。
 
-| 序  | 任務                      | 段  | 狀態                                       | commit | 證據                                                                                                           |
-| --- | ------------------------- | --- | ------------------------------------------ | ------ | -------------------------------------------------------------------------------------------------------------- |
-| 0   | E1 上游型號實查           | S1  | completed                                  | 0-E1   | `docs/MODEL_RECENCY_2026-08-12.md`                                                                             |
-| 0   | E2 pin 裁決               | S1  | completed                                  | 0-E2   | 同上（E2 裁決節）；G1 未觸發                                                                                   |
-| 1   | 數字① baseline 量測       | S1  | completed                                  | 1-BASE | `docs/FAILOVER_BASELINE_2026-08-12.md`（A1 31162 ms／A3 30207 ms）                                             |
-| 2   | A1 Gemini 故障訊號提前    | S1  | completed                                  | 2-A1   | 31055 → **2014 ms**（同一把 DOM 探針；web 296 綠、e2e 32 綠）                                                  |
-| 2   | A4 Gemini Stop 收尾       | S1  | completed                                  | 2-A4   | 修前紅／修後綠（web 297 綠、keepalive 14 綠）                                                                  |
-| 3   | A2 Standby 熱備           | S1  | completed                                  | 3-A2   | 自動接手 **2020 ms**、擷取只開一次、逐字稿保留（web 305 綠）；A1 的 e2e 併入本項並補上 A2 一條，e2e 維持 32 條 |
-| 4   | A3 OpenAI 故障續期        | S1  | completed                                  | 4-A3   | 30031 → **1028 ms**；**數字① 達成**（web 305 綠、e2e 32 綠）                                                   |
-| 5   | B1 latency-monitor 持久化 | S1  | completed                                  | 5-B1   | 寫出移到 idle，取樣語意未動。**修前修後皆 0 個長任務——見下方「B 區前提不成立」**                               |
-| 5   | B2 保存寫入非同步         | S1  | completed                                  | 5-B2   | 例行寫入移到 idle；`flush` 維持同步。同上                                                                      |
-| 6   | D1 chunk 註解修真         | S1  | completed                                  | 6-D1   | 註解改中立敘述並註明 7/28 反向觀測                                                                             |
-| 6   | C2 單 provider 啟動       | S1  | completed                                  | 6-C2   | Gemini-only 子行程實測 `ok:true`、`/session/info` 只列 gemini；online 65→68 綠                                 |
-| 6   | C3 音訊失敗狀態           | S1  | completed                                  | 6-C3   | 修前紅／修後綠（`degraded`→`failed`、`microphone`→真實來源）；web 305→307 綠                                   |
-| 7   | D2 chunk screening        | S2  | deferred（需真人講話＋真配額；非結案條件） | —      | 待手測；合法終態含「未分出勝負，維持現值」                                                                     |
-| 8   | C1 延遲文案               | S3  | completed                                  | 8-C1   | 移除無實測背書的「落後語音 2–3 秒」；UI 現在不含任何延遲數字                                                   |
-| —   | 數字② 量測                | S1  | completed                                  | 8-N2   | 0 個 >50 ms 長任務（2000 段逐字稿、保存開啟、90 s 驅動；**含儀器控制組**）                                     |
+| 序  | 任務                      | 段   | 狀態                                       | commit | 證據                                                                                                           |
+| --- | ------------------------- | ---- | ------------------------------------------ | ------ | -------------------------------------------------------------------------------------------------------------- |
+| 0   | E1 上游型號實查           | S1   | completed                                  | 0-E1   | `docs/MODEL_RECENCY_2026-08-12.md`                                                                             |
+| 0   | E2 pin 裁決               | S1   | completed                                  | 0-E2   | 同上（E2 裁決節）；G1 未觸發                                                                                   |
+| 1   | 數字① baseline 量測       | S1   | completed                                  | 1-BASE | `docs/FAILOVER_BASELINE_2026-08-12.md`（A1 31162 ms／A3 30207 ms）                                             |
+| 2   | A1 Gemini 故障訊號提前    | S1   | completed                                  | 2-A1   | 31055 → **2014 ms**（同一把 DOM 探針；web 296 綠、e2e 32 綠）                                                  |
+| 2   | A4 Gemini Stop 收尾       | S1   | completed                                  | 2-A4   | 修前紅／修後綠（web 297 綠、keepalive 14 綠）                                                                  |
+| 3   | A2 Standby 熱備           | S1   | completed                                  | 3-A2   | 自動接手 **2020 ms**、擷取只開一次、逐字稿保留（web 305 綠）；A1 的 e2e 併入本項並補上 A2 一條，e2e 維持 32 條 |
+| 4   | A3 OpenAI 故障續期        | S1   | completed                                  | 4-A3   | 30031 → **1028 ms**；**數字① 達成**（web 305 綠、e2e 32 綠）                                                   |
+| 5   | B1 latency-monitor 持久化 | S1   | completed                                  | 5-B1   | 寫出移到 idle，取樣語意未動。**修前修後皆 0 個長任務——見下方「B 區前提不成立」**                               |
+| 5   | B2 保存寫入非同步         | S1   | completed                                  | 5-B2   | 例行寫入移到 idle；`flush` 維持同步。同上                                                                      |
+| 6   | D1 chunk 註解修真         | S1   | completed                                  | 6-D1   | 註解改中立敘述並註明 7/28 反向觀測                                                                             |
+| 6   | C2 單 provider 啟動       | S1   | completed                                  | 6-C2   | Gemini-only 子行程實測 `ok:true`、`/session/info` 只列 gemini；online 65→68 綠                                 |
+| 6   | C3 音訊失敗狀態           | S1   | completed                                  | 6-C3   | 修前紅／修後綠（`degraded`→`failed`、`microphone`→真實來源）；web 305→307 綠                                   |
+| 7   | D2 chunk screening        | S2   | deferred（需真人講話＋真配額；非結案條件） | —      | 待手測；合法終態含「未分出勝負，維持現值」                                                                     |
+| 8   | C1 延遲文案               | S3   | completed                                  | 8-C1   | 移除無實測背書的「落後語音 2–3 秒」；UI 現在不含任何延遲數字                                                   |
+| —   | 數字② 量測                | S1   | completed                                  | 8-N2   | 0 個 >50 ms 長任務（2000 段逐字稿、保存開啟、90 s 驅動；**含儀器控制組**）                                     |
+| 後  | Error boundary            | 後補 | completed                                  | 9-EB   | 修前 `body` 全空（白畫面）／修後可讀；e2e 33→34                                                                |
 
 ## 終局驗收（S3 之後跑一次）
 

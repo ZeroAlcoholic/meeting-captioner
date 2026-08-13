@@ -15,6 +15,7 @@ import {
   AutoSwitchNotice,
   type LauncherOption,
 } from './components/SessionLauncher.js';
+import { ErrorBoundary } from './components/ErrorBoundary.js';
 import { computeFailover } from './providers/failover.js';
 import { fieldTestRecorder } from './providers/field-test-recorder.js';
 import { prewarmCapture } from './providers/audio-engine.js';
@@ -903,7 +904,16 @@ export function App() {
         />
       )}
 
-      {showLauncher ? <SessionLauncher options={launcherOptions} /> : <CaptionBoard />}
+      {/* Inner boundary: a bug in caption rendering must not take the controls,
+          the health row and the export button down with it. The audio and the
+          transport keep running underneath, so a reload resumes the meeting. */}
+      <ErrorBoundary
+        testId="caption-error-boundary"
+        title="字幕畫面發生錯誤"
+        advice="逐字稿仍在記錄中。可先用上方「匯出」保存，再重新載入頁面恢復畫面。"
+      >
+        {showLauncher ? <SessionLauncher options={launcherOptions} /> : <CaptionBoard />}
+      </ErrorBoundary>
     </main>
   );
 }
