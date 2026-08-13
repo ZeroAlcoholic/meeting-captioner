@@ -543,7 +543,7 @@ describe('OpenAIRealtimeProvider', () => {
     expect(transportFails).toHaveLength(0);
   });
 
-  it('renewal failure schedules persistent retry backoff (30s → 1m → 3m → 5m → 10m cap)', async () => {
+  it('renewal failure schedules persistent retry backoff (1s → 3s → 8s → 20s → 1m → 3m → 5m → 10m cap)', async () => {
     // Long-meeting robustness: the persistent backoff must keep climbing
     // 30s → 1m → 3m → 5m → 10m → 10m (cap) on each consecutive failure,
     // AND the renewalRetryTimer must be set every time so cleanup() can
@@ -587,41 +587,34 @@ describe('OpenAIRealtimeProvider', () => {
       return null;
     };
 
-    // 1) Trigger first renewal at the recommended interval (1s).
-    await vi.advanceTimersByTimeAsync(1000);
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(lastRetrySec()).toBe(30);
+    const settle = async (ms: number): Promise<void> => {
+      await vi.advanceTimersByTimeAsync(ms);
+      await Promise.resolve();
+      await Promise.resolve();
+    };
 
-    // 2) Advance 30 s → next failure schedules 1 min.
-    await vi.advanceTimersByTimeAsync(30 * 1000);
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(lastRetrySec()).toBe(60);
+    // Trigger the first renewal at the recommended interval (1s). Each rung is
+    // then walked exactly, so a change to the ladder has to be deliberate
+    // rather than something a looser assertion would absorb silently.
+    await settle(1000);
+    expect(lastRetrySec()).toBe(1);
 
-    // 3) Advance 1 min → 3 min.
-    await vi.advanceTimersByTimeAsync(60 * 1000);
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(lastRetrySec()).toBe(180);
-
-    // 4) Advance 3 min → 5 min.
-    await vi.advanceTimersByTimeAsync(3 * 60 * 1000);
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(lastRetrySec()).toBe(300);
-
-    // 5) Advance 5 min → 10 min (cap).
-    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(lastRetrySec()).toBe(600);
-
-    // 6) Cap holds.
-    await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(lastRetrySec()).toBe(600);
+    // The first rung is the outage length for a transient failure, so it is
+    // short. The tail climbs steeply enough that a hard outage is not hammered.
+    for (const [advanceMs, nextRungSec] of [
+      [1000, 3],
+      [3000, 8],
+      [8000, 20],
+      [20 * 1000, 60],
+      [60 * 1000, 180],
+      [3 * 60 * 1000, 300],
+      [5 * 60 * 1000, 600],
+      // Cap holds.
+      [10 * 60 * 1000, 600],
+    ] as const) {
+      await settle(advanceMs);
+      expect(lastRetrySec()).toBe(nextRungSec);
+    }
 
     provider.stop();
   });
@@ -967,8 +960,12 @@ describe('OpenAIRealtimeProvider', () => {
     );
     expect(degraded).toBeDefined();
     expect(degraded?.message).toMatch(/no DC events while audio active/);
-    // Renewal fetch must have been attempted (3rd fetch = renewal /session call).
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    // Renewal must have been attempted — the 3rd fetch is the renewal /session
+    // call. How MANY retries land inside this 35 s window is a property of the
+    // retry ladder, which the backoff test above pins rung by rung; asserting
+    // an exact count here would make this test fail whenever that schedule
+    // changes, for reasons that have nothing to do with wedge detection.
+    expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(3);
 
     provider.stop();
   });

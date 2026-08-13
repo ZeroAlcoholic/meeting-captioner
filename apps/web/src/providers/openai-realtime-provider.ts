@@ -38,14 +38,23 @@ const PEAK_DECAY_DB_PER_TICK = 0.1;
 const DEFAULT_SESSION_RENEW_MS = 25 * 60 * 1000;
 // Bounded ICE-restart strategy: 3 attempts, 3 s → 6 s → 12 s.
 const ICE_RESTART_DELAYS_MS = [3000, 6000, 12000];
-// Persistent renewal-retry backoff: 30s → 1m → 3m → 5m → 10m cap forever.
-// Previous schedule started at 5 min which is unacceptable for live meeting
-// service — a transient OpenAI hiccup would leave captions dark for 5
-// minutes before the first heal attempt. Starting at 30 s recovers
-// transient failures quickly while the longer tail still backs off if
-// the failure is persistent (rate limit, hard outage).
+// Persistent renewal-retry backoff: 1s → 3s → 8s → 20s → 1m → 3m → 5m → 10m
+// cap forever.
+//
+// The first rung is the one that matters. Most renewal failures are a blip —
+// upstream is fine again seconds later — and until we retry, captions are dark.
+// So the first rung IS the outage length for the common case. It has come down
+// twice: 5 min, then 30 s, and 30 s was still thirty seconds of a frozen board
+// caused entirely by our own schedule rather than by anything upstream
+// (measured: 30031 ms, see docs/FAILOVER_BASELINE_2026-08-12.md).
+//
+// The tail still climbs steeply, so a genuine outage — rate limit, hard down —
+// is not hammered: five attempts in the first half-minute, then minutes apart.
 const RENEWAL_RETRY_BACKOFF_MS = [
-  30 * 1000,
+  1000,
+  3000,
+  8000,
+  20 * 1000,
   60 * 1000,
   3 * 60 * 1000,
   5 * 60 * 1000,
