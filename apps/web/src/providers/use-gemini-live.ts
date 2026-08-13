@@ -22,6 +22,12 @@ export interface UseGeminiLive {
   available: boolean;
   start: () => Promise<boolean>;
   stop: () => void;
+  /**
+   * Mint a token while this backend is the STANDBY, so a failover onto it does
+   * not begin with a network round-trip. The caller drives the schedule: only it
+   * knows what is running, and warm tokens expire.
+   */
+  prewarmStandby: () => void;
 }
 
 export function useGeminiLive(): UseGeminiLive {
@@ -110,12 +116,14 @@ export function useGeminiLive(): UseGeminiLive {
     // irrelevant there — the signal is pre-mixed), 'mic' uses getUserMedia
     // with the selected acoustic profile. Without this branch the 🔊 chip
     // would claim system capture while Gemini silently recorded the mic.
-    const effectiveMicDistance: 'meeting' | 'close' | 'far' | 'off' =
-      audioSource === 'system' ? 'off' : micDistance;
+    const isSystemAudio = audioSource === 'system';
+    const effectiveMicDistance: 'meeting' | 'close' | 'far' | 'off' = isSystemAudio
+      ? 'off'
+      : micDistance;
     // Leased, not constructed: a failover handoff reuses the capture that is
     // already running instead of re-opening the device mid-meeting.
     const audio: AudioSource = leaseCapture({
-      kind: audioSource === 'system' ? 'system' : 'mic',
+      kind: isSystemAudio ? 'system' : 'mic',
       micDistance: effectiveMicDistance,
     });
     const provider = new GeminiLiveProvider(
@@ -124,6 +132,10 @@ export function useGeminiLive(): UseGeminiLive {
       audio,
       langPair,
       effectiveMicDistance,
+      // Stamp what was really captured. Events used to claim 'microphone' even
+      // when the audio came from a shared screen, which quietly made the 🔊
+      // system-capture chip and the event log disagree about the same session.
+      isSystemAudio ? 'browser_system' : 'microphone',
     );
     providerRef.current = provider;
     setStatus('running');

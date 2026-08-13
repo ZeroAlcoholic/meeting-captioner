@@ -85,13 +85,29 @@ if (-not (Test-Command 'uv')) {
 
 # --- Environment variables (strict system-env-only policy) ---
 Write-Step 'Checking environment variables'
+# Online mode needs ONE of these, not both: OpenAI and Gemini are alternative
+# backends. Reporting a missing OpenAI key as a failure in a deliberate
+# Gemini-only setup sends people looking for a problem that is not there.
 $apiKey = [Environment]::GetEnvironmentVariable('OPENAI_API_KEY', 'User')
 if (-not $apiKey) { $apiKey = $env:OPENAI_API_KEY }
+$geminiKey = [Environment]::GetEnvironmentVariable('GEMINI_API_KEY', 'User')
+if (-not $geminiKey) { $geminiKey = [Environment]::GetEnvironmentVariable('GEMINI_API_KEY', 'Machine') }
+if (-not $geminiKey) { $geminiKey = $env:GEMINI_API_KEY }
+
 if ($apiKey) {
-  Write-Ok "OPENAI_API_KEY is set ($($apiKey.Length) chars) - required for Online mode"
+  Write-Ok "OPENAI_API_KEY is set ($($apiKey.Length) chars) - OpenAI Realtime backend available"
 } else {
-  Write-Warn2 'OPENAI_API_KEY not set. Required for Online mode. To persist:'
+  Write-Warn2 'OPENAI_API_KEY not set - OpenAI Realtime backend unavailable. To persist:'
   Write-Warn2 '  setx OPENAI_API_KEY "sk-proj-..."   (open a NEW terminal afterwards)'
+}
+if ($geminiKey) {
+  Write-Ok "GEMINI_API_KEY is set ($($geminiKey.Length) chars) - Gemini Live Translate backend available"
+} else {
+  Write-Warn2 'GEMINI_API_KEY not set - Gemini Live Translate backend unavailable. To persist:'
+  Write-Warn2 '  setx GEMINI_API_KEY "..."           (open a NEW terminal afterwards)'
+}
+if (-not $apiKey -and -not $geminiKey) {
+  Write-Warn2 'Neither key is set: Online mode cannot start at all.'
   Write-Warn2 'See README "Environment Variables" for the full list.'
 }
 

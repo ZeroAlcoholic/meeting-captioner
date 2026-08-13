@@ -1,6 +1,7 @@
 import { Converter } from 'opencc-js';
 import type {
   AudioLevelEvent,
+  AudioSourceKind,
   HealthComponent,
   HealthEvent,
   HealthState,
@@ -241,6 +242,13 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
      * path is internally consistent).
      */
     private readonly micDistance: 'meeting' | 'close' | 'far' | 'off' = 'meeting',
+    /**
+     * Stamped onto every event so downstream consumers know what was actually
+     * captured. It has to be passed in: the provider cannot infer it, and
+     * guessing from micDistance would be wrong the moment someone picks the
+     * 'off' profile for an actual microphone.
+     */
+    private readonly sourceKind: AudioSourceKind = 'microphone',
   ) {
     this.mic = mic ?? new MicrophoneAudioProvider();
   }
@@ -815,7 +823,7 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
           kind: 'transcript',
           provider: 'openai-realtime',
           mode: 'online_full',
-          source: 'microphone',
+          source: this.sourceKind,
           segmentId: this.currentSegmentId,
           status: 'partial',
           text: transcriptText,
@@ -860,7 +868,7 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
           kind: 'transcript',
           provider: 'openai-realtime',
           mode: 'online_full',
-          source: 'microphone',
+          source: this.sourceKind,
           segmentId: this.currentSegmentId,
           status: 'partial',
           text: srcSoFar,
@@ -950,7 +958,7 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       kind: 'transcript',
       provider: 'openai-realtime',
       mode: 'online_full',
-      source: 'microphone',
+      source: this.sourceKind,
       segmentId: this.currentSegmentId,
       status: 'final',
       text: transcriptText,
@@ -1068,7 +1076,7 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
 
       const ev: AudioLevelEvent = {
         kind: 'audio_level',
-        source: 'microphone',
+        source: this.sourceKind,
         rmsDb,
         peakDb,
         timestamp: iso(),

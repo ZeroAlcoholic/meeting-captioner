@@ -1,5 +1,6 @@
 import type {
   AudioLevelEvent,
+  AudioSourceKind,
   HealthEvent,
   TranscriptEvent,
   TranslationEvent,
@@ -14,17 +15,22 @@ import { MicrophoneAudioProvider } from './microphone-audio-provider.js';
 import { getCaptureContext, ensureCaptureWorklet, resumeCaptureContext } from './audio-engine.js';
 import { WarmTokenCache } from './token-prewarm.js';
 
-// AudioWorklet PCM capture (shared with the offline path). We request a smaller
-// chunk than the offline default (4096 = 256 ms): the chunk size is pure
-// front-of-pipe latency — audio waits to fill the buffer before it ever leaves
-// the browser — so it sits directly on the realtime translation path, ahead of
-// the network and the model. 512 samples @ 16 kHz = 32 ms: half the previous
-// 64 ms framing, shaving another ~32 ms off every Gemini caption's felt latency.
-// Gemini accumulates audio server-side, so smaller frames don't hurt ASR/MT
-// quality; the only cost is ~31 (vs ~16) tiny WS messages/sec — negligible.
-// This is the last meaningful CLIENT-side latency lever; the rest of the
-// "聽到→上字幕" delay is network RTT to Google + the translate model's own
-// chunking, both measurable via window.__latency but not reducible from here.
+// AudioWorklet PCM capture (shared with the offline path), at a smaller chunk
+// than the offline default of 4096 (256 ms). Chunk size is front-of-pipe
+// latency in principle — audio waits to fill the buffer before it leaves the
+// browser — which is the reasoning that drove this down to 512 (32 ms).
+//
+// That reasoning has not survived measurement. The 2026-07-28 audit observed
+// the 32 ms configuration arriving SLOWER end to end than a 100 ms one
+// (3927 ms vs 3313 ms). One observation of an uncontrolled input is not a
+// verdict, and it is not enough to change the value on — but it is enough that
+// this comment must not go on asserting the opposite. The earlier claims that
+// smaller frames cost no ASR/MT quality, and that this is the last meaningful
+// client-side lever, were likewise never measured.
+//
+// Current standing: 512 is retained pending the screening comparison in the
+// manual session (docs/GOAL_PHASE_2.md, D2). A verdict either way needs a fixed
+// audio-replay fixture so both runs see the same input.
 const GEMINI_PCM_CHUNK_SIZE = 512; // 32 ms @ 16 kHz
 
 // Gemini Live API (Developer API) WebSocket, ephemeral-token / "Constrained"
@@ -289,6 +295,11 @@ export class GeminiLiveProvider implements CaptionProvider {
     mic?: AudioSource,
     private readonly langPair: string = 'en→zh-TW',
     private readonly micDistance: 'meeting' | 'close' | 'far' | 'off' = 'meeting',
+    // Stamped onto every event so downstream consumers know what was actually
+    // captured. It has to be passed in: the provider cannot infer it, and
+    // guessing from micDistance would be wrong the moment someone picks the
+    // 'off' profile for an actual microphone.
+    private readonly sourceKind: AudioSourceKind = 'microphone',
   ) {
     this.mic = mic ?? new MicrophoneAudioProvider(micDistance);
     this.langs = langCodes(langPair);
@@ -682,7 +693,7 @@ export class GeminiLiveProvider implements CaptionProvider {
       kind: 'transcript',
       provider: PROVIDER,
       mode: 'online_full',
-      source: 'microphone',
+      source: this.sourceKind,
       segmentId: this.curId ?? `${this.uid}-t${this.turnSeq}`,
       status,
       text,
@@ -809,7 +820,11 @@ export class GeminiLiveProvider implements CaptionProvider {
       // startup latency). The engine owns the context; we never close it.
       const ctx = getCaptureContext();
       if (!ctx) {
-        this.emitHealth('audio', 'degraded', 'AudioContext unavailable');
+        // 'failed', not 'degraded'. Without a context no audio can EVER be
+        // sent, so the session would sit there looking connected and produce
+        // captions forever — which is the silent failure the reliability rules
+        // exist to forbid. Degraded means worse; this is not worse, it is off.
+        this.emitHealth('audio', 'failed', 'AudioContext unavailable — cannot capture audio');
         return;
       }
       this.audioCtx = ctx;
@@ -865,8 +880,12 @@ export class GeminiLiveProvider implements CaptionProvider {
       source.connect(this.workletNode);
       this.workletNode.connect(ctx.destination);
       await resumeCaptureContext();
-    } catch {
-      this.emitHealth('audio', 'degraded', 'AudioWorklet unavailable');
+    } catch (err) {
+      // Same reasoning: the capture graph did not come up, so nothing will be
+      // sent. Report it as the failure it is, and say what went wrong rather
+      // than blaming the worklet for every possible cause.
+      const detail = err instanceof Error ? err.message : 'unknown error';
+      this.emitHealth('audio', 'failed', `Audio capture could not start — ${detail}`);
     }
   }
 
@@ -918,7 +937,7 @@ export class GeminiLiveProvider implements CaptionProvider {
 
       const ev: AudioLevelEvent = {
         kind: 'audio_level',
-        source: 'microphone',
+        source: this.sourceKind,
         rmsDb,
         peakDb,
         timestamp: iso(),

@@ -39,6 +39,12 @@ export interface UseOpenAIRealtime {
    * re-renders that cascaded through the caption board's shell.
    */
   getRenewalEtaMs: () => number | null;
+  /**
+   * Mint a token while this backend is the STANDBY, so a failover onto it does
+   * not begin with a network round-trip. The caller drives the schedule: only it
+   * knows what is running, and warm tokens expire.
+   */
+  prewarmStandby: () => void;
 }
 
 export function useOpenAIRealtime(): UseOpenAIRealtime {
@@ -173,12 +179,14 @@ export function useOpenAIRealtime(): UseOpenAIRealtime {
     // SettingsPanel mirrors this by greying out the mic-distance buttons
     // when audioSource === 'system', so the UI and the actual /session
     // payload stay in sync.
-    const effectiveMicDistance: 'meeting' | 'close' | 'far' | 'off' =
-      audioSource === 'system' ? 'off' : micDistance;
+    const isSystemAudio = audioSource === 'system';
+    const effectiveMicDistance: 'meeting' | 'close' | 'far' | 'off' = isSystemAudio
+      ? 'off'
+      : micDistance;
     // Leased, not constructed: a failover handoff reuses the capture that is
     // already running instead of re-opening the device mid-meeting.
     const audio: AudioSource = leaseCapture({
-      kind: audioSource === 'system' ? 'system' : 'mic',
+      kind: isSystemAudio ? 'system' : 'mic',
       micDistance: effectiveMicDistance,
     });
     const provider = new OpenAIRealtimeProvider(
@@ -188,6 +196,10 @@ export function useOpenAIRealtime(): UseOpenAIRealtime {
       audio,
       includeSourceTranscript,
       effectiveMicDistance,
+      // Stamp what was really captured. Events used to claim 'microphone' even
+      // when the audio came from a shared screen, which quietly made the 🔊
+      // system-capture chip and the event log disagree about the same session.
+      isSystemAudio ? 'browser_system' : 'microphone',
     );
     providerRef.current = provider;
     // Subscribe to internal status transitions — keeps React in sync when

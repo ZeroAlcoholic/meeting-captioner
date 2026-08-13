@@ -7,6 +7,7 @@ import type {
 } from '@meeting-audio/contracts';
 import geminiGolden from '../../../../tests/fixtures/upstream-contracts/gemini-live-translate.json' with { type: 'json' };
 import type { AudioSource } from './types.js';
+import { __resetAudioEngineForTests } from './audio-engine.js';
 import {
   GeminiLiveProvider,
   floatTo16BitPCM,
@@ -586,6 +587,50 @@ describe('GeminiLiveProvider — reconnect + wedge detection (#16)', () => {
         message: expect.stringMatching(/unsupported Gemini model/i),
       }),
     );
+  });
+
+  it('events report the capture that actually ran, not always the microphone', async () => {
+    // C3. Every event used to claim 'microphone' regardless, so a session
+    // captioning a shared screen produced a transcript log that disagreed with
+    // the 🔊 chip on the same screen. Anything reading the events back — export,
+    // field-test history — inherited the wrong answer with no way to notice.
+    const h = makeHandlers();
+    const provider = new GeminiLiveProvider(
+      'http://localhost/session/gemini',
+      h.handlers,
+      undefined,
+      'en→zh-TW',
+      'off',
+      'browser_system',
+    );
+
+    provider.handleServerObject({
+      serverContent: { inputTranscription: { text: 'Shared screen audio.' } },
+    });
+
+    expect(h.transcripts.at(-1)!.source).toBe('browser_system');
+  });
+
+  it('a capture graph that cannot start reports failed, not degraded', async () => {
+    // C3. 'degraded' means worse; this is off. With no AudioContext no audio is
+    // ever sent, so the session sat there looking connected and captioning
+    // nothing — a silent failure, which the reliability rules forbid outright.
+    vi.stubGlobal('AudioContext', undefined);
+    vi.stubGlobal('webkitAudioContext', undefined);
+    __resetAudioEngineForTests();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(tokenResponse())),
+    );
+
+    const { provider, health } = makeHarness();
+    await provider.start();
+
+    const audio = health.filter((e) => e.component === 'audio');
+    expect(audio.at(-1)!.state).toBe('failed');
+    expect(audio.at(-1)!.message).toMatch(/cannot capture audio/i);
+
+    provider.stop();
   });
 
   it('Stop signals end-of-audio and keeps the socket open long enough to land the tail', async () => {

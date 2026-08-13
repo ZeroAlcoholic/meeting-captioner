@@ -102,9 +102,9 @@ C1 延遲文案，依 S2 產出的實測數字改寫。跑完整套驗收，寫�
 | 4   | A3 OpenAI 故障續期        | S1  | completed | 4-A3   | 30031 → **1028 ms**；**數字① 達成**（web 305 綠、e2e 32 綠）                                                   |
 | 5   | B1 latency-monitor 持久化 | S1  | completed | 5-B1   | 寫出移到 idle，取樣語意未動（web 305 綠、e2e 32 綠）                                                           |
 | 5   | B2 保存寫入非同步         | S1  | completed | 5-B2   | 例行寫入移到 idle；`flush` 維持同步（web 305 綠、e2e 32 綠）。**數字② 仍待 S2 人工錄製**                       |
-| 6   | D1 chunk 註解修真         | S1  | pending   | —      | —                                                                                                              |
-| 6   | C2 單 provider 啟動       | S1  | pending   | —      | —                                                                                                              |
-| 6   | C3 音訊失敗狀態           | S1  | pending   | —      | —                                                                                                              |
+| 6   | D1 chunk 註解修真         | S1  | completed | 6-D1   | 註解改中立敘述並註明 7/28 反向觀測                                                                             |
+| 6   | C2 單 provider 啟動       | S1  | completed | 6-C2   | Gemini-only 子行程實測 `ok:true`、`/session/info` 只列 gemini；online 65→68 綠                                 |
+| 6   | C3 音訊失敗狀態           | S1  | completed | 6-C3   | 修前紅／修後綠（`degraded`→`failed`、`microphone`→真實來源）；web 305→307 綠                                   |
 | 7   | 真實會議手測（含 D2）     | S2  | pending   | —      | —                                                                                                              |
 | 8   | C1 延遲文案               | S3  | pending   | —      | —                                                                                                              |
 
@@ -120,6 +120,9 @@ pnpm test:e2e
 ```
 
 測試數只能增加。基準以序 1 當次重跑的數字為準（GOAL 內 7/30 的數字已標未重驗）。
+
+**S1 結束時實跑（2026-08-13，六條全綠）**：contracts 19／online 68／web 307／e2e 32。
+起點是 contracts 19／online 65／web 295／e2e 30。
 
 階段 2 的結案條件＝數字①（≤3 s，機器可證）＋數字②（0 個 long task，人工錄製）
 ＋ UI 無跨級宣稱，三者皆有證據落檔。缺任何一項就是 `partial`，不寫成完成。

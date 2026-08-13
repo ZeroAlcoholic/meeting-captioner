@@ -80,12 +80,17 @@ export type Config = z.infer<typeof ConfigSchema>;
 // whether the system env carries an OPENAI_API_KEY, without ever logging
 // the key value itself.
 const keyLen = config.OPENAI_API_KEY?.length ?? 0;
+const hasGeminiKey = (config.GEMINI_API_KEY?.length ?? 0) > 0;
+// A missing OpenAI key is only a problem if it leaves NO backend. Shouting
+// MISSING at a deliberate Gemini-only deployment trains people to ignore the
+// startup output, which is where a real problem would also appear.
+const openaiMissingNote = hasGeminiKey
+  ? 'not set — OpenAI backend disabled (Gemini is configured)'
+  : 'MISSING — set OPENAI_API_KEY or GEMINI_API_KEY in your user/system env, then restart';
 // eslint-disable-next-line no-console
 console.log(
   `[config] OPENAI_API_KEY: ${
-    keyLen > 0
-      ? `set in system env (${keyLen} chars)`
-      : 'MISSING — set OPENAI_API_KEY in your user/system env, then restart'
+    keyLen > 0 ? `set in system env (${keyLen} chars)` : openaiMissingNote
   }`,
 );
 const audioKeyLen = config.OPENAI_API_KEY_AUDIO?.length ?? 0;

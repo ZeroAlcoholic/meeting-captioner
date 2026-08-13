@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { config } from '../config.js';
 import { activeOpenAIKeySlot, hasAnyOpenAIKey } from '../openai-keys.js';
 
 // Version is injected at build time by esbuild's `define` so the release
@@ -33,9 +34,18 @@ export function _resetHealthForTests(): void {
 export async function registerHealthz(app: FastifyInstance): Promise<void> {
   app.get('/healthz', async () => {
     const apiKey = hasAnyOpenAIKey() ? 'configured' : 'missing';
-    // ok = the service can plausibly broker a session right now.
-    // 'unknown' is treated as ok (no calls made yet); 'degraded' is not.
-    const ok = apiKey === 'configured' && openaiReachability !== 'degraded';
+    const geminiKey = config.GEMINI_API_KEY ? 'configured' : 'missing';
+    // 'unknown' reachability counts as usable (no calls made yet); 'degraded'
+    // does not. There is no equivalent signal for Gemini: the browser talks to
+    // Google directly over its own WebSocket, so this service never observes
+    // whether that path is healthy and must not pretend to.
+    const openaiUsable = apiKey === 'configured' && openaiReachability !== 'degraded';
+    const geminiUsable = geminiKey === 'configured';
+    // ok = the service can broker SOME session right now. It used to mean "can
+    // broker an OpenAI session", which reported a perfectly good Gemini-only
+    // deployment as broken — its own health check telling the operator to fix
+    // something that was working.
+    const ok = openaiUsable || geminiUsable;
     return {
       ok,
       service: 'online',
@@ -43,9 +53,12 @@ export async function registerHealthz(app: FastifyInstance): Promise<void> {
       timestamp: new Date().toISOString(),
       components: {
         apiKey,
+        openai_usable: openaiUsable,
         openai_key_slot: activeOpenAIKeySlot(),
         openai_reachability: openaiReachability,
         openai_last_change_at: new Date(lastReachabilityChangeMs).toISOString(),
+        gemini_key: geminiKey,
+        gemini_usable: geminiUsable,
         uptime_sec: Math.round((Date.now() - STARTUP_MS) / 1000),
       },
     };
