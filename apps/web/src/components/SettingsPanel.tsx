@@ -12,12 +12,29 @@ import {
 import { useSettingsStore } from '../settings/use-settings-store.js';
 import styles from './SettingsPanel.module.css';
 
+// Neither hint quotes a latency figure.
+//
+// The Gemini hint used to say translations trail speech by about 2-3 seconds.
+// Nothing in this app has ever measured speech-to-screen: the only instrument
+// is the latency monitor, and it times ARRIVALS — transport connect to first
+// translation, segment start to its first translation — from inside the
+// browser, with no idea when anyone actually spoke. Quoting it as a
+// speech-to-caption number is a different claim than the evidence supports, and
+// this text sits where someone decides which backend to run a real meeting on.
+//
+// A figure may be printed here once a clap or lip-sync marker test has produced
+// one. Until then the hints describe what each backend IS, and the difference
+// between them stays a matter of trying both.
 const ONLINE_PROVIDER_OPTIONS: Array<{ id: OnlineProvider; label: string; hint: string }> = [
-  { id: 'openai', label: 'OpenAI', hint: 'OpenAI Realtime Translate (WebRTC). 預設。' },
+  {
+    id: 'openai',
+    label: 'OpenAI',
+    hint: 'OpenAI Realtime Translate（WebRTC）。預設。需伺服器設定 OPENAI_API_KEY。',
+  },
   {
     id: 'gemini',
     label: 'Gemini',
-    hint: 'Google Gemini 3.5 Live Translate（WebSocket）。專用即時翻譯模型，連續串流，繁體中文原生輸出；譯文約落後語音 2–3 秒（模型特性，官方無參數可調）。延遲敏感的會議建議用 OpenAI。需伺服器設定 GEMINI_API_KEY。',
+    hint: 'Google Gemini 3.5 Live Translate（WebSocket）。專用即時翻譯模型，連續串流，繁體中文原生輸出。需伺服器設定 GEMINI_API_KEY。',
   },
 ];
 
