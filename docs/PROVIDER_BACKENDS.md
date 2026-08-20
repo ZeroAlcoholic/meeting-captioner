@@ -100,3 +100,21 @@ WebRTC family → reuse ~90% of `OpenAIRealtimeProvider` parameterized by
 `{clientSecretUrl, callsUrl, model=deployment, authMode}`. Lowest-effort second
 backend. Differences: URL paths (no `/translations/`), `session.model` =
 deployment name, Entra/api-key for the token call, ~30-min rolling reconnect.
+
+## OpenAI transports: WebRTC and WebSocket
+
+The OpenAI online backend has two interchangeable transports for the same
+realtime translation session. They emit the same events, so everything above
+the transport (segmentation, health ladder, renewal, wedge detection, the
+`TranscriptEvent` / `TranslationEvent` contracts) is shared.
+
+|               | WebRTC (`/v1/realtime/**/calls`)               | WebSocket (`wss://…/v1/realtime/translations`)                                              |
+| ------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| Audio uplink  | RTP track; browser never touches samples       | shared AudioWorklet, resampled to 24 kHz PCM16 → base64 `session.input_audio_buffer.append` |
+| Loss handling | jitter buffer, concealment, congestion control | TCP retransmit (head-of-line delay under loss)                                              |
+| Auth          | ephemeral token in the SDP POST                | ephemeral token in the WebSocket subprotocol                                                |
+| Default       | yes                                            | fallback, chosen automatically                                                              |
+
+Selection is automatic: WebRTC first, WebSocket when WebRTC refuses the key
+(see `DECISIONS.md` D13 and `FAILURE_MODES.md`). There is no user-facing
+switch — the caption board shows one online OpenAI backend either way.

@@ -12,10 +12,13 @@ vi.mock('./config.js', () => ({
 }));
 
 import {
+  DEMOTION_TTL_MS,
   _resetOpenAIKeysForTests,
   activeOpenAIKeySlot,
+  demoteOpenAIKeySlot,
   fetchWithOpenAIKeyFailover,
   hasAnyOpenAIKey,
+  openAIKeyDemotion,
 } from './openai-keys.js';
 
 function resp(status: number): Response {
@@ -131,5 +134,87 @@ describe('fetchWithOpenAIKeyFailover', () => {
     expect(res.status).toBe(200);
     expect(slot).toBe('primary');
     expect(activeOpenAIKeySlot()).toBe('primary');
+  });
+});
+
+// ── Call-stage rejection (reported by the browser) ───────────────────────────
+//
+// The mint succeeds but the ephemeral token it produced is rejected at the SDP
+// exchange (measured: 401 ip_not_authorized from an org IP allowlist that
+// covers the realtime call endpoint but not the mint endpoint). Nothing in
+// this process can see that, so the browser names the slot back to us.
+
+describe('demoteOpenAIKeySlot (downstream rejection)', () => {
+  it('makes the next mint use the alternate key without touching the primary', async () => {
+    mockConfig.OPENAI_API_KEY = 'sk-primary';
+    mockConfig.OPENAI_API_KEY_AUDIO = 'sk-audio';
+    expect(activeOpenAIKeySlot()).toBe('primary');
+
+    demoteOpenAIKeySlot('primary', 'rejected at the SDP exchange');
+
+    expect(activeOpenAIKeySlot()).toBe('audio');
+    const makeRequest = vi.fn(async () => resp(200));
+    const { slot } = await fetchWithOpenAIKeyFailover(makeRequest);
+    expect(slot).toBe('audio');
+    expect(makeRequest).toHaveBeenCalledOnce();
+    expect(makeRequest).toHaveBeenCalledWith('sk-audio');
+  });
+
+  it('reports the demotion (slot + reason) for diagnostics, never key material', () => {
+    mockConfig.OPENAI_API_KEY = 'sk-primary';
+    mockConfig.OPENAI_API_KEY_AUDIO = 'sk-audio';
+    expect(openAIKeyDemotion()).toBeNull();
+
+    demoteOpenAIKeySlot('primary', 'ip_not_authorized at the SDP exchange');
+
+    const demoted = openAIKeyDemotion();
+    expect(demoted?.slot).toBe('primary');
+    expect(demoted?.reason).toContain('ip_not_authorized');
+    expect(JSON.stringify(demoted)).not.toContain('sk-');
+  });
+
+  it('is ignored when there is no alternate key to fall back to', () => {
+    mockConfig.OPENAI_API_KEY = 'sk-primary';
+    demoteOpenAIKeySlot('primary', 'rejected at the SDP exchange');
+    // One key means the honest outcome is to keep using it, not to mint nothing.
+    expect(activeOpenAIKeySlot()).toBe('primary');
+    expect(openAIKeyDemotion()).toBeNull();
+  });
+
+  it('expires after the TTL so the preferred key is tried again on a new network', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-08-20T09:00:00Z'));
+      mockConfig.OPENAI_API_KEY = 'sk-primary';
+      mockConfig.OPENAI_API_KEY_AUDIO = 'sk-audio';
+      demoteOpenAIKeySlot('primary', 'rejected at the SDP exchange');
+      expect(activeOpenAIKeySlot()).toBe('audio');
+
+      vi.advanceTimersByTime(DEMOTION_TTL_MS - 1000);
+      expect(activeOpenAIKeySlot()).toBe('audio');
+
+      vi.advanceTimersByTime(2000);
+      expect(activeOpenAIKeySlot()).toBe('primary');
+      expect(openAIKeyDemotion()).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a mint-stage failover also demotes, and the demotion also expires', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-08-20T09:00:00Z'));
+      mockConfig.OPENAI_API_KEY = 'sk-primary';
+      mockConfig.OPENAI_API_KEY_AUDIO = 'sk-audio';
+      const makeRequest = vi.fn().mockResolvedValueOnce(resp(401)).mockResolvedValueOnce(resp(200));
+      await fetchWithOpenAIKeyFailover(makeRequest);
+      expect(activeOpenAIKeySlot()).toBe('audio');
+
+      vi.advanceTimersByTime(DEMOTION_TTL_MS + 1000);
+      expect(activeOpenAIKeySlot()).toBe('primary');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -347,3 +347,87 @@ describe('POST /session — key failover (domain-restricted primary)', () => {
     expect(res.statusCode).toBe(200);
   });
 });
+
+// ── Call-stage rejection reported by the browser ─────────────────────────────
+
+describe('POST /session — rejectedSlot (downstream SDP rejection)', () => {
+  it('names the minting slot in the response so the browser can report it back', async () => {
+    stubFetchOk();
+    mockConfig.OPENAI_API_KEY = 'sk-primary';
+    mockConfig.OPENAI_API_KEY_AUDIO = 'sk-audio';
+    const app = Fastify({ logger: false });
+    await registerSession(app);
+
+    const res = await app.inject({ method: 'POST', url: '/session' });
+
+    expect(res.json<{ key_slot: string }>().key_slot).toBe('primary');
+  });
+
+  it('mints from the alternate key when the browser reports the primary was rejected', async () => {
+    // A Response body can only be read once — hand out a FRESH one per call.
+    const mockFn = vi
+      .fn()
+      .mockImplementation(async () => new Response(JSON.stringify(FAKE_SECRET), { status: 200 }));
+    vi.stubGlobal('fetch', mockFn);
+    mockConfig.OPENAI_API_KEY = 'sk-primary';
+    mockConfig.OPENAI_API_KEY_AUDIO = 'sk-audio';
+    const app = Fastify({ logger: false });
+    await registerSession(app);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/session',
+      payload: { rejectedSlot: 'primary' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json<{ key_slot: string }>().key_slot).toBe('audio');
+    const [, init] = mockFn.mock.calls[0] as [string, { headers: Record<string, string> }];
+    expect(init.headers.Authorization).toBe('Bearer sk-audio');
+
+    // The demotion is sticky for the next mint too — no repeat of the failure.
+    const next = await app.inject({ method: 'POST', url: '/session' });
+    expect(next.json<{ key_slot: string }>().key_slot).toBe('audio');
+    // …and it is visible in /session/info without leaking key material.
+    const info = await app.inject({ method: 'GET', url: '/session/info' });
+    const body = info.json<{ openaiKeySlot: string; openaiKeyDemotion: { slot: string } | null }>();
+    expect(body.openaiKeySlot).toBe('audio');
+    expect(body.openaiKeyDemotion?.slot).toBe('primary');
+    expect(JSON.stringify(body)).not.toContain('sk-');
+  });
+
+  it('still mints with the only configured key when there is no alternate', async () => {
+    const mockFn = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(FAKE_SECRET), { status: 200 }));
+    vi.stubGlobal('fetch', mockFn);
+    mockConfig.OPENAI_API_KEY = 'sk-primary';
+    const app = Fastify({ logger: false });
+    await registerSession(app);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/session',
+      payload: { rejectedSlot: 'primary' },
+    });
+
+    // Honest outcome: one key means the same key. The browser sees key_slot
+    // unchanged and surfaces the original, concrete error instead of looping.
+    expect(res.statusCode).toBe(200);
+    expect(res.json<{ key_slot: string }>().key_slot).toBe('primary');
+  });
+
+  it('rejects an unknown slot name rather than silently ignoring it', async () => {
+    mockConfig.OPENAI_API_KEY = 'sk-primary';
+    const app = Fastify({ logger: false });
+    await registerSession(app);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/session',
+      payload: { rejectedSlot: 'nonsense' },
+    });
+
+    expect(res.statusCode).toBe(400);
+  });
+});

@@ -6,7 +6,11 @@ import type {
   TranslationEvent,
 } from '@meeting-audio/contracts';
 import type { CaptionProviderHandlers } from './types.js';
-import { OpenAIRealtimeProvider } from './openai-realtime-provider.js';
+import {
+  OpenAIRealtimeProvider,
+  __resetOpenAITransportBlocksForTests,
+  __setOpenAIWsOpenerForTests,
+} from './openai-realtime-provider.js';
 
 // ── Globals mutated per test ───────────────────────────────────────────────────
 
@@ -121,6 +125,14 @@ function makeHandlers() {
 // ── Setup / Teardown ───────────────────────────────────────────────────────────
 
 beforeEach(() => {
+  // The WebSocket transport is a real network client; unit tests must never
+  // reach it. Default to "unavailable" (a NON-auth failure, so the key-failover
+  // ladder still behaves as it did before the transport existed); the
+  // transport-specific tests below install their own opener.
+  __resetOpenAITransportBlocksForTests();
+  __setOpenAIWsOpenerForTests(() =>
+    Promise.reject(new Error('WebSocket transport unavailable in this test')),
+  );
   fakeIceState = 'connected';
   fakeConnectionState = 'connected';
   fireDCMessage = () => {};
@@ -1135,6 +1147,285 @@ describe('OpenAIRealtimeProvider', () => {
     const silenceCount = healthEvents.filter((e) => e.state === 'silence_detected').length;
     expect(silenceCount).toBe(1);
 
+    provider.stop();
+  });
+});
+
+// ── SDP-exchange rejection: concrete errors + call-stage key failover ─────────
+//
+// Regression cover for the 2026-08-20 field failure. The corporate
+// service-account key minted a token happily (POST /session → 200) and the
+// browser's SDP POST came back `401 ip_not_authorized` — the org's IP
+// allowlist covers the realtime call endpoint but not the mint endpoint. The
+// bare "(401)" the provider used to throw pointed the diagnosis at the server
+// key/env, which measured healthy, so the real cause stayed hidden.
+
+describe('OpenAIRealtimeProvider — SDP rejection', () => {
+  const IP_NOT_AUTHORIZED = JSON.stringify({
+    error: {
+      message: 'Your IP is not authorized to make this request.',
+      type: 'invalid_request_error',
+      code: 'ip_not_authorized',
+      param: '',
+    },
+  });
+
+  function sessionResponse(value: string, keySlot?: 'primary' | 'audio'): Response {
+    return new Response(
+      JSON.stringify({ client_secret: { value }, ...(keySlot ? { key_slot: keySlot } : {}) }),
+      { status: 200 },
+    );
+  }
+
+  it("surfaces OpenAI's own status, error code and message instead of a bare (401)", async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(sessionResponse('tok'))
+        .mockResolvedValueOnce(new Response(IP_NOT_AUTHORIZED, { status: 401 })),
+    );
+    const { handlers, healthEvents } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+
+    await provider.start();
+
+    const err = healthEvents.find((e) => e.component === 'transport' && e.state === 'api_error');
+    expect(err?.message).toContain('401');
+    expect(err?.message).toContain('ip_not_authorized');
+    expect(err?.message).toContain('Your IP is not authorized');
+    // …plus the plain-language hint that names where the check actually is.
+    expect(err?.message).toContain('allowlist');
+  });
+
+  it('retries with the alternate server key when the rejected slot is known', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(sessionResponse('tok-primary', 'primary'))
+      .mockResolvedValueOnce(new Response(IP_NOT_AUTHORIZED, { status: 401 }))
+      .mockResolvedValueOnce(sessionResponse('tok-audio', 'audio'))
+      .mockResolvedValueOnce(new Response('mock-answer-sdp', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { handlers, healthEvents } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+
+    await provider.start();
+
+    expect(provider.status).toBe('running');
+    // The re-mint must name the slot that was rejected…
+    const retryMint = fetchMock.mock.calls[2] as [string, { body: string }];
+    expect(retryMint[0]).toBe('http://localhost:8787/session');
+    expect(JSON.parse(retryMint[1].body)).toMatchObject({ rejectedSlot: 'primary' });
+    // …and the second SDP POST must carry the NEW token.
+    const retrySdp = fetchMock.mock.calls[3] as [string, { headers: Record<string, string> }];
+    expect(retrySdp[1].headers.Authorization).toBe('Bearer tok-audio');
+    // The failover is visible, not silent.
+    expect(
+      healthEvents.some(
+        (e) => e.state === 'reconnecting' && (e.message ?? '').includes('alternate key'),
+      ),
+    ).toBe(true);
+    // The peer built for the first attempt is REUSED for the alternate-key
+    // retry — no second createOffer, no close.
+    expect(fakePCClose).not.toHaveBeenCalled();
+
+    provider.stop();
+  });
+
+  it('does not retry when the server named no key slot (single-key deployment)', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(sessionResponse('tok'))
+      .mockResolvedValueOnce(new Response(IP_NOT_AUTHORIZED, { status: 401 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { handlers, healthEvents } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+
+    await provider.start();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(provider.status).toBe('stopped');
+    expect(fakePCClose).toHaveBeenCalledTimes(1);
+    expect(healthEvents.find((e) => e.state === 'api_error')?.message).toContain(
+      'ip_not_authorized',
+    );
+  });
+
+  it('does not retry a non-auth SDP failure (500 is not a permission problem)', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(sessionResponse('tok', 'primary'))
+      .mockResolvedValueOnce(new Response('upstream boom', { status: 500 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { handlers, healthEvents } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+
+    await provider.start();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(provider.status).toBe('stopped');
+    expect(healthEvents.find((e) => e.state === 'api_error')?.message).toContain('500');
+  });
+});
+
+// ── WebSocket transport (the fix for `ip_not_authorized` on WebRTC) ──────────
+//
+// Measured 2026-08-20: the corporate key is refused at
+// POST /v1/realtime/**/calls but runs the SAME translation session happily over
+// wss://api.openai.com/v1/realtime/translations. Switching TRANSPORT keeps the
+// meeting inside the corporate organisation; switching KEY would move it into
+// the personal account that owns the alternate key.
+
+describe('OpenAIRealtimeProvider — WebSocket transport failover', () => {
+  const IP_NOT_AUTHORIZED = JSON.stringify({
+    error: {
+      message: 'Your IP is not authorized to make this request.',
+      code: 'ip_not_authorized',
+      type: 'invalid_request_error',
+    },
+  });
+
+  function sessionResponse(value: string, keySlot: 'primary' | 'audio'): Response {
+    return new Response(JSON.stringify({ client_secret: { value }, key_slot: keySlot }), {
+      status: 200,
+    });
+  }
+
+  /** Records how the transport was opened and lets the test drive its events. */
+  function installFakeWs() {
+    const opened: Array<{ token: string }> = [];
+    let handlers: Parameters<Parameters<typeof __setOpenAIWsOpenerForTests>[0] & object>[2] | null =
+      null;
+    const closed = { count: 0, detached: 0 };
+    __setOpenAIWsOpenerForTests((token, _stream, h) => {
+      opened.push({ token });
+      handlers = h;
+      return Promise.resolve({
+        isOpen: true,
+        detach: () => {
+          closed.detached += 1;
+        },
+        close: () => {
+          closed.count += 1;
+        },
+      } as unknown as Awaited<
+        ReturnType<Parameters<typeof __setOpenAIWsOpenerForTests>[0] & object>
+      >);
+    });
+    return {
+      opened,
+      closed,
+      fire: (ev: unknown) => handlers?.onEvent(ev as never),
+      drop: (r: string) => handlers?.onClosed(r),
+    };
+  }
+
+  it('switches to WebSocket with the SAME key when WebRTC is refused', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(sessionResponse('tok-primary', 'primary'))
+      .mockResolvedValueOnce(new Response(IP_NOT_AUTHORIZED, { status: 401 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const ws = installFakeWs();
+    const { handlers, healthEvents } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+
+    await provider.start();
+
+    expect(provider.status).toBe('running');
+    // Same token — no re-mint, so the session stays in the same organisation.
+    expect(ws.opened).toEqual([{ token: 'tok-primary' }]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(
+      healthEvents.some(
+        (e) => e.state === 'reconnecting' && (e.message ?? '').includes('WebSocket transport'),
+      ),
+    ).toBe(true);
+    expect(healthEvents.some((e) => e.component === 'transport' && e.state === 'connected')).toBe(
+      true,
+    );
+    // The surplus WebRTC peer is released.
+    expect(fakePCClose).toHaveBeenCalledTimes(1);
+
+    provider.stop();
+  });
+
+  it('feeds WebSocket events through the same caption pipeline as the DataChannel', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(sessionResponse('tok-primary', 'primary'))
+        .mockResolvedValueOnce(new Response(IP_NOT_AUTHORIZED, { status: 401 })),
+    );
+    const ws = installFakeWs();
+    const { handlers, translations } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+    await provider.start();
+
+    ws.fire({ type: 'session.output_transcript.delta', delta: '大家早安' });
+
+    expect(translations.at(-1)?.targetText).toContain('大家早安');
+    provider.stop();
+  });
+
+  it('skips the doomed WebRTC round trip on the NEXT start for that key', async () => {
+    // First start: pays one refusal and records the block for slot 'primary'.
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(sessionResponse('tok-primary', 'primary'))
+        .mockResolvedValueOnce(new Response(IP_NOT_AUTHORIZED, { status: 401 })),
+    );
+    installFakeWs();
+    const first = new OpenAIRealtimeProvider(
+      'http://localhost:8787/session',
+      makeHandlers().handlers,
+    );
+    await first.start();
+    first.stop();
+
+    // Second start: mint only — no SDP POST at all.
+    const secondFetch = vi.fn().mockResolvedValueOnce(sessionResponse('tok-primary-2', 'primary'));
+    vi.stubGlobal('fetch', secondFetch);
+    const ws2 = installFakeWs();
+    const second = new OpenAIRealtimeProvider(
+      'http://localhost:8787/session',
+      makeHandlers().handlers,
+    );
+    await second.start();
+
+    expect(second.status).toBe('running');
+    expect(secondFetch).toHaveBeenCalledTimes(1);
+    expect(ws2.opened).toEqual([{ token: 'tok-primary-2' }]);
+    second.stop();
+  });
+
+  it('treats a dropped WebSocket as a reconnect, not a dead session', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(sessionResponse('tok-primary', 'primary'))
+        .mockResolvedValueOnce(new Response(IP_NOT_AUTHORIZED, { status: 401 }))
+        // renewal after the drop
+        .mockResolvedValue(sessionResponse('tok-primary-renewed', 'primary')),
+    );
+    const ws = installFakeWs();
+    const { handlers, healthEvents } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+    await provider.start();
+
+    ws.drop('WebSocket closed (1006)');
+    await vi.waitFor(() => expect(ws.opened.length).toBeGreaterThan(1));
+
+    expect(provider.status).toBe('running');
+    expect(
+      healthEvents.some(
+        (e) => e.state === 'reconnecting' && (e.message ?? '').includes('WebSocket dropped'),
+      ),
+    ).toBe(true);
     provider.stop();
   });
 });

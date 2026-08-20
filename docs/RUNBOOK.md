@@ -340,6 +340,53 @@ newly added key; restart it from a fresh shell.
 
 ---
 
+## Diagnosing an OpenAI `SDP exchange failed` error
+
+The error now carries OpenAI's own status, error code, message and a hint, e.g.
+
+```
+OpenAI SDP exchange failed (401 ip_not_authorized) — Your IP is not authorized
+to make this request. — this network's egress IP is not on the OpenAI
+organisation's allowlist for the realtime call endpoint ...
+```
+
+**Which transport is live** — the 10-second diagnostic dump in DevTools names
+it (`[openai-rt diag] { transport: 'webrtc' | 'websocket', ... }`), and a
+fallback announces itself as a `reconnecting` health message ending in
+"switching to the WebSocket transport". A session on WebSocket is running the
+same OpenAI translation session with the same key; it is not a degraded mode
+and it is not the offline path.
+
+Which key is in play, and whether one has been demoted:
+
+```powershell
+curl.exe -s http://127.0.0.1:8787/session/info
+# → "openaiKeySlot":"primary" | "audio"
+#   "openaiKeyDemotion": null | { slot, reason, ageMs }
+```
+
+`openaiKeySlot: "audio"` with a demotion recorded means the primary key was
+rejected downstream and the alternate took over automatically. The demotion
+clears itself after 30 minutes (or on a server restart), so the primary is
+re-tried on the next bring-up.
+
+To reproduce the endpoint split by hand — note that a dummy `v=0` body returns
+400 for _any_ key because the SDP is parsed before authorization, so use a real
+offer captured from the browser:
+
+```powershell
+# mint (works even when the realtime call endpoint is blocked)
+curl.exe -s -X POST https://api.openai.com/v1/realtime/translations/client_secrets `
+  -H "Authorization: Bearer $env:OPENAI_API_KEY" -H "Content-Type: application/json" `
+  -d '{\"session\":{\"model\":\"gpt-realtime-translate\",\"audio\":{\"input\":{},\"output\":{\"language\":\"zh\"}}}}'
+# then POST a REAL offer SDP to .../translations/calls with the returned ek_...
+```
+
+See `docs/FAILURE_MODES.md` §"Call-stage OpenAI key rejection" for the measured
+result table.
+
+---
+
 ## Reading caption-latency numbers (background monitor)
 
 A passive monitor records caption latency for the running session (no HUD, no

@@ -1,7 +1,14 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { config } from '../config.js';
-import { fetchWithOpenAIKeyFailover, hasAnyOpenAIKey, type OpenAIKeySlot } from '../openai-keys.js';
+import {
+  activeOpenAIKeySlot,
+  demoteOpenAIKeySlot,
+  fetchWithOpenAIKeyFailover,
+  hasAnyOpenAIKey,
+  openAIKeyDemotion,
+  type OpenAIKeySlot,
+} from '../openai-keys.js';
 import { recordOpenAIReachability } from './healthz.js';
 
 const TRANSLATION_CLIENT_SECRETS_URL =
@@ -39,6 +46,17 @@ const SessionBodySchema = z
      * client-side so the audio path is internally consistent.
      */
     micDistance: z.enum(['meeting', 'close', 'far', 'off']).optional(),
+    /**
+     * Set by the browser when an ephemeral token minted from THIS slot was
+     * rejected downstream — i.e. the mint returned 200 but the SDP exchange
+     * against /v1/realtime/translations/calls came back 401/403 (measured
+     * here as `ip_not_authorized`: the org's IP allowlist covers the realtime
+     * media endpoint but not the mint endpoint). That rejection is invisible
+     * to this process, so the browser is the only party that can report it.
+     * The named slot is demoted (time-boxed, see openai-keys.ts) and this
+     * mint uses the alternate key.
+     */
+    rejectedSlot: z.enum(['primary', 'audio']).optional(),
   })
   .strict();
 
@@ -90,10 +108,15 @@ export async function registerSession(app: FastifyInstance): Promise<void> {
     const availableProviders: string[] = [];
     if (hasAnyOpenAIKey()) availableProviders.push('openai');
     if (config.GEMINI_API_KEY) availableProviders.push('gemini');
+    const demoted = openAIKeyDemotion();
     return {
       hasApiKey: hasAnyOpenAIKey(),
       hasGeminiKey: Boolean(config.GEMINI_API_KEY),
       availableProviders,
+      // Which OpenAI key the next mint will use, and why the preferred one is
+      // not in play if it isn't. Slot NAMES only — never key material.
+      openaiKeySlot: activeOpenAIKeySlot(),
+      openaiKeyDemotion: demoted,
       sessionRenewalRecommendedMs: config.SESSION_RENEW_MS,
       supportedLangPairs: Object.keys(LANG_OUTPUT),
     };
@@ -122,6 +145,17 @@ export async function registerSession(app: FastifyInstance): Promise<void> {
     const outputLanguage = LANG_OUTPUT[langPair] ?? 'zh';
     const includeSourceTranscript = parsed.data.includeSourceTranscript ?? true;
     const micDistance = parsed.data.micDistance ?? 'close';
+
+    // A downstream rejection reported by the browser demotes that slot BEFORE
+    // this mint resolves its key, so the retry actually comes back with the
+    // other key instead of re-minting the one that just failed.
+    if (parsed.data.rejectedSlot !== undefined) {
+      demoteOpenAIKeySlot(
+        parsed.data.rejectedSlot,
+        'ephemeral token rejected at the SDP exchange (reported by the browser)',
+        req.log,
+      );
+    }
 
     // Build audio.input conditionally:
     //   transcription:   only when bilingual (gpt-realtime-whisper costs extra)
@@ -206,6 +240,9 @@ export async function registerSession(app: FastifyInstance): Promise<void> {
     return {
       client_secret: { value: data.value, expires_at: data.expires_at },
       session_renewal_recommended_ms: config.SESSION_RENEW_MS,
+      // Slot NAME only (never key material) so the browser can tell us which
+      // key to stop using if this token is rejected at the SDP exchange.
+      key_slot: keySlot,
     };
   });
 }

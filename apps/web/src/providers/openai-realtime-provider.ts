@@ -10,6 +10,7 @@ import type {
 } from '@meeting-audio/contracts';
 import { MicrophoneAudioProvider } from './microphone-audio-provider.js';
 import { WarmTokenCache } from './token-prewarm.js';
+import { OpenAIWsOpenError, OpenAIWsTransport } from './openai-ws-transport.js';
 import type {
   AudioSource,
   CaptionProvider,
@@ -100,9 +101,63 @@ const LANG_PAIR_META: Record<string, { src: string; tgt: string }> = {
 };
 const DEFAULT_META = { src: 'en', tgt: 'zh-TW' };
 
+/** Which server-side OpenAI key minted a token. Names only — never key material. */
+export type OpenAIKeySlot = 'primary' | 'audio';
+
 interface SessionResponse {
   client_secret: { value: string; expires_at?: number };
   session_renewal_recommended_ms?: number;
+  /** Slot that minted this token, so a downstream rejection can name it. */
+  key_slot?: OpenAIKeySlot;
+}
+
+// Plain-language hints for the SDP-exchange failures we have actually observed,
+// keyed by OpenAI's own error code. A bare "(401)" sent a diagnosis down the
+// wrong path once already: the mint had succeeded, so every key/env check
+// looked healthy, and the real cause — an org IP allowlist that covers the
+// realtime MEDIA endpoint but not the mint endpoint — was invisible until the
+// response body was read. Never throw away that body again.
+const SDP_FAILURE_HINTS: Record<string, string> = {
+  ip_not_authorized:
+    "this network's egress IP is not on the OpenAI organisation's allowlist for the realtime call endpoint — the key can still mint tokens, which is why /session succeeded",
+  invalid_api_key: 'the ephemeral token was not accepted — it may have expired before the exchange',
+  session_expired: 'the ephemeral token expired before the SDP exchange completed',
+};
+
+/** Carries OpenAI's own status + error code so the UI can state the real cause. */
+export class SdpExchangeError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string | null,
+    readonly detail: string | null,
+  ) {
+    const parts = [`OpenAI SDP exchange failed (${status}${code ? ` ${code}` : ''})`];
+    if (detail) parts.push(detail);
+    const hint = code !== null ? SDP_FAILURE_HINTS[code] : undefined;
+    if (hint) parts.push(hint);
+    super(parts.join(' — '));
+    this.name = 'SdpExchangeError';
+  }
+
+  /** 401/403 = permission failure: worth retrying with the other server key. */
+  get isAuthRejection(): boolean {
+    return this.status === 401 || this.status === 403;
+  }
+}
+
+/** Pull OpenAI's `error.code` / `error.message` out of a failed SDP response. */
+async function readSdpError(res: Response): Promise<SdpExchangeError> {
+  const raw = await res.text().catch(() => '');
+  let code: string | null = null;
+  let detail: string | null = null;
+  try {
+    const parsed = JSON.parse(raw) as { error?: { code?: string; message?: string } };
+    code = parsed.error?.code ?? null;
+    detail = parsed.error?.message ?? null;
+  } catch {
+    detail = raw.trim().slice(0, 200) || null;
+  }
+  return new SdpExchangeError(res.status, code, detail);
 }
 
 export interface SessionRequestBody {
@@ -121,11 +176,21 @@ export function sessionRequestBody(
   return { langPair, includeSourceTranscript, micDistance };
 }
 
-async function postSession(url: string, body: SessionRequestBody): Promise<SessionResponse> {
+async function postSession(
+  url: string,
+  body: SessionRequestBody,
+  /**
+   * Slot whose token was just rejected downstream. The server demotes it and
+   * mints from the other key. Deliberately NOT part of SessionRequestBody:
+   * the warm-token cache keys on that object, and a retry must not be able to
+   * collide with (or evict) the normal pre-warmed entry.
+   */
+  rejectedSlot?: OpenAIKeySlot,
+): Promise<SessionResponse> {
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    body: JSON.stringify(rejectedSlot === undefined ? body : { ...body, rejectedSlot }),
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
@@ -165,6 +230,55 @@ export function __resetWarmSessionForTests(): void {
   warmSession.clear();
 }
 
+// ── Transport selection ──────────────────────────────────────────────────────
+//
+// OpenAI exposes the SAME realtime translation session over two transports, and
+// they are not equally available: on 2026-08-20 the corporate service-account
+// key was refused at `POST /v1/realtime/**/calls` (WebRTC) with
+// `401 ip_not_authorized` while the WebSocket transport accepted it and
+// produced captions normally. WebRTC stays the default — it owns jitter
+// buffering, loss concealment and its own congestion control, which a
+// TCP WebSocket cannot match on a lossy link — but a refusal now costs one
+// switch instead of the whole meeting.
+//
+// The block is per KEY SLOT (the refusal is a property of the credential's
+// organisation, not of this machine) and time-boxed, so WebRTC is re-probed
+// once the upstream fault is fixed. Make-before-break renewal means that
+// re-probe never interrupts live captions.
+const WEBRTC_BLOCK_TTL_MS = 30 * 60 * 1000;
+const webrtcBlockedUntil = new Map<string, number>();
+
+function isWebRtcBlockedFor(slot: string): boolean {
+  const until = webrtcBlockedUntil.get(slot);
+  if (until === undefined) return false;
+  if (Date.now() >= until) {
+    webrtcBlockedUntil.delete(slot);
+    return false;
+  }
+  return true;
+}
+
+function blockWebRtcFor(slot: string): void {
+  webrtcBlockedUntil.set(slot, Date.now() + WEBRTC_BLOCK_TTL_MS);
+}
+
+type WsOpener = (
+  token: string,
+  stream: MediaStream,
+  handlers: Parameters<typeof OpenAIWsTransport.open>[2],
+) => Promise<OpenAIWsTransport>;
+
+let wsOpener: WsOpener = (token, stream, handlers) =>
+  OpenAIWsTransport.open(token, stream, handlers);
+
+/** Test hooks: swap the WebSocket transport and clear the per-slot block. */
+export function __setOpenAIWsOpenerForTests(opener: WsOpener | null): void {
+  wsOpener = opener ?? ((t, st, h) => OpenAIWsTransport.open(t, st, h));
+}
+export function __resetOpenAITransportBlocksForTests(): void {
+  webrtcBlockedUntil.clear();
+}
+
 export class OpenAIRealtimeProvider implements CaptionProvider {
   readonly name = 'openai-realtime';
 
@@ -177,6 +291,9 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
   // reflect those changes or it shows "running" over dead captions.
   private statusListeners: Set<(s: ProviderStatus) => void> = new Set();
   private pc: RTCPeerConnection | null = null;
+  // Set instead of `pc` when the session runs over the WebSocket transport.
+  // Exactly one of the two is non-null while connected.
+  private wsTransport: OpenAIWsTransport | null = null;
   private readonly mic: AudioSource;
   // The acquired mic MediaStream, persisted ACROSS renewals. Make-before-break
   // renewal re-uses these exact tracks for the new peer connection instead of
@@ -401,19 +518,18 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
         }
       }
 
-      let exchanged: boolean;
-      try {
-        exchanged = await this.exchangeSdp(conn.pc, conn.offerSdp, client_secret.value);
-      } catch (err) {
-        conn.pc.close();
-        throw err;
-      }
-      if (!exchanged || aborted()) {
-        conn.pc.close();
+      const outcome = await this.connectSession(sessionData, conn);
+      if (outcome.kind === 'aborted' || aborted()) {
+        if (outcome.kind === 'webrtc') outcome.pc.close();
+        if (outcome.kind === 'websocket') outcome.transport.close();
         return;
       }
-      this.pc = conn.pc;
-      this.wirePeer(conn.pc, conn.dc);
+      if (outcome.kind === 'webrtc') {
+        this.pc = outcome.pc;
+        this.wirePeer(outcome.pc, outcome.dc);
+      } else {
+        this.wsTransport = outcome.transport;
+      }
       this.emitHealth('transport', 'connected');
 
       // Bring-up succeeded — any prior renewal-retry backoff state is now
@@ -520,7 +636,7 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       body: sdp,
     });
     if (aborted()) return false;
-    if (!sdpRes.ok) throw new Error(`OpenAI SDP exchange failed (${sdpRes.status})`);
+    if (!sdpRes.ok) throw await readSdpError(sdpRes);
     const sdpText = await sdpRes.text();
     if (aborted()) return false;
     await pc.setRemoteDescription({ type: 'answer', sdp: sdpText });
@@ -529,29 +645,168 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
   }
 
   /**
-   * Sequential offer→SDP→answer build (token already in hand). Used by the
-   * make-before-break renewal path — there the OLD peer keeps captioning, so the
-   * start()-path's parallel-offer optimization buys nothing. Returns null if
-   * stopped mid-flight; throws on SDP failure. Closes the half-built peer on any
-   * early-out.
+   * Bring the session up, trying every combination that can still work, in the
+   * order that preserves the most: transport quality first, then the
+   * organisation the credential belongs to, and only then the credential
+   * itself.
+   *
+   *   1. WebRTC with the token we already hold  (best media path)
+   *   2. WebSocket with the SAME token          (keeps the corporate org)
+   *   3. WebRTC with the alternate key          (reuses the built peer)
+   *   4. WebSocket with the alternate key
+   *
+   * Why this order and not "switch keys first": the failure that put this here
+   * is a refusal of the WebRTC *call* endpoint for one organisation's key,
+   * while every other endpoint - including the WebSocket transport - accepts
+   * it. Switching keys first would silently move corporate meeting audio into
+   * the personal account that owns the alternate key. Switching TRANSPORT
+   * first keeps the meeting where it belongs, and the other key is reached for
+   * only when the credential itself is the problem.
+   *
+   * Steps 3-4 reuse the peer built for step 1: a rejected SDP exchange sets no
+   * remote description, so the same offer can be re-POSTed with a fresh token
+   * instead of paying for another createOffer + ICE gathering round.
    */
-  private async buildPeer(
-    stream: MediaStream,
-    secretValue: string,
-  ): Promise<{ pc: RTCPeerConnection; dc: RTCDataChannel } | null> {
-    const conn = await this.createLocalOffer(stream);
-    if (conn === null) return null;
-    try {
-      const ok = await this.exchangeSdp(conn.pc, conn.offerSdp, secretValue);
-      if (!ok) {
-        conn.pc.close();
-        return null;
+  private async connectSession(
+    sessionData: SessionResponse,
+    offer: { pc: RTCPeerConnection; dc: RTCDataChannel; offerSdp: string } | null,
+  ): Promise<
+    | { kind: 'webrtc'; pc: RTCPeerConnection; dc: RTCDataChannel }
+    | { kind: 'websocket'; transport: OpenAIWsTransport }
+    | { kind: 'aborted' }
+  > {
+    const aborted = (): boolean => this.status !== 'running';
+    const slotA = sessionData.key_slot ?? 'unknown';
+    let firstError: Error | null = null;
+
+    // 1. WebRTC, current key.
+    if (offer !== null && !isWebRtcBlockedFor(slotA)) {
+      try {
+        const ok = await this.exchangeSdp(
+          offer.pc,
+          offer.offerSdp,
+          sessionData.client_secret.value,
+        );
+        if (!ok) {
+          offer.pc.close();
+          return { kind: 'aborted' };
+        }
+        return { kind: 'webrtc', pc: offer.pc, dc: offer.dc };
+      } catch (err) {
+        if (!(err instanceof SdpExchangeError) || !err.isAuthRejection) {
+          offer.pc.close();
+          throw err;
+        }
+        firstError = err;
+        blockWebRtcFor(slotA);
+        this.emitHealth(
+          'transport',
+          'reconnecting',
+          `${err.message} - switching to the WebSocket transport`,
+        );
       }
-      return { pc: conn.pc, dc: conn.dc };
-    } catch (err) {
-      conn.pc.close();
-      throw err;
     }
+    if (aborted()) {
+      offer?.pc.close();
+      return { kind: 'aborted' };
+    }
+
+    // 2. WebSocket, SAME key - this is what keeps a refused WebRTC session
+    //    inside its own organisation instead of failing over to another one.
+    let wsAuthRejected = false;
+    try {
+      const transport = await this.openWsTransport(sessionData.client_secret.value);
+      offer?.pc.close(); // the WebRTC peer is surplus now
+      return { kind: 'websocket', transport };
+    } catch (err) {
+      firstError ??= err instanceof Error ? err : new Error(String(err));
+      wsAuthRejected = err instanceof OpenAIWsOpenError && err.isAuthRejection;
+    }
+    if (aborted()) {
+      offer?.pc.close();
+      return { kind: 'aborted' };
+    }
+
+    // 3-4. Alternate key, both transports. Reachable when this key failed on
+    //      BOTH transports, or when the WebSocket transport is unavailable in
+    //      this environment at all.
+    const rejectedSlot = sessionData.key_slot;
+    if (rejectedSlot === undefined) {
+      offer?.pc.close();
+      throw firstError ?? new Error('OpenAI session could not be established');
+    }
+    this.emitHealth(
+      'transport',
+      'reconnecting',
+      wsAuthRejected
+        ? `OpenAI refused the ${rejectedSlot} key on both transports - retrying with the alternate key`
+        : `OpenAI rejected the ${rejectedSlot} key - retrying with the alternate key`,
+    );
+    // Any pre-warmed token was minted from the slot that just failed.
+    warmSession.clear();
+    const body = sessionRequestBody(this.langPair, this.includeSourceTranscript, this.micDistance);
+    const retrySession = await postSession(this.sessionUrl, body, rejectedSlot);
+    if (aborted()) {
+      offer?.pc.close();
+      return { kind: 'aborted' };
+    }
+    // Server had no alternate key to switch to - surface the ORIGINAL,
+    // concrete failure rather than an identical second one.
+    if (retrySession.key_slot === rejectedSlot) {
+      offer?.pc.close();
+      throw firstError ?? new Error('OpenAI session could not be established');
+    }
+    this.renewDelayMs = retrySession.session_renewal_recommended_ms ?? this.renewDelayMs;
+    const slotB = retrySession.key_slot ?? 'unknown';
+
+    if (offer !== null && !isWebRtcBlockedFor(slotB)) {
+      try {
+        const ok = await this.exchangeSdp(
+          offer.pc,
+          offer.offerSdp,
+          retrySession.client_secret.value,
+        );
+        if (!ok) {
+          offer.pc.close();
+          return { kind: 'aborted' };
+        }
+        return { kind: 'webrtc', pc: offer.pc, dc: offer.dc };
+      } catch (err) {
+        if (!(err instanceof SdpExchangeError) || !err.isAuthRejection) {
+          offer.pc.close();
+          throw err;
+        }
+        blockWebRtcFor(slotB);
+      }
+    }
+    try {
+      const transport = await this.openWsTransport(retrySession.client_secret.value);
+      offer?.pc.close();
+      return { kind: 'websocket', transport };
+    } catch (err) {
+      offer?.pc.close();
+      throw firstError ?? (err instanceof Error ? err : new Error(String(err)));
+    }
+  }
+
+  /**
+   * Open the WebSocket transport over the already-acquired mic stream. Server
+   * events are fed to the SAME handler the DataChannel uses - the event
+   * contract is identical, so segmentation, the wedge detector and the health
+   * ladder all stay transport-agnostic.
+   */
+  private async openWsTransport(token: string): Promise<OpenAIWsTransport> {
+    const stream = this.stream;
+    if (stream === null) throw new Error('No audio stream to send to OpenAI');
+    return await wsOpener(token, stream, {
+      onEvent: (ev) => this.handleDCEvent(ev as DCEvent),
+      onClosed: (reason) => {
+        if (this._status !== 'running') return;
+        this.emitHealth('transport', 'reconnecting', `OpenAI WebSocket dropped - ${reason}`);
+        void this.renewSession();
+      },
+      onAudioTrouble: (state, message) => this.emitHealth('audio', state, message),
+    });
   }
 
   /** Attach the live event/state handlers to a freshly-built peer. */
@@ -616,6 +871,8 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
     this.renewing = false;
     this.pc?.close();
     this.pc = null;
+    this.wsTransport?.close();
+    this.wsTransport = null;
     // Releasing the mic stops the shared MediaStream tracks (this.stream points
     // at the same object the mic holds), so the OS capture indicator turns off.
     this.mic.release();
@@ -653,9 +910,24 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       const sessionData = await this.fetchSessionToken();
       if (sessionData === null || this._status !== 'running') return;
       this.renewDelayMs = sessionData.session_renewal_recommended_ms ?? this.renewDelayMs;
-      const conn = await this.buildPeer(this.stream, sessionData.client_secret.value);
-      if (conn === null || this._status !== 'running') {
-        conn?.pc.close();
+      // Build a fresh local offer unless WebRTC is known-blocked for this key
+      // (then the ladder goes straight to the WebSocket transport and the peer
+      // would be dead weight). Re-probing WebRTC here is deliberate and free:
+      // the OLD session keeps captioning until the swap below, so a failed
+      // probe costs latency on a background renewal, never a caption gap.
+      const slot = sessionData.key_slot ?? 'unknown';
+      let offer: { pc: RTCPeerConnection; dc: RTCDataChannel; offerSdp: string } | null = null;
+      if (!isWebRtcBlockedFor(slot)) {
+        offer = await this.createLocalOffer(this.stream);
+        if (offer === null || this._status !== 'running') {
+          offer?.pc.close();
+          return;
+        }
+      }
+      const outcome = await this.connectSession(sessionData, offer);
+      if (outcome.kind === 'aborted' || this._status !== 'running') {
+        if (outcome.kind === 'webrtc') outcome.pc.close();
+        if (outcome.kind === 'websocket') outcome.transport.close();
         return;
       }
 
@@ -673,8 +945,22 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
         oldPc.ontrack = null;
         oldPc.close();
       }
-      this.pc = conn.pc;
-      this.wirePeer(conn.pc, conn.dc);
+      // Same contract for the WebSocket transport: detach first so the dying
+      // socket cannot deliver a late event (or a close-driven renewal) into
+      // the session that just replaced it.
+      const oldWs = this.wsTransport;
+      if (oldWs) {
+        oldWs.detach();
+        oldWs.close();
+      }
+      this.pc = null;
+      this.wsTransport = null;
+      if (outcome.kind === 'webrtc') {
+        this.pc = outcome.pc;
+        this.wirePeer(outcome.pc, outcome.dc);
+      } else {
+        this.wsTransport = outcome.transport;
+      }
 
       // A stale ICE-restart timer from the old peer would call restartIce on the
       // NEW one — clear it and reset the backoff for a clean slate.
@@ -1109,6 +1395,7 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       const sinceAudio = this.lastAudioActiveAt > 0 ? now - this.lastAudioActiveAt : -1;
       console.info('[openai-rt diag]', {
         status: this._status,
+        transport: this.pc !== null ? 'webrtc' : this.wsTransport !== null ? 'websocket' : 'none',
         pcConn: this.pc?.connectionState,
         pcIce: this.pc?.iceConnectionState,
         dcEvents: this.dcEventCount,
