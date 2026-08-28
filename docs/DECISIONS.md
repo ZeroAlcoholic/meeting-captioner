@@ -121,7 +121,7 @@ bootstrap script gets us to "5–10 min on a fresh machine" without it.
 ## D10 — Remote git hosting deferred
 
 **Date:** P0
-**Status:** Accepted (deferred)
+**Status:** Superseded (2026-08-28) — see "Superseded" below
 **Context:** User considered whether to push to GitHub for cross-machine
 sync and cloud backup.
 **Decision:** **Stay fully local for now.** Re-evaluate when the user
@@ -131,6 +131,13 @@ GitHub (private), GitLab, Gitea, self-hosted, or no remote.
 no value yet and forces an unnecessary platform/account decision now.
 **How to apply later:** when the user is ready, set up `git remote add
 origin <url>` and `git push -u origin main`. No code changes required.
+
+**Superseded (2026-08-28):** the deferral no longer describes reality. The repo
+has an `origin` on GitHub (private) and phase-1 closure was merged to `main`
+through PR #1, so the platform decision this entry was postponing has already
+been made. Recorded here rather than deleted: the entry explains why the project
+spent P0–P1 with no remote, which is context the git history alone does not
+carry. Nothing here blocks CI or any other remote-side tooling.
 
 ---
 
