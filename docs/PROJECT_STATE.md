@@ -8,6 +8,67 @@
 
 ## Current Phase
 
+### OpenAI transport failover — complete (2026-08-20)
+
+The corporate `sk-svcacct` key mints a translation client secret, then the
+browser's SDP POST to `/v1/realtime/**/calls` is refused with
+`401 ip_not_authorized`: the org IP allowlist covers the realtime media
+endpoint, not the mint endpoint, so nothing the server observes reveals it.
+`a269ac8` adds a second transport rather than a second provider.
+
+| Item                | Current evidence                                                                                                                                 | Status              |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------- |
+| WebSocket transport | `apps/web/src/providers/openai-ws-transport.ts` — same session events as WebRTC, shared AudioWorklet, 24 kHz PCM16 resample with seam-safe state | ✅ locally verified |
+| Fallback order      | WebRTC → WebSocket → alternate key slot; refusal cached per slot for 30 min. Rationale in `DECISIONS.md` D13                                     | ✅ locally verified |
+| Key failover        | `services/online/src/openai-keys.ts` — primary preferred, 401/403 retries the alternate, demotion expires after 30 min (D12)                     | ✅ locally verified |
+| Docs                | `DECISIONS.md` D12/D13, `FAILURE_MODES.md`, `RUNBOOK.md`, `PROVIDER_BACKENDS.md`                                                                 | ✅ updated          |
+
+### P2-ONLINE — phase 2 online long-run — complete (2026-08-13)
+
+Execution contract and per-task ledger: [`PHASE_2_RUN.md`](PHASE_2_RUN.md).
+Goal definition: [`GOAL_PHASE_2.md`](GOAL_PHASE_2.md). Scope was fixed to the
+two online paths only — offline, hybrid, summary and Electron were deliberately
+excluded so the run could not expand mid-flight.
+
+The three closing conditions and what backs each:
+
+| Closing condition                             | Result                                                                                                          | Evidence                                                                                           |
+| --------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| ① failover caption gap ≤3 s                   | A1+A2 **2145 ms**, A3 **1137 ms** (measured to the caption returning to the DOM, not to the notice)             | `tests/e2e/online-failover-latency.spec.ts`; baseline 30–31 s in `FAILOVER_BASELINE_2026-08-12.md` |
+| ② no >50 ms main-thread task while captioning | **0 tasks over 50 ms** across 2000 segments, retention on, 90 s of drive, with a deliberate-block control group | `tests/e2e/caption-longtask.spec.ts`                                                               |
+| ③ no cross-tier UI claims                     | Removed the "2–3 s behind speech" copy that had no measurement behind it; the UI now states no latency number   | commit `8-C1`                                                                                      |
+
+Twelve S1 tasks completed (E1, E2, baseline, A1, A4, A2, A3, B1, B2, D1, C2,
+C3), plus C1 and the error boundary. `D2` (Gemini 32/100 ms chunk screening)
+stays **deferred** — it needs a live speaker and real quota, and is explicitly
+not a closing condition.
+
+Two things this run recorded that are easy to lose:
+
+- **B-zone premise did not hold.** B1/B2 exist to fix "the picture stalls while
+  someone is speaking". When it was finally measured, that stall was **not
+  observable — 0 long tasks both before and after the fix**. Moving synchronous
+  `localStorage` writes off the caption path remains correct hygiene; claiming
+  it fixed a measured stall would not be. The control group that proves the
+  `PerformanceObserver` is actually observing must stay: a broken instrument and
+  a smooth main thread produce identical output.
+- **Gate G1 was not triggered.** `MODEL_RECENCY_2026-08-12.md` found each
+  provider's current pin to be its only dedicated realtime translation model,
+  so no pin change was needed. Re-verified 2026-08-28, see
+  [`MODEL_RECENCY_2026-08-28.md`](MODEL_RECENCY_2026-08-28.md).
+
+An external review (Codex, 2026-08-13) raised seven defects; all seven were
+confirmed real and fixed in `f4566b9`, each with a failing-before test. Two are
+worth remembering: the e2e stopwatch had been stopping at the handoff _notice_
+rather than at the returning caption (so the earlier 2020/1028 ms numbers had no
+backing), and a Gemini drain guard had been written in `start()` where the stale
+instance never passes, letting a previous meeting's tail land on a cleared board.
+
+Automated evidence at the end of S1 (2026-08-13): contracts **19**, online
+**68**, web **307**, Playwright **32**. Re-run 2026-08-28 after the transport
+work: contracts **19**, online **77**, web **338**, offline **81**, Playwright
+**35**; `pnpm typecheck`, `pnpm lint`, `pnpm build` clean.
+
 ### Phase 1 closure — complete (2026-07-30)
 
 The Phase 1 correctness, privacy, lifecycle, caption-path, and loopback changes
