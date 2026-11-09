@@ -1,0 +1,20 @@
+{
+  "name": "即時翻譯字幕",
+  "short_name": "即時字幕",
+  "description": "手機聽現場的聲音，即時顯示翻譯字幕。",
+  "lang": "zh-Hant",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0b0d10",
+  "theme_color": "#0b0d10",
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
