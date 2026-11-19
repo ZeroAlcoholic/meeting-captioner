@@ -40,6 +40,9 @@ async function startFixture(directory: string, proxyPort: number, serverPort: nu
   const faultFile = resolve(root, 'storage-fault');
   await rm(faultFile, { force: true });
   await rm(faultFile + '.log', { force: true });
+  // The directory is fixed so its ports and paths stay stable, but meetings
+  // from earlier runs are never read again; keeping them only grows the disk.
+  await rm(resolve(root, 'meeting-data'), { recursive: true, force: true });
   const workerPath = resolve(root, 'server/dist/meeting-writer.worker.cjs');
   const banner = `{
     const fs = require('node:fs');

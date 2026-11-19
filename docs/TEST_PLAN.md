@@ -1,5 +1,9 @@
 # TEST_PLAN.md
 
+## E2E 暫存與磁碟上限（2026-11-20）
+
+E2E fixture 的暫存資料夾一律經 `tests/e2e/e2e-temp.mjs` 建在 `.tmp/e2e/run-<runner pid>/`（runner 與 workers 共用同一個 run）。下一輪開始時，自動刪除 runner 已結束的 run 資料夾：保留最近一輪供事後查錯，不再無限累積（舊做法在 `.cache/` 留下 629 個資料夾、1.8 GB，見 `docs/disk_bloat_audit_2026-11-19.md`）。`pnpm test:e2e-helpers` 驗清理規則兩側。`native-audio.config.ts` 的固定資料夾每次 setup 會清掉上一輪的 `meeting-data`；需要保存會議資料庫時，下次執行前自行複製出來。
+
 ## 模組／部署邊界（2026-11-03）
 
 `pnpm test:boundaries` 在 compiler host／Vite loader 虛擬注入地端失敗，驗 online 不載入實作、full 仍驗地端型別，以及錯誤直接引用會被 build 拒絕；不破壞工作中的原始檔。前端地端／Hybrid 單元跟實作放各自目錄，跨模式 capture 與 provider conformance 留共用層。Chrome 的 `deployment-boundaries.spec.ts` 驗 online 下舊地端會議保留／匯出、禁續用、零收音與地端請求；使用 pure-captions fixture，可指定 `PURE_TEST_WEB_DIST`／`PURE_TEST_SERVER_BUNDLE` 核對既有正式產物，不必重建。證據與沿用規則見[架構檢閱](evals/2026-11-03-module-boundary-review.md)；一般啟動不跑測試。
@@ -62,7 +66,7 @@ pnpm exec playwright test --config tests/e2e/pure-captions.config.ts
 
 追加原生音訊驗收：先執行 online production web build 與 `pnpm -F @meeting-audio/online bundle`，
 再執行 `pnpm exec playwright test --config tests/e2e/native-audio.config.ts`。
-此設定把正式 build 複製到 `.cache/native-audio-release`，以不繼承 API keys 的子程序啟動 bundle，
+此設定把正式 build 複製到 `.cache/native-audio-release`（每次 setup 清除上一輪 `meeting-data`），以不繼承 API keys 的子程序啟動 bundle，
 使用 loopback HTTP 503 注入與 Chrome 原生 AudioWorklet，僅實體收音與雲端回應受控。
 6 個案例已通過（4 Gemini 原生 PCM、2 OpenAI 原生 loopback RTP）；仍不代表供應商相容性、真實翻譯語意或長時間會議已驗收。
 

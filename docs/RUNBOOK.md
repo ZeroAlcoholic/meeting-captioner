@@ -74,7 +74,9 @@ Windows／Node 22+ 的日常入口為 `pnpm service:start`（或根目錄
   OpenAI／Gemini 能否使用仍以設定與實際上游狀態為準，不以 `phase:ready`
   代替上游可用性；沒有 key 時 UI 仍應如實顯示不可用。
 - 每次啟動建置到 `.cache/meeting-service/builds/<instanceId>/`，不改目前服務
-  的資產。status 與 `/_meeting-audio/instance` 提供 workspaceId、instanceId、
+  的資產。建置成功後只保留最新兩份已完成的建置（新的與交接中可能仍在服務的前一份），
+  並刪除中斷的建置；只清有 `<instanceId>.managed-build` 標記的，2026-11-20 前的舊建置不動
+  （`scripts/service-build-retention.mjs`）。清理失敗只寫 stderr，不擋服務啟動。status 與 `/_meeting-audio/instance` 提供 workspaceId、instanceId、
   PID、buildId、url；不公開絕對工作區路徑或 key。HTTP 沒有 stop 入口。
 - Stop 透過本機 pipe 並核對 instanceId，不使用 taskkill／依 PID 檔終止。
   啟動／重啟期間也接受同 instance 的 Stop；取消建置並等持有的建置子程序 close 後才釋放 owner，晚完成的初始化不再 listen。建置各步有 60 秒期限，start 等待最多 180 秒。

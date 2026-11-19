@@ -1,8 +1,9 @@
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { existsSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { e2eTempDir } from './e2e-temp.mjs';
 export default async function setup() {
   process.env.PURE_TEST_AUDIO = resolve(
     process.env.PURE_TEST_AUDIO ?? '.cache/live-caption-speech.wav',
@@ -41,9 +42,7 @@ export default async function setup() {
   };
   try {
     for (const provider of ['OPENAI', 'GEMINI']) {
-      process.env.MEETING_DATA_DIR = await mkdtemp(
-        resolve(`.cache/pure-archive-${provider.toLowerCase()}-`),
-      );
+      process.env.MEETING_DATA_DIR = await e2eTempDir(`pure-archive-${provider.toLowerCase()}-`);
       const app = await buildApp({ sameOriginOnly: true });
       instances.push(app);
       process.env[`PURE_TEST_URL_${provider}`] = await app.listen({ port: 0, host: '127.0.0.1' });

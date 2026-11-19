@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, readdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { markBuild, pruneBuilds } from './service-build-retention.mjs';
 
 const execute = promisify(execFile);
 
@@ -14,6 +15,8 @@ export async function prepareService(repo, stateDir, instanceId, signal) {
   const web = join(release, 'web');
   const bundle = join(release, 'server.cjs');
   await mkdir(release, { recursive: true });
+  const builds = join(stateDir, 'builds');
+  const createdAt = await markBuild(builds, instanceId, 'preparing');
   const require = createRequire(join(repo, 'package.json'));
   const webRequire = createRequire(join(repo, 'apps/web/package.json'));
   const tsc = require.resolve('typescript/bin/tsc');
@@ -56,5 +59,14 @@ export async function prepareService(repo, stateDir, instanceId, signal) {
     }
   }
   await include(release);
+  await markBuild(builds, instanceId, 'ready', createdAt);
+  try {
+    await pruneBuilds(builds, instanceId);
+  } catch (error) {
+    // Disk retention must never block the caption service from starting.
+    process.stderr.write(
+      `[service] build retention skipped: ${error.message}. Old builds remain in ${builds}\n`,
+    );
+  }
   return { web, bundle, buildId: hash.digest('hex') };
 }

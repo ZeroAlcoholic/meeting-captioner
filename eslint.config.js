@@ -14,6 +14,8 @@ export default [
       'build/**',
       // Local service snapshots and Python caches are generated artifacts.
       '.cache/**',
+      // Project scratch space (E2E run directories hold bundled workers).
+      '.tmp/**',
       '**/.pytest_cache/**',
       // Packaged distribution output (scripts/package-online.*). A gitignored
       // build artifact containing a minified single-file bundle — never source
@@ -30,7 +32,12 @@ export default [
   },
   js.configs.recommended,
   {
-    files: ['scripts/*.mjs', 'services/online/build-bundle.mjs', 'tests/architecture/*.mjs'],
+    files: [
+      'scripts/*.mjs',
+      'services/online/build-bundle.mjs',
+      'tests/architecture/*.mjs',
+      'tests/e2e/*.mjs',
+    ],
     languageOptions: { globals: globals.node },
   },
   {

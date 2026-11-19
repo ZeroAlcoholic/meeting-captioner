@@ -1,10 +1,11 @@
 import { expect, test } from '@playwright/test';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { runService, requestService } from '../../scripts/managed-service.mjs';
 import { launchServiceChild } from '../../scripts/service-child.mjs';
 import { prepareService } from '../../scripts/service-build.mjs';
+import { e2eTempDir } from './e2e-temp.mjs';
 import { installOnlineMocks } from './online-mock.js';
 import { installRecoveryTranscription } from './service-recovery-transcription.js';
 
@@ -24,7 +25,7 @@ for (const { provider, identityFault, purpose } of [
   }) => {
     test.setTimeout(180_000);
     page.setDefaultTimeout(10_000);
-    const root = await mkdtemp(resolve('.cache/w08-browser-'));
+    const root = await e2eTempDir('w08-browser-');
     const environment = new Map(
       ['MEETING_DATA_DIR', 'OPENAI_API_KEY', 'OPENAI_API_KEY_AUDIO', 'GEMINI_API_KEY'].map(
         (key) => [key, process.env[key]],

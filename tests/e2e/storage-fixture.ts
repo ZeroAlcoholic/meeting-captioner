@@ -1,7 +1,7 @@
 import { expect } from '@playwright/test';
 import { createRequire } from 'node:module';
-import { mkdtemp } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
+import { e2eTempDir } from './e2e-temp.mjs';
 import { registerMeetings } from '../../services/online/src/routes/meetings.js';
 import { MeetingRepository } from '../../services/online/src/storage/meeting-repository.js';
 
@@ -10,7 +10,7 @@ const Fastify = require('fastify');
 const { build } = require('esbuild');
 
 export async function storageFixture(trustedOrigins: string[] = [], sqliteFault = false) {
-  const root = await mkdtemp(resolve('.cache/storage-fault-'));
+  const root = await e2eTempDir('storage-fault-');
   const workerPath = join(root, 'worker.cjs');
   const faultFlag = join(root, 'sqlite-fault');
   const faultLog = join(root, 'sqlite-fault.log');

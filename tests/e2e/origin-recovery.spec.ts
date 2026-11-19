@@ -1,9 +1,9 @@
 import { expect, test } from '@playwright/test';
 import { createRequire } from 'node:module';
-import { mkdtemp } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { createServer } from 'node:net';
 import { runService, requestService } from '../../scripts/managed-service.mjs';
+import { e2eTempDir } from './e2e-temp.mjs';
 import { registerMeetings } from '../../services/online/src/routes/meetings.js';
 
 const require = createRequire(new URL('../../services/online/package.json', import.meta.url));
@@ -13,8 +13,8 @@ test('original origin replays its lost ACK after another origin cannot see the p
   page,
   baseURL,
 }) => {
-  const root = await mkdtemp(resolve('.cache/origin-recovery-'));
-  const otherRoot = await mkdtemp(resolve('.cache/origin-unrelated-'));
+  const root = await e2eTempDir('origin-recovery-');
+  const otherRoot = await e2eTempDir('origin-unrelated-');
   const services: Array<{ stop(): Promise<void> }> = [];
   const previousDataDir = process.env.MEETING_DATA_DIR;
   let foreignConnections = 0;
