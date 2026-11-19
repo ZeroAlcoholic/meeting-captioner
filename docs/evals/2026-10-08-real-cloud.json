@@ -1,0 +1,1014 @@
+{
+  "origin": "http://127.0.0.1:57745",
+  "results": [
+    {
+      "provider": "openai",
+      "synthetic": true,
+      "started": "2026-10-08T07:47:46.657Z",
+      "mintStatuses": [
+        {
+          "status": 200,
+          "keySlot": "primary",
+          "model": "gpt-live-transcribe"
+        }
+      ],
+      "events": {
+        "session.created": 1,
+        "conversation.item.input_audio_transcription.delta": 51,
+        "input_audio_buffer.committed": 5,
+        "conversation.item.added": 5,
+        "conversation.item.done": 5,
+        "conversation.item.input_audio_transcription.completed": 5
+      },
+      "frames": 732,
+      "transcripts": [
+        "今天讨论会议逐字稿。",
+        "请保留英文术语。",
+        "API budget OpenAI Gemini",
+        "今天不要部署。預算是三十美元，不是三百美元。确认，确认。",
+        "最后一句：明天下午三点再测试。"
+      ],
+      "errors": [],
+      "audioSeconds": 23.604979166666666,
+      "persistence": "已自動保存，尚未結案\n待保存 0 筆 · 最近確認 下午3:48:15\n重試保存／結案\n本機保存位置",
+      "captionLines": [
+        "今天討論會議逐字稿。",
+        "請保留英文術語。",
+        "API budget OpenAI Gemini",
+        "今天不要部署。預算是三十美元，不是三百美元。確認，確認。",
+        "最後一句：明天下午三點再測試。"
+      ],
+      "savedSegments": [
+        "下午3:47:50 · 已確認 · 修訂 5今天討論會議逐字稿。校訂原始辨識今天讨论会议逐字稿。",
+        "下午3:47:53 · 已確認 · 修訂 4請保留英文術語。校訂原始辨識请保留英文术语。",
+        "下午3:47:55 · 已確認 · 修訂 5API budget OpenAI Gemini校訂原始辨識API budget OpenAI Gemini",
+        "下午3:48:01 · 已確認 · 修訂 9今天不要部署。預算是三十美元，不是三百美元。確認，確認。校訂原始辨識今天不要部署。預算是三十美元，不是三百美元。确认，确认。",
+        "下午3:48:09 · 已確認 · 修訂 6最後一句：明天下午三點再測試。校訂原始辨識最后一句：明天下午三点再测试。"
+      ],
+      "exportText": "今天討論會議逐字稿。\n請保留英文術語。\nAPI budget OpenAI Gemini\n今天不要部署。預算是三十美元，不是三百美元。確認，確認。\n最後一句：明天下午三點再測試。",
+      "completed": true,
+      "audit": {
+        "captionsEqualExport": true,
+        "reloadedSegmentsMatch": true,
+        "criticalTermsPresent": true,
+        "finalizationObserved": false
+      }
+    },
+    {
+      "provider": "gemini",
+      "synthetic": true,
+      "started": "2026-10-08T07:48:17.449Z",
+      "mintStatuses": [
+        {
+          "status": 400
+        },
+        {
+          "status": 400
+        }
+      ],
+      "events": {},
+      "frames": 0,
+      "transcripts": [],
+      "errors": [],
+      "completed": false,
+      "failure": "expect(locator).toContainText(expected) failed",
+      "uiStatus": "連線中斷，正重試同一轉寫服務 · Gemini 線上純轉寫；離線純字幕尚未驗收"
+    },
+    {
+      "provider": "gemini",
+      "forcedBackup": false,
+      "synthetic": true,
+      "started": "2026-10-08T07:49:53.529Z",
+      "mintStatuses": [
+        {
+          "status": 200,
+          "model": "models/gemini-3.5-transcribe-live"
+        },
+        {
+          "status": 200,
+          "model": "models/gemini-3.5-transcribe-live"
+        }
+      ],
+      "events": {},
+      "frames": 0,
+      "transcripts": [],
+      "errors": [],
+      "completed": false,
+      "failure": "expect(locator).toContainText(expected) failed",
+      "uiStatus": "連線中斷，正重試同一轉寫服務 · Gemini 線上純轉寫；離線純字幕尚未驗收"
+    },
+    {
+      "provider": "openai",
+      "forcedBackup": true,
+      "synthetic": true,
+      "started": "2026-10-08T07:50:19.069Z",
+      "mintStatuses": [],
+      "events": {},
+      "frames": 0,
+      "transcripts": [],
+      "errors": [],
+      "completed": false,
+      "failure": "expect(locator).toContainText(expected) failed",
+      "uiStatus": "尚未開始 · OpenAI 線上純轉寫；離線純字幕尚未驗收"
+    },
+    {
+      "provider": "gemini",
+      "forcedBackup": false,
+      "synthetic": true,
+      "started": "2026-10-08T07:51:50.254Z",
+      "mintStatuses": [
+        {
+          "status": 200,
+          "model": "models/gemini-3.5-transcribe-live"
+        }
+      ],
+      "events": {
+        "setupComplete": 1,
+        "serverContent": 44
+      },
+      "frames": 754,
+      "transcripts": [
+        "今天讨论会议逐字稿。请保留英文术语。",
+        "API budget OpenAI Gemini",
+        "今天不要部署。",
+        "最后一句，明天下午三点再测试。"
+      ],
+      "errors": [],
+      "audioSeconds": 23.604979166666666,
+      "completed": false,
+      "failure": "expect(locator).toContainText(expected) failed",
+      "uiStatus": "收音已停止 · Gemini 線上純轉寫；離線純字幕尚未驗收"
+    },
+    {
+      "provider": "openai",
+      "forcedBackup": true,
+      "synthetic": true,
+      "started": "2026-10-08T07:52:58.715Z",
+      "mintStatuses": [
+        {
+          "status": 200,
+          "keySlot": "audio",
+          "model": "gpt-live-transcribe"
+        }
+      ],
+      "events": {
+        "session.created": 1,
+        "conversation.item.input_audio_transcription.delta": 51,
+        "input_audio_buffer.committed": 6,
+        "conversation.item.added": 6,
+        "conversation.item.done": 6,
+        "conversation.item.input_audio_transcription.completed": 6
+      },
+      "frames": 738,
+      "transcripts": [
+        "今天討論会议逐字稿。",
+        "请保留英文术语",
+        "API budget OpenAI Gemini",
+        "今天不要部署。",
+        "預算是三十美元，不是三百美元。确认，确认。",
+        "最后一句：明天下午三点再测试。"
+      ],
+      "errors": [],
+      "audioSeconds": 23.604979166666666,
+      "persistence": "已結案保存\n待保存 0 筆 · 最近確認 下午3:53:28\n重試保存／結案\n本機保存位置",
+      "captionLines": [
+        "今天討論會議逐字稿。",
+        "請保留英文術語",
+        "API budget OpenAI Gemini",
+        "今天不要部署。",
+        "預算是三十美元，不是三百美元。確認，確認。",
+        "最後一句：明天下午三點再測試。"
+      ],
+      "savedSegments": [
+        "下午3:53:02 · 已確認 · 修訂 5今天討論會議逐字稿。校訂原始辨識今天討論会议逐字稿。",
+        "下午3:53:06 · 已確認 · 修訂 3請保留英文術語校訂原始辨識请保留英文术语",
+        "下午3:53:08 · 已確認 · 修訂 5API budget OpenAI Gemini校訂原始辨識API budget OpenAI Gemini",
+        "下午3:53:14 · 已確認 · 修訂 3今天不要部署。校訂原始辨識今天不要部署。",
+        "下午3:53:17 · 已確認 · 修訂 8預算是三十美元，不是三百美元。確認，確認。校訂原始辨識預算是三十美元，不是三百美元。确认，确认。",
+        "下午3:53:22 · 已確認 · 修訂 6最後一句：明天下午三點再測試。校訂原始辨識最后一句：明天下午三点再测试。"
+      ],
+      "exportText": "今天討論會議逐字稿。\n請保留英文術語\nAPI budget OpenAI Gemini\n今天不要部署。\n預算是三十美元，不是三百美元。確認，確認。\n最後一句：明天下午三點再測試。",
+      "completed": true,
+      "audit": {
+        "captionsEqualExport": true,
+        "reloadedSegmentsMatch": true,
+        "criticalTermsPresent": true,
+        "finalizationObserved": true
+      }
+    },
+    {
+      "provider": "gemini",
+      "forcedBackup": false,
+      "synthetic": true,
+      "started": "2026-10-08T07:54:02.488Z",
+      "mintStatuses": [
+        {
+          "status": 200,
+          "model": "models/gemini-3.5-transcribe-live"
+        }
+      ],
+      "events": {
+        "setupComplete": 1,
+        "serverContent": 44
+      },
+      "frames": 752,
+      "transcripts": [
+        "今天讨论会议逐字稿。请保留英文术语。",
+        "API budget OpenAI Gemini",
+        "今天不要部署。",
+        "最后一句，明天下午三点再测试。"
+      ],
+      "serverContent": [
+        {
+          "at": 1791446046582
+        },
+        {
+          "at": 1791446047505,
+          "interimInputTranscription": {
+            "text": "今天"
+          }
+        },
+        {
+          "at": 1791446047912,
+          "interimInputTranscription": {
+            "text": "今天 讨论"
+          }
+        },
+        {
+          "at": 1791446048526,
+          "interimInputTranscription": {
+            "text": "今天 讨论 会议 主"
+          }
+        },
+        {
+          "at": 1791446049039,
+          "interimInputTranscription": {
+            "text": "今天 讨论 会议 主 旨 字 稿。"
+          }
+        },
+        {
+          "at": 1791446049367,
+          "interimInputTranscription": {
+            "text": "今天 讨论 会议 主 旨 稿。"
+          }
+        },
+        {
+          "at": 1791446050164,
+          "interimInputTranscription": {
+            "text": "今天 讨论 会议 主 旨 稿。请"
+          }
+        },
+        {
+          "at": 1791446050574,
+          "interimInputTranscription": {
+            "text": "今天 讨论 会议 主 旨 稿。请保留"
+          }
+        },
+        {
+          "at": 1791446051087,
+          "interimInputTranscription": {
+            "text": "今天 讨论 会议 主 旨 稿。请保留 英文"
+          }
+        },
+        {
+          "at": 1791446051504,
+          "interimInputTranscription": {
+            "text": "今天 讨论 会议 主 旨 稿。请保留英文术语。"
+          }
+        },
+        {
+          "at": 1791446051803,
+          "inputTranscription": {
+            "text": "今天讨论会议逐字稿。请保留英文术语。"
+          }
+        },
+        {
+          "at": 1791446051805,
+          "generationComplete": true
+        },
+        {
+          "at": 1791446051805
+        },
+        {
+          "at": 1791446052734
+        },
+        {
+          "at": 1791446053544,
+          "interimInputTranscription": {
+            "text": "API"
+          }
+        },
+        {
+          "at": 1791446054056,
+          "interimInputTranscription": {
+            "text": "API"
+          }
+        },
+        {
+          "at": 1791446054466,
+          "interimInputTranscription": {
+            "text": "API budget"
+          }
+        },
+        {
+          "at": 1791446054977,
+          "interimInputTranscription": {
+            "text": "API budget"
+          }
+        },
+        {
+          "at": 1791446055489,
+          "interimInputTranscription": {
+            "text": "API budget Open AI"
+          }
+        },
+        {
+          "at": 1791446055910,
+          "interimInputTranscription": {
+            "text": "API budget Open AI"
+          }
+        },
+        {
+          "at": 1791446056412,
+          "interimInputTranscription": {
+            "text": "API budget OpenAI Gemini"
+          }
+        },
+        {
+          "at": 1791446056923,
+          "interimInputTranscription": {
+            "text": "API budget OpenAI Gemini"
+          }
+        },
+        {
+          "at": 1791446056943,
+          "inputTranscription": {
+            "text": "API budget OpenAI Gemini"
+          }
+        },
+        {
+          "at": 1791446056944,
+          "generationComplete": true
+        },
+        {
+          "at": 1791446056944
+        },
+        {
+          "at": 1791446057959
+        },
+        {
+          "at": 1791446058872,
+          "interimInputTranscription": {
+            "text": "今天"
+          }
+        },
+        {
+          "at": 1791446059396,
+          "interimInputTranscription": {
+            "text": "今天 不要"
+          }
+        },
+        {
+          "at": 1791446059798,
+          "interimInputTranscription": {
+            "text": "今天不要部署。"
+          }
+        },
+        {
+          "at": 1791446060200,
+          "inputTranscription": {
+            "text": "今天不要部署。"
+          }
+        },
+        {
+          "at": 1791446060200,
+          "generationComplete": true
+        },
+        {
+          "at": 1791446060200
+        },
+        {
+          "at": 1791446066043
+        },
+        {
+          "at": 1791446066856,
+          "interimInputTranscription": {
+            "text": "最后"
+          }
+        },
+        {
+          "at": 1791446067267,
+          "interimInputTranscription": {
+            "text": "最 后 一 句 。"
+          }
+        },
+        {
+          "at": 1791446067779,
+          "interimInputTranscription": {
+            "text": "最后一句, 明天"
+          }
+        },
+        {
+          "at": 1791446068290,
+          "interimInputTranscription": {
+            "text": "最后一句, 明天下午"
+          }
+        },
+        {
+          "at": 1791446068705,
+          "interimInputTranscription": {
+            "text": "最后一句, 明天 下午 3"
+          }
+        },
+        {
+          "at": 1791446069213,
+          "interimInputTranscription": {
+            "text": "最后一句, 明天下午 3 点再"
+          }
+        },
+        {
+          "at": 1791446069725,
+          "interimInputTranscription": {
+            "text": "最后一句, 明天下午3点再测试。"
+          }
+        },
+        {
+          "at": 1791446070133,
+          "interimInputTranscription": {
+            "text": "最后一句, 明天下午3点再测试。"
+          }
+        },
+        {
+          "at": 1791446070338,
+          "inputTranscription": {
+            "text": "最后一句，明天下午三点再测试。"
+          }
+        },
+        {
+          "at": 1791446070339,
+          "generationComplete": true
+        },
+        {
+          "at": 1791446070339
+        }
+      ],
+      "activities": [
+        {
+          "type": "start",
+          "at": 1791446046497
+        },
+        {
+          "type": "end",
+          "at": 1791446049215
+        },
+        {
+          "type": "start",
+          "at": 1791446049275
+        },
+        {
+          "type": "end",
+          "at": 1791446051615
+        },
+        {
+          "type": "start",
+          "at": 1791446052666
+        },
+        {
+          "type": "end",
+          "at": 1791446056705
+        },
+        {
+          "type": "start",
+          "at": 1791446057916
+        },
+        {
+          "type": "end",
+          "at": 1791446059965
+        },
+        {
+          "type": "start",
+          "at": 1791446059995
+        },
+        {
+          "type": "end",
+          "at": 1791446065946
+        },
+        {
+          "type": "start",
+          "at": 1791446065986
+        },
+        {
+          "type": "end",
+          "at": 1791446070015
+        }
+      ],
+      "errors": [],
+      "audioSeconds": 23.604979166666666,
+      "completed": false,
+      "failure": "expect(locator).toContainText(expected) failed",
+      "uiStatus": "收音已停止 · Gemini 線上純轉寫；離線純字幕尚未驗收",
+      "persistence": "已保存，逐字稿尚待核對\n待保存 0 筆 · 最近確認 下午3:54:37\n\n已知缺口 1；未完成片段 0。保留原稿，不能視為完整結案。\n\n重試保存／結案\n本機保存位置",
+      "captionLines": [
+        "今天討論會議逐字稿。請保留英文術語。",
+        "API budget OpenAI Gemini",
+        "今天不要部署。",
+        "最後一句，明天下午三點再測試。"
+      ]
+    },
+    {
+      "provider": "gemini",
+      "forcedBackup": false,
+      "synthetic": true,
+      "started": "2026-10-08T07:56:45.101Z",
+      "mintStatuses": [
+        {
+          "status": 200,
+          "model": "models/gemini-3.5-transcribe-live"
+        }
+      ],
+      "events": {
+        "setupComplete": 1,
+        "serverContent": 63
+      },
+      "frames": 744,
+      "transcripts": [
+        "今天讨论会议逐字稿。",
+        "请保留英文术语。",
+        "API, budget, OpenAI, Gemini",
+        "今天不要部署。",
+        "预算是 30 美元，不是 300 美元。确认，确认。",
+        "最後一句，明天下午三點再測試。"
+      ],
+      "serverContent": [
+        {
+          "at": 1791446209304
+        },
+        {
+          "at": 1791446210016,
+          "interimInputTranscription": {
+            "text": "今天"
+          }
+        },
+        {
+          "at": 1791446210526,
+          "interimInputTranscription": {
+            "text": "今天"
+          }
+        },
+        {
+          "at": 1791446211047,
+          "interimInputTranscription": {
+            "text": "今天 讨论会"
+          }
+        },
+        {
+          "at": 1791446211551,
+          "interimInputTranscription": {
+            "text": "今天讨论 会议逐字"
+          }
+        },
+        {
+          "at": 1791446211960,
+          "interimInputTranscription": {
+            "text": "今天讨论 会议 逐字稿。"
+          }
+        },
+        {
+          "at": 1791446212269,
+          "inputTranscription": {
+            "text": "今天讨论会议逐字稿。"
+          }
+        },
+        {
+          "at": 1791446212270,
+          "generationComplete": true
+        },
+        {
+          "at": 1791446212271
+        },
+        {
+          "at": 1791446212280
+        },
+        {
+          "at": 1791446213189,
+          "interimInputTranscription": {
+            "text": "请保留"
+          }
+        },
+        {
+          "at": 1791446213599,
+          "interimInputTranscription": {
+            "text": "请保留 英文"
+          }
+        },
+        {
+          "at": 1791446214111,
+          "interimInputTranscription": {
+            "text": "请保留英文术语。"
+          }
+        },
+        {
+          "at": 1791446214625,
+          "inputTranscription": {
+            "text": "请保留英文术语。"
+          }
+        },
+        {
+          "at": 1791446214626,
+          "generationComplete": true
+        },
+        {
+          "at": 1791446214626
+        },
+        {
+          "at": 1791446215449
+        },
+        {
+          "at": 1791446216383,
+          "interimInputTranscription": {
+            "text": "API"
+          }
+        },
+        {
+          "at": 1791446216877,
+          "interimInputTranscription": {
+            "text": "API"
+          }
+        },
+        {
+          "at": 1791446217388,
+          "interimInputTranscription": {
+            "text": "API budget"
+          }
+        },
+        {
+          "at": 1791446217801,
+          "interimInputTranscription": {
+            "text": "API budget"
+          }
+        },
+        {
+          "at": 1791446218333,
+          "interimInputTranscription": {
+            "text": "API budget OpenAI"
+          }
+        },
+        {
+          "at": 1791446218821,
+          "interimInputTranscription": {
+            "text": "API budget OpenAI"
+          }
+        },
+        {
+          "at": 1791446219255,
+          "interimInputTranscription": {
+            "text": "API budget OpenAI Gemini"
+          }
+        },
+        {
+          "at": 1791446219743,
+          "interimInputTranscription": {
+            "text": "API budget OpenAI Gemini"
+          }
+        },
+        {
+          "at": 1791446219846,
+          "inputTranscription": {
+            "text": "API, budget, OpenAI, Gemini"
+          }
+        },
+        {
+          "at": 1791446219848,
+          "generationComplete": true
+        },
+        {
+          "at": 1791446219848
+        },
+        {
+          "at": 1791446220685
+        },
+        {
+          "at": 1791446221586,
+          "interimInputTranscription": {
+            "text": "今天"
+          }
+        },
+        {
+          "at": 1791446221997,
+          "interimInputTranscription": {
+            "text": "今天 不要"
+          }
+        },
+        {
+          "at": 1791446222508,
+          "interimInputTranscription": {
+            "text": "今天不要部署。"
+          }
+        },
+        {
+          "at": 1791446222942,
+          "inputTranscription": {
+            "text": "今天不要部署。"
+          }
+        },
+        {
+          "at": 1791446222943,
+          "generationComplete": true
+        },
+        {
+          "at": 1791446222943
+        },
+        {
+          "at": 1791446223019
+        },
+        {
+          "at": 1791446223432,
+          "interimInputTranscription": {
+            "text": "预算"
+          }
+        },
+        {
+          "at": 1791446223942,
+          "interimInputTranscription": {
+            "text": "预算是"
+          }
+        },
+        {
+          "at": 1791446224354,
+          "interimInputTranscription": {
+            "text": "预算是 30"
+          }
+        },
+        {
+          "at": 1791446224864,
+          "interimInputTranscription": {
+            "text": "预算是 30 美元。"
+          }
+        },
+        {
+          "at": 1791446225375,
+          "interimInputTranscription": {
+            "text": "预算是 30 美元, 不是"
+          }
+        },
+        {
+          "at": 1791446225785,
+          "interimInputTranscription": {
+            "text": "预算是 30 美元, 不是"
+          }
+        },
+        {
+          "at": 1791446226297,
+          "interimInputTranscription": {
+            "text": "预算是 30 美元, 不是 300 美元。"
+          }
+        },
+        {
+          "at": 1791446226809,
+          "interimInputTranscription": {
+            "text": "预算是 30 美元, 不是 300 美元。"
+          }
+        },
+        {
+          "at": 1791446227218,
+          "interimInputTranscription": {
+            "text": "预算是 30 美元, 不是"
+          }
+        },
+        {
+          "at": 1791446227737,
+          "interimInputTranscription": {
+            "text": "预算是 30 美元, 不是 300 美元, 确认。"
+          }
+        },
+        {
+          "at": 1791446228243,
+          "interimInputTranscription": {
+            "text": "预算是 30 美元, 不是 300 美元。确认, 确认。"
+          }
+        },
+        {
+          "at": 1791446228755,
+          "interimInputTranscription": {
+            "text": "预算是 30 美元, 不是300 美元。确认, 确认。"
+          }
+        },
+        {
+          "at": 1791446229062,
+          "inputTranscription": {
+            "text": "预算是 30 美元，不是 300 美元。确认，确认。"
+          }
+        },
+        {
+          "at": 1791446229063,
+          "generationComplete": true
+        },
+        {
+          "at": 1791446229063
+        },
+        {
+          "at": 1791446229072
+        },
+        {
+          "at": 1791446229370,
+          "interimInputTranscription": {
+            "text": "最后"
+          }
+        },
+        {
+          "at": 1791446229881,
+          "interimInputTranscription": {
+            "text": "最 后一"
+          }
+        },
+        {
+          "at": 1791446230394,
+          "interimInputTranscription": {
+            "text": "最后一 句,"
+          }
+        },
+        {
+          "at": 1791446230906,
+          "interimInputTranscription": {
+            "text": "最后一句, 明天"
+          }
+        },
+        {
+          "at": 1791446231417,
+          "interimInputTranscription": {
+            "text": "最后一句, 明天下午 3"
+          }
+        },
+        {
+          "at": 1791446231827,
+          "interimInputTranscription": {
+            "text": "最后一句, 明天下午 3 点再"
+          }
+        },
+        {
+          "at": 1791446232338,
+          "interimInputTranscription": {
+            "text": "最后一句, 明天下午 3 点再 测试。"
+          }
+        },
+        {
+          "at": 1791446232748,
+          "interimInputTranscription": {
+            "text": "最后一句, 明天下午 3 点再测试。"
+          }
+        },
+        {
+          "at": 1791446233055,
+          "inputTranscription": {
+            "text": "最後一句，明天下午三點再測試。"
+          }
+        },
+        {
+          "at": 1791446233058,
+          "generationComplete": true
+        },
+        {
+          "at": 1791446233058
+        }
+      ],
+      "activities": [
+        {
+          "type": "start",
+          "at": 1791446209257
+        },
+        {
+          "type": "end",
+          "at": 1791446211975
+        },
+        {
+          "type": "start",
+          "at": 1791446212271
+        },
+        {
+          "type": "end",
+          "at": 1791446214375
+        },
+        {
+          "type": "start",
+          "at": 1791446215436
+        },
+        {
+          "type": "end",
+          "at": 1791446219495
+        },
+        {
+          "type": "start",
+          "at": 1791446220676
+        },
+        {
+          "type": "end",
+          "at": 1791446222725
+        },
+        {
+          "type": "start",
+          "at": 1791446222943
+        },
+        {
+          "type": "end",
+          "at": 1791446228715
+        },
+        {
+          "type": "start",
+          "at": 1791446229063
+        },
+        {
+          "type": "end",
+          "at": 1791446232775
+        }
+      ],
+      "errors": [],
+      "audioSeconds": 23.604979166666666,
+      "persistence": "已結案保存\n待保存 0 筆 · 最近確認 下午3:57:13\n重試保存／結案\n本機保存位置",
+      "captionLines": [
+        "今天討論會議逐字稿。",
+        "請保留英文術語。",
+        "API, budget, OpenAI, Gemini",
+        "今天不要部署。",
+        "預算是 30 美元，不是 300 美元。確認，確認。",
+        "最後一句，明天下午三點再測試。"
+      ],
+      "savedSegments": [
+        "下午3:56:48 · 已確認 · 修訂 3今天討論會議逐字稿。校訂原始辨識今天讨论会议逐字稿。",
+        "下午3:56:51 · 已確認 · 修訂 3請保留英文術語。校訂原始辨識请保留英文术语。",
+        "下午3:56:54 · 已確認 · 修訂 5API, budget, OpenAI, Gemini校訂原始辨識API, budget, OpenAI, Gemini",
+        "下午3:56:59 · 已確認 · 修訂 2今天不要部署。校訂原始辨識今天不要部署。",
+        "下午3:57:02 · 已確認 · 修訂 8預算是 30 美元，不是 300 美元。確認，確認。校訂原始辨識预算是 30 美元，不是 300 美元。确认，确认。",
+        "下午3:57:08 · 已確認 · 修訂 6最後一句，明天下午三點再測試。校訂原始辨識最後一句，明天下午三點再測試。"
+      ],
+      "exportText": "今天討論會議逐字稿。\n請保留英文術語。\nAPI, budget, OpenAI, Gemini\n今天不要部署。\n預算是 30 美元，不是 300 美元。確認，確認。\n最後一句，明天下午三點再測試。",
+      "completed": true,
+      "audit": {
+        "captionsEqualExport": true,
+        "reloadedSegmentsMatch": true,
+        "criticalTermsPresent": true,
+        "finalizationObserved": true
+      }
+    }
+  ],
+  "lastRunDataDir": "C:\\Develop\\meeting_audio\\.cache\\real-cloud-data-8Kk8TV",
+  "syntheticAudio": {
+    "path": ".cache/real-cloud-synthetic.wav",
+    "sha256": "623a8d0c04f92c4d4d65eb43269c934b98464d8d20747058c88393a6550d8279",
+    "durationSeconds": 23.604979166666666,
+    "source": "Local Windows SAPI Hanhan Desktop + Zira Desktop; authored non-private text; no human gold claim"
+  },
+  "budget": {
+    "limitUsd": 1,
+    "reservedUsd": 1,
+    "attempts": [
+      {
+        "provider": "openai",
+        "at": "2026-10-08T07:47:46.604Z",
+        "reserveUsd": 0.2
+      },
+      {
+        "provider": "gemini",
+        "at": "2026-10-08T07:48:17.448Z",
+        "reserveUsd": 0.2,
+        "releasedUsd": 0.2,
+        "reason": "No WebSocket audio was sent; mint-only or local lease rejection."
+      },
+      {
+        "provider": "gemini",
+        "at": "2026-10-08T07:49:53.527Z",
+        "reserveUsd": 0.2,
+        "releasedUsd": 0.2,
+        "reason": "No WebSocket audio was sent; mint-only or local lease rejection."
+      },
+      {
+        "provider": "openai",
+        "at": "2026-10-08T07:50:19.068Z",
+        "reserveUsd": 0.2,
+        "releasedUsd": 0.2,
+        "reason": "No WebSocket audio was sent; mint-only or local lease rejection."
+      },
+      {
+        "provider": "gemini",
+        "at": "2026-10-08T07:51:50.251Z",
+        "reserveUsd": 0.2
+      },
+      {
+        "provider": "openai",
+        "at": "2026-10-08T07:52:58.714Z",
+        "reserveUsd": 0.2
+      },
+      {
+        "provider": "gemini",
+        "at": "2026-10-08T07:54:02.485Z",
+        "reserveUsd": 0.2
+      },
+      {
+        "provider": "gemini",
+        "at": "2026-10-08T07:56:45.096Z",
+        "reserveUsd": 0.2
+      }
+    ]
+  },
+  "estimatedAudioUsd": 0.023998395486111112,
+  "billingVerified": false
+}

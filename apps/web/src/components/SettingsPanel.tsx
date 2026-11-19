@@ -10,6 +10,7 @@ import {
   type OnlineProvider,
 } from '../settings/settings-store.js';
 import { useSettingsStore } from '../settings/use-settings-store.js';
+import { MicDevicePicker } from './MicDevicePicker.js';
 import styles from './SettingsPanel.module.css';
 
 // Neither hint quotes a latency figure.
@@ -361,6 +362,7 @@ export function SettingsPanel({ open, onClose, triggerRef, sessionActive }: Sett
           <LanguageBlock sessionActive={sessionActive ?? false} />
           <OnlineProviderBlock sessionActive={sessionActive ?? false} />
           <MicDistanceBlock />
+          <MicDevicePicker disabled={sessionActive ?? false} />
         </div>
         <TranscriptRetentionBlock />
         <HealthRow />

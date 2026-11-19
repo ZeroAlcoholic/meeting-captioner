@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useCaptionStore } from '../store/use-caption-store.js';
 import { buildExport, type ExportFormat } from '../export/formatters.js';
-import { triggerDownload } from '../export/download.js';
+import { triggerDownload, downloadArchivedTranslation } from '../export/download.js';
 import styles from './ExportMenu.module.css';
 
 const FORMATS: Array<{ id: ExportFormat; label: string; hint: string }> = [
@@ -27,10 +27,12 @@ export function ExportMenu({ disabled = false }: ExportMenuProps) {
   const translations = useCaptionStore((s) => s.translations);
   const sessionStartMs = useCaptionStore((s) => s.sessionStartMs);
   const [open, setOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
 
   const hasData = segments.length > 0;
-  const buttonDisabled = disabled || !hasData;
+  const buttonDisabled = disabled || !hasData || exporting;
 
   // Outside-click + Escape dismiss, matching SettingsPanel behaviour.
   useEffect(() => {
@@ -51,10 +53,20 @@ export function ExportMenu({ disabled = false }: ExportMenuProps) {
     };
   }, [open]);
 
-  const handleExport = (format: ExportFormat): void => {
-    const artifact = buildExport({ segments, translations, sessionStartMs }, format);
-    triggerDownload(artifact.body, artifact.filename, artifact.mime);
-    setOpen(false);
+  const handleExport = async (format: ExportFormat): Promise<void> => {
+    setExporting(true);
+    setError(null);
+    try {
+      if (!(await downloadArchivedTranslation(format))) {
+        const artifact = buildExport({ segments, translations, sessionStartMs }, format);
+        triggerDownload(artifact.body, artifact.filename, artifact.mime);
+      }
+      setOpen(false);
+    } catch {
+      setError('完整匯出失敗或仍有待保存資料，請保留此分頁並重試。');
+    } finally {
+      setExporting(false);
+    }
   };
 
   return (
@@ -85,7 +97,7 @@ export function ExportMenu({ disabled = false }: ExportMenuProps) {
               type="button"
               role="menuitem"
               className={styles.item}
-              onClick={() => handleExport(f.id)}
+              onClick={() => void handleExport(f.id)}
               data-testid={`export-${f.id}`}
             >
               <span className={styles.itemLabel}>{f.label}</span>
@@ -94,6 +106,7 @@ export function ExportMenu({ disabled = false }: ExportMenuProps) {
           ))}
         </div>
       )}
+      {error && <p role="alert">{error}</p>}
     </div>
   );
 }

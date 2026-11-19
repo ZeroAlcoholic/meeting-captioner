@@ -5,7 +5,11 @@
     "jsx": "react-jsx",
     "outDir": "dist",
     "noEmit": true,
-    "types": ["vite/client"]
+    "types": ["vite/client"],
+    "paths": {
+      "@meeting-audio/offline-stt": ["./src/providers/offline/use-offline-stt.ts"],
+      "@meeting-audio/hybrid": ["./src/providers/hybrid/use-hybrid-mode.ts"]
+    }
   },
   "include": ["src"]
 }

@@ -1,4 +1,3 @@
-import { Converter } from 'opencc-js';
 import type {
   AudioLevelEvent,
   AudioSourceKind,
@@ -10,16 +9,28 @@ import type {
 } from '@meeting-audio/contracts';
 import { MicrophoneAudioProvider } from './microphone-audio-provider.js';
 import { WarmTokenCache } from './token-prewarm.js';
+import { serviceFetch } from './service-fetch.js';
+import {
+  createRecoveryAttempt,
+  type RecoveryAttempt,
+  assertRecoveryAllowed,
+  recoveryHttpError,
+  normalizeRecoveryError,
+  recoveryFailureFor,
+  permanentRecoveryFailure,
+  recoveryError,
+  protocolRecoveryKind,
+} from './recovery-attempt.js';
 import { OpenAIWsOpenError, OpenAIWsTransport } from './openai-ws-transport.js';
+import { monitorWebRtcCapture } from './capture-health.js';
+// gpt-realtime-translate only outputs 'zh' (Simplified); captions are Taiwanese.
+import { loadTranscriptNormalizer, toTaiwanese } from './transcript-normalization.js';
 import type {
   AudioSource,
   CaptionProvider,
   CaptionProviderHandlers,
   ProviderStatus,
 } from './types.js';
-
-// gpt-realtime-translate only outputs 'zh' (Simplified). Convert to Traditional Chinese (Taiwan).
-const s2tw = Converter({ from: 'cn', to: 'tw' });
 
 const OPENAI_TRANSLATION_CALLS_URL = 'https://api.openai.com/v1/realtime/translations/calls';
 
@@ -33,13 +44,19 @@ const SEGMENT_FLUSH_MS = 1000;
 // monologues and rapid Q&A, and bounds the live partial's text length
 // so the rendering cost per delta stays flat.
 const MAX_SEGMENT_DURATION_MS = 12_000;
+const RENEWAL_PEER_READY_TIMEOUT_MS = 10_000;
+const RETIRED_DRAIN_CAP_MS = 10_000;
+const RETIRED_DRAIN_GRACE_MS = 250;
+
+class RenewalCancelledError extends Error {}
 const AUDIO_LEVEL_INTERVAL_MS = 100;
 const PEAK_HOLD_MS = 2000;
 const PEAK_DECAY_DB_PER_TICK = 0.1;
 // Fallback if /session reply omits the renewal hint. Matches server default.
 const DEFAULT_SESSION_RENEW_MS = 25 * 60 * 1000;
-// Bounded ICE-restart strategy: 3 attempts, 3 s → 6 s → 12 s.
-const ICE_RESTART_DELAYS_MS = [3000, 6000, 12000];
+// A transient ICE disconnect may recover without negotiation. If it persists,
+// rebuild the complete negotiated session; restartIce() alone sends no SDP.
+const ICE_RECOVERY_GRACE_MS = 3_000;
 // Persistent renewal-retry backoff: 1s → 3s → 8s → 20s → 1m → 3m → 5m → 10m
 // cap forever.
 //
@@ -95,6 +112,15 @@ interface DCEvent {
   error?: { message?: string };
 }
 
+interface SegmentSnapshot {
+  segmentId: string;
+  startMs: number;
+  endMs: number;
+  input: string;
+  output: string;
+  continuationOf?: string;
+}
+
 const LANG_PAIR_META: Record<string, { src: string; tgt: string }> = {
   'en→zh-TW': { src: 'en', tgt: 'zh-TW' },
   'zh-TW→en': { src: 'zh-TW', tgt: 'en' },
@@ -130,6 +156,7 @@ export class SdpExchangeError extends Error {
     readonly status: number,
     readonly code: string | null,
     readonly detail: string | null,
+    readonly retryAfter: string | null = null,
   ) {
     const parts = [`OpenAI SDP exchange failed (${status}${code ? ` ${code}` : ''})`];
     if (detail) parts.push(detail);
@@ -157,7 +184,30 @@ async function readSdpError(res: Response): Promise<SdpExchangeError> {
   } catch {
     detail = raw.trim().slice(0, 200) || null;
   }
-  return new SdpExchangeError(res.status, code, detail);
+  return new SdpExchangeError(res.status, code, detail, res.headers.get('Retry-After'));
+}
+
+/** Classify only after the existing transport/key choices have been exhausted. */
+function finalTransportFailure(error: unknown) {
+  if (error instanceof SdpExchangeError) {
+    return recoveryHttpError(
+      new Response(null, {
+        status: error.status,
+        headers: error.retryAfter === null ? {} : { 'Retry-After': error.retryAfter },
+      }),
+      'openai',
+      'translation',
+    );
+  }
+  if (error instanceof OpenAIWsOpenError && error.isAuthRejection) {
+    return recoveryError(
+      'auth',
+      'openai',
+      'translation',
+      'OpenAI rejected the connection credentials',
+    );
+  }
+  return normalizeRecoveryError(error, 'openai', 'translation');
 }
 
 export interface SessionRequestBody {
@@ -185,17 +235,19 @@ async function postSession(
    * the warm-token cache keys on that object, and a retry must not be able to
    * collide with (or evict) the normal pre-warmed entry.
    */
-  rejectedSlot?: OpenAIKeySlot,
+  rejectedSlot: OpenAIKeySlot | undefined,
+  signal: AbortSignal,
 ): Promise<SessionResponse> {
-  const res = await fetch(url, {
+  signal.throwIfAborted();
+  assertRecoveryAllowed('openai', 'translation');
+  const res = await serviceFetch(url, {
+    signal,
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(rejectedSlot === undefined ? body : { ...body, rejectedSlot }),
   });
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`/session failed (${res.status}): ${text || res.statusText}`);
-  }
+  signal.throwIfAborted();
+  if (!res.ok) throw recoveryHttpError(res, 'openai', 'translation');
   return (await res.json()) as SessionResponse;
 }
 
@@ -219,10 +271,28 @@ export function prewarmOpenAISession(
 ): void {
   void warmSession.prewarm(
     warmKey(url, body),
-    () => postSession(url, body),
+    async (signal) => {
+      const attempt = createRecoveryAttempt({
+        parentSignal: signal,
+        generation: 0,
+        isCurrent: () => true,
+        label: 'OpenAI token prewarm',
+      });
+      try {
+        return await attempt.run((requestSignal) =>
+          postSession(url, body, undefined, requestSignal),
+        );
+      } finally {
+        attempt.dispose();
+      }
+    },
     sessionExpiryMs,
     refreshIfOlderThanMs,
   );
+}
+
+export function cancelOpenAIPrewarm(): void {
+  warmSession.clear();
 }
 
 /** Test hook: drop any pre-warmed token so it can't leak across tests. */
@@ -266,23 +336,50 @@ type WsOpener = (
   token: string,
   stream: MediaStream,
   handlers: Parameters<typeof OpenAIWsTransport.open>[2],
+  signal?: AbortSignal,
 ) => Promise<OpenAIWsTransport>;
 
-let wsOpener: WsOpener = (token, stream, handlers) =>
-  OpenAIWsTransport.open(token, stream, handlers);
+let wsOpener: WsOpener = (token, stream, handlers, signal) =>
+  OpenAIWsTransport.open(token, stream, handlers, signal);
 
 /** Test hooks: swap the WebSocket transport and clear the per-slot block. */
 export function __setOpenAIWsOpenerForTests(opener: WsOpener | null): void {
-  wsOpener = opener ?? ((t, st, h) => OpenAIWsTransport.open(t, st, h));
+  wsOpener = opener ?? ((t, st, h, signal) => OpenAIWsTransport.open(t, st, h, signal));
 }
 export function __resetOpenAITransportBlocksForTests(): void {
   webrtcBlockedUntil.clear();
 }
 
+interface LocalPeer {
+  pc: RTCPeerConnection;
+  dc: RTCDataChannel;
+  offerSdp: string;
+  terminalError: Error | null;
+  onTerminal: ((error: Error) => void) | null;
+  sessionCreated: boolean;
+  onSessionCreated: (() => void) | null;
+}
+
+function assertPeerUsable(peer: LocalPeer): void {
+  if (peer.terminalError) {
+    peer.pc.close();
+    throw peer.terminalError;
+  }
+  if (peer.dc.readyState === 'closing' || peer.dc.readyState === 'closed') {
+    peer.pc.close();
+    throw new Error('OpenAI caption data channel closed before activation');
+  }
+}
+
 export class OpenAIRealtimeProvider implements CaptionProvider {
+  private captureHealth: Awaited<ReturnType<typeof monitorWebRtcCapture>> | null = null;
   readonly name = 'openai-realtime';
 
   private _status: ProviderStatus = 'idle';
+  private lifecycle = new AbortController();
+  private generation = 0;
+  private activeSessionUsable = false;
+  private activeSessionClosed = false;
   // Subscribers notified whenever _status transitions. The hook uses this
   // to keep React state in sync with the provider's internal lifecycle —
   // critical during renewal: the provider may transition running → idle →
@@ -294,6 +391,9 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
   // Set instead of `pc` when the session runs over the WebSocket transport.
   // Exactly one of the two is non-null while connected.
   private wsTransport: OpenAIWsTransport | null = null;
+  private dc: RTCDataChannel | null = null;
+  private retired: { finish: (emit?: boolean) => SegmentSnapshot | undefined } | null = null;
+  private stopComplete: Promise<void> = Promise.resolve();
   private readonly mic: AudioSource;
   // The acquired mic MediaStream, persisted ACROSS renewals. Make-before-break
   // renewal re-uses these exact tracks for the new peer connection instead of
@@ -301,11 +401,14 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
   // getUserMedia re-prompt, and no transient capture failure every 25 minutes.
   // Released only on full stop()/cleanup().
   private stream: MediaStream | null = null;
+  private pendingAcquisition: Promise<MediaStream> | null = null;
   // Re-entrancy guard: a renewal can be triggered concurrently by the 25-min
   // timer, an ICE/connection failure, a session.closed event, the stale
   // detector, and the retry backoff. Only one make-before-break swap may run at
   // a time, or two new peers would race to become this.pc.
   private renewing = false;
+  private renewalAttempt = 0;
+  private cancelPendingRenewalPeer: (() => void) | null = null;
   private levelInterval: ReturnType<typeof setInterval> | null = null;
   private segmentFlushTimer: ReturnType<typeof setTimeout> | null = null;
   private renewTimer: ReturnType<typeof setTimeout> | null = null;
@@ -316,7 +419,6 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
   private segmentDeadlineTimer: ReturnType<typeof setTimeout> | null = null;
   private renewScheduledAtMs = 0;
   private renewDelayMs = DEFAULT_SESSION_RENEW_MS;
-  private iceRestartAttempt = 0;
   private iceRestartTimer: ReturnType<typeof setTimeout> | null = null;
   private renewalRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private renewalRetryAttempt = 0;
@@ -349,6 +451,7 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
   private inputAcc = '';
   private outputAcc = '';
   private currentSegmentId = '';
+  private continuationOf: string | undefined;
   private startMs = 0;
 
   constructor(
@@ -397,13 +500,22 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
   private setStatus(s: ProviderStatus): void {
     if (this._status === s) return;
     this._status = s;
+    this.notifyStatus(s);
+  }
+
+  private notifyStatus(s: ProviderStatus): void {
     for (const fn of this.statusListeners) {
+      if (this._status !== s) return;
       try {
         fn(s);
       } catch {
         /* listener errors must not corrupt provider state */
       }
     }
+  }
+
+  private isCurrentGeneration(generation: number): boolean {
+    return generation === this.generation && this._status === 'running';
   }
 
   /** Milliseconds remaining before the next scheduled session renewal, or null when no renewal is pending. */
@@ -415,9 +527,22 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
 
   async start(): Promise<void> {
     if (this._status === 'running') return;
+    const previousGeneration = this.generation;
+    this.retired?.finish();
+    // Final-caption subscribers can synchronously start the successor.
+    if (this.generation !== previousGeneration) return;
+    this.lifecycle.abort(new RenewalCancelledError('Superseded by Start'));
+    this.lifecycle = new AbortController();
+    const generation = ++this.generation;
     this.setStatus('running');
-    this.iceRestartAttempt = 0;
+    if (!this.isCurrentGeneration(generation)) return;
+    this.activeSessionUsable = false;
+    this.activeSessionClosed = false;
     this.newSegment();
+    // Runs alongside the permission prompt and the mint; awaited before the
+    // session can carry text, so no caption is ever published unconverted.
+    const normalizer = loadTranscriptNormalizer();
+    normalizer.catch(() => {});
 
     // Robustness: each await can yield control. If the caller invokes stop()
     // between awaits, cleanup() nulls this.pc and the next line would NPE.
@@ -425,26 +550,22 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
     // user-visible UI events or the dc handler attachment. Read through the
     // public getter so TS does not narrow _status to a literal that defeats
     // the check.
-    const aborted = (): boolean => this.status !== 'running';
+    const aborted = (): boolean => this.status !== 'running' || generation !== this.generation;
 
-    // Kick the token-broker fetch off CONCURRENTLY with mic acquisition. The two
-    // are independent (the token doesn't need the mic, the mic doesn't need the
-    // token), so overlapping them shaves a full network RTT (~0.3-0.6 s) off
-    // time-to-first-caption — and on a cold start the fetch completes while the
-    // user is still reading the permission dialog. Settle-wrapped so a mic
-    // denial can't turn the in-flight fetch into an unhandled rejection; a token
-    // minted-but-unused on the rare mic-denied path is a negligible cost.
     this.emitHealth('transport', 'connecting');
-    const tokenPromise = this.fetchSessionToken().then(
-      (value) => ({ ok: true as const, value }),
-      (error: unknown) => ({ ok: false as const, error }),
-    );
+    if (aborted()) return;
 
     // Step 1: mic acquisition. Failures here are AUDIO failures, not transport.
     let stream: MediaStream;
     try {
-      stream = await this.mic.acquire(this.handlers.onHealth);
+      // Share within the current start only. Stop invalidates the lease's
+      // pending permission request; its late stream must never serve a new start.
+      this.pendingAcquisition ??= this.mic.acquire(this.handlers.onHealth);
+      stream = await this.pendingAcquisition;
     } catch {
+      if (this.status !== 'running') this.pendingAcquisition = null;
+      if (aborted()) return;
+      this.pendingAcquisition = null;
       // Provider contract: AudioSource.acquire() MUST emit its own precise
       // health event before throwing (MicrophoneAudioProvider emits 'failed';
       // DisplayMediaAudioProvider distinguishes 'failed' from 'no_audio_track'
@@ -453,22 +574,38 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       // clobbering DisplayMediaAudioProvider's more specific 'no_audio_track'
       // state, losing the actionable distinction the UI needs to coach the
       // user to tick the "Share audio" checkbox.
-      this.setStatus('stopped');
-      this.cleanup();
-      void tokenPromise; // settled-wrapped: nothing to surface, just don't dangle
+      this.finishSession(false);
       return;
     }
     if (aborted()) {
-      // User pressed Stop while mic dialog was open. mic.acquire returned a
-      // stream but we never used it — release tracks so the OS mic indicator
-      // turns off.
-      stream.getTracks().forEach((t) => t.stop());
-      void tokenPromise;
+      // Release only this source's lease, never shared tracks. A newer Start
+      // owns an independent request on this lease and must not be released here.
+      if (this.status !== 'running') {
+        this.pendingAcquisition = null;
+        this.mic.release();
+      }
       return;
     }
+    this.pendingAcquisition = null;
     // Persist for make-before-break renewal — re-used, not re-acquired.
     this.stream = stream;
 
+    try {
+      await normalizer;
+    } catch {
+      if (aborted()) return;
+      this.emitHealth('transport', 'failed', '繁體字典載入失敗，字幕無法以台灣用詞顯示');
+      this.finishSession(false);
+      return;
+    }
+    if (aborted()) return;
+
+    // Permission waits do not consume the network attempt budget.
+    const attempt = this.createAttempt();
+    const tokenPromise = this.fetchSessionToken(attempt).then(
+      (value) => ({ ok: true as const, value }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
     // Step 2+: peer build + SDP exchange. TRANSPORT failures.
     try {
       // Build the local offer NOW — it needs only the mic, not the token — so
@@ -476,10 +613,9 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       // mint. By the time the token arrives, localDescription carries the STUN
       // candidates gathered during that window, so exchangeSdp POSTs a
       // candidate-enriched offer at zero added latency.
-      const conn = await this.createLocalOffer(this.stream);
+      const conn = await this.createLocalOffer(this.stream, attempt);
       if (conn === null || aborted()) {
         conn?.pc.close();
-        void tokenPromise;
         return;
       }
 
@@ -513,48 +649,113 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
             'reconnecting',
             'Session token near expiry — refreshing before connect',
           );
-          void this.renewSession();
+          await this.renewSession(attempt);
+          if (aborted()) return;
+          if (!this.isPrimaryHealthy())
+            throw new Error('Session refresh did not establish a ready transport');
           return;
         }
       }
 
-      const outcome = await this.connectSession(sessionData, conn);
+      const outcome = await this.connectSession(sessionData, conn, attempt);
       if (outcome.kind === 'aborted' || aborted()) {
         if (outcome.kind === 'webrtc') outcome.pc.close();
         if (outcome.kind === 'websocket') outcome.transport.close();
         return;
       }
       if (outcome.kind === 'webrtc') {
+        await this.waitForRenewalPeer(outcome, attempt);
+        if (aborted()) {
+          outcome.pc.close();
+          return;
+        }
+        assertPeerUsable(outcome);
+        if (outcome.pc.connectionState !== 'connected') {
+          outcome.pc.close();
+          throw new Error('Initial peer lost readiness before activation');
+        }
+        this.activeSessionUsable = true;
+        this.activeSessionClosed = false;
         this.pc = outcome.pc;
         this.wirePeer(outcome.pc, outcome.dc);
       } else {
+        this.activeSessionUsable = true;
+        this.activeSessionClosed = false;
         this.wsTransport = outcome.transport;
+        outcome.transport.activate();
       }
-      this.emitHealth('transport', 'connected');
+      // SDP acceptance precedes ICE/DTLS readiness. Keep the startup cue at
+      // "connecting" until media can flow, so the user is not told to speak
+      // while the opening words would still be discarded.
+      if (outcome.kind === 'websocket' || outcome.pc.connectionState === 'connected') {
+        this.emitHealth('transport', 'connected');
+      }
 
+      if (aborted()) return;
       // Bring-up succeeded — any prior renewal-retry backoff state is now
       // moot. Reset the counter so a fresh failure later starts at 30 s,
       // not at whatever the previous failure escalated to.
       this.renewalRetryAttempt = 0;
       this.resetStaleBaselines();
 
+      if (outcome.kind === 'webrtc' && this.stream) {
+        try {
+          const monitor = await monitorWebRtcCapture(
+            this.stream,
+            (event) => {
+              if (!aborted() && this.pc && !this.wsTransport) this.handlers.onHealth(event);
+            },
+            this.lifecycle.signal,
+          );
+          if (aborted()) {
+            monitor.dispose();
+            return;
+          }
+          this.captureHealth = monitor;
+        } catch (error) {
+          if (aborted()) return;
+          const generation = this.finishSession(false);
+          if (this.generation === generation)
+            this.emitHealth(
+              'audio',
+              'failed',
+              error instanceof Error ? error.message : '收音監測無法啟動，請重新開始收音。',
+            );
+          return;
+        }
+      }
+      if (aborted()) return;
       this.startLevelPolling();
       this.scheduleRenewal(this.renewDelayMs);
       this.startDiagnosticDump();
     } catch (err) {
       if (aborted()) return; // user already stopped; don't surface a misleading error
       const message = err instanceof Error ? err.message : 'Unknown error starting Realtime';
-      this.emitHealth('transport', 'api_error', message);
-      this.setStatus('stopped');
-      this.cleanup();
+      const failure = finalTransportFailure(err);
+      const finishedGeneration = this.finishSession(false);
+      if (finishedGeneration === this.generation)
+        this.emitHealth('transport', 'api_error', message, failure.failure);
+    } finally {
+      attempt.dispose();
     }
+  }
+
+  private createAttempt(): RecoveryAttempt {
+    return createRecoveryAttempt({
+      parentSignal: this.lifecycle.signal,
+      generation: this.generation,
+      isCurrent: (generation) => this.isCurrentGeneration(generation),
+      label: 'OpenAI connection attempt',
+    });
   }
 
   /**
    * POST /session for a fresh ephemeral token. Returns null if the provider was
    * stopped mid-flight; throws on a non-2xx response (transport failure).
    */
-  private async fetchSessionToken(): Promise<SessionResponse | null> {
+  private async fetchSessionToken(attempt: RecoveryAttempt): Promise<SessionResponse | null> {
+    attempt.assertActive();
+    assertRecoveryAllowed('openai', 'translation');
     const body = sessionRequestBody(this.langPair, this.includeSourceTranscript, this.micDistance);
     // Use a pre-warmed token if one was minted for this EXACT request and is
     // still fresh (single-use; consume clears it so a renewal mints fresh).
@@ -563,7 +764,9 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       // Honour the abort contract even on the fast path.
       return this.status === 'running' ? warm : null;
     }
-    const session = await postSession(this.sessionUrl, body);
+    const session = await attempt.run((signal) =>
+      postSession(this.sessionUrl, body, undefined, signal),
+    );
     if (this.status !== 'running') return null;
     return session;
   }
@@ -581,8 +784,12 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
    */
   private async createLocalOffer(
     stream: MediaStream,
-  ): Promise<{ pc: RTCPeerConnection; dc: RTCDataChannel; offerSdp: string } | null> {
-    const aborted = (): boolean => this.status !== 'running';
+    attempt: RecoveryAttempt,
+    candidate = false,
+  ): Promise<LocalPeer | null> {
+    attempt.assertActive();
+    const signal = attempt.signal;
+    const aborted = (): boolean => this.status !== 'running' || signal.aborted;
     // Configure ICE servers so corporate / strict-firewall networks can gather
     // server-reflexive candidates and complete the WebRTC handshake. Browsers'
     // built-in default works on home/open Wi-Fi but typically fails on
@@ -597,21 +804,63 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       for (const track of ev.streams[0]?.getTracks() ?? []) track.stop();
     };
     const dc = pc.createDataChannel('oai-events');
+    const peer: LocalPeer = {
+      pc,
+      dc,
+      offerSdp: '',
+      terminalError: null,
+      onTerminal: null,
+      sessionCreated: false,
+      onSessionCreated: null,
+    };
+    dc.onmessage = (message: MessageEvent<string>) => {
+      let event: DCEvent;
+      try {
+        event = JSON.parse(message.data) as DCEvent;
+      } catch {
+        return;
+      }
+      if (event.type === 'session.created') {
+        peer.sessionCreated = true;
+        peer.onSessionCreated?.();
+        return;
+      }
+      if (event.type !== 'session.closed' && event.type !== 'error') return;
+      const error = new Error(
+        event.error?.message ?? 'OpenAI candidate session closed before activation',
+      );
+      peer.terminalError = error;
+      peer.onTerminal?.(error);
+    };
     // Display capture requires a video track for browser permission UX, but
     // this provider is audio-only. Keep video out of the OpenAI SDP.
-    stream.getAudioTracks().forEach((track) => pc.addTrack(track, stream));
+    if (candidate) {
+      // Negotiate an audio sender without duplicating live meeting input.
+      stream
+        .getAudioTracks()
+        .forEach(() => pc.addTransceiver('audio', { direction: 'sendrecv', streams: [stream] }));
+    } else stream.getAudioTracks().forEach((track) => pc.addTrack(track, stream));
 
-    const offer = await pc.createOffer();
-    if (aborted()) {
+    try {
+      return await attempt.run(async (offerSignal) => {
+        const offer = await pc.createOffer();
+        if (aborted() || offerSignal.aborted) {
+          pc.close();
+          return null;
+        }
+        await pc.setLocalDescription(offer); // ICE candidate gathering starts here
+        if (aborted() || offerSignal.aborted) {
+          pc.close();
+          return null;
+        }
+        assertPeerUsable(peer);
+        peer.offerSdp = offer.sdp ?? '';
+        return peer;
+      });
+    } catch (error) {
       pc.close();
-      return null;
+      throw error;
     }
-    await pc.setLocalDescription(offer); // ICE candidate gathering starts here
-    if (aborted()) {
-      pc.close();
-      return null;
-    }
-    return { pc, dc, offerSdp: offer.sdp ?? '' };
   }
 
   /**
@@ -625,23 +874,28 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
     pc: RTCPeerConnection,
     offerSdp: string,
     secretValue: string,
+    attempt: RecoveryAttempt,
   ): Promise<boolean> {
-    const aborted = (): boolean => this.status !== 'running';
-    // localDescription accrues ICE candidates after setLocalDescription — prefer
-    // it so the offer we send is as complete as it can be by now.
-    const sdp = pc.localDescription?.sdp ?? offerSdp;
-    const sdpRes = await fetch(OPENAI_TRANSLATION_CALLS_URL, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${secretValue}`, 'Content-Type': 'application/sdp' },
-      body: sdp,
+    const signal = attempt.signal;
+    const aborted = (): boolean => this.status !== 'running' || signal.aborted;
+    return attempt.run(async (requestSignal) => {
+      // localDescription accrues ICE candidates after setLocalDescription — prefer
+      // it so the offer we send is as complete as it can be by now.
+      const sdp = pc.localDescription?.sdp ?? offerSdp;
+      const sdpRes = await fetch(OPENAI_TRANSLATION_CALLS_URL, {
+        signal: requestSignal,
+        method: 'POST',
+        headers: { Authorization: `Bearer ${secretValue}`, 'Content-Type': 'application/sdp' },
+        body: sdp,
+      });
+      if (aborted() || requestSignal.aborted) return false;
+      if (!sdpRes.ok) throw await readSdpError(sdpRes);
+      const sdpText = await sdpRes.text();
+      if (aborted() || requestSignal.aborted) return false;
+      await pc.setRemoteDescription({ type: 'answer', sdp: sdpText });
+      if (aborted() || requestSignal.aborted) return false;
+      return true;
     });
-    if (aborted()) return false;
-    if (!sdpRes.ok) throw await readSdpError(sdpRes);
-    const sdpText = await sdpRes.text();
-    if (aborted()) return false;
-    await pc.setRemoteDescription({ type: 'answer', sdp: sdpText });
-    if (aborted()) return false;
-    return true;
   }
 
   /**
@@ -669,13 +923,15 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
    */
   private async connectSession(
     sessionData: SessionResponse,
-    offer: { pc: RTCPeerConnection; dc: RTCDataChannel; offerSdp: string } | null,
+    offer: LocalPeer | null,
+    attempt: RecoveryAttempt,
   ): Promise<
-    | { kind: 'webrtc'; pc: RTCPeerConnection; dc: RTCDataChannel }
+    | ({ kind: 'webrtc' } & LocalPeer)
     | { kind: 'websocket'; transport: OpenAIWsTransport }
     | { kind: 'aborted' }
   > {
-    const aborted = (): boolean => this.status !== 'running';
+    const aborted = (): boolean => this.status !== 'running' || attempt.signal.aborted;
+    attempt.assertActive();
     const slotA = sessionData.key_slot ?? 'unknown';
     let firstError: Error | null = null;
 
@@ -686,24 +942,26 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
           offer.pc,
           offer.offerSdp,
           sessionData.client_secret.value,
+          attempt,
         );
         if (!ok) {
           offer.pc.close();
           return { kind: 'aborted' };
         }
-        return { kind: 'webrtc', pc: offer.pc, dc: offer.dc };
+        assertPeerUsable(offer);
+        return Object.assign(offer, { kind: 'webrtc' as const });
       } catch (err) {
+        if (attempt.signal.aborted) {
+          offer.pc.close();
+          throw attempt.signal.reason;
+        }
         if (!(err instanceof SdpExchangeError) || !err.isAuthRejection) {
           offer.pc.close();
           throw err;
         }
         firstError = err;
         blockWebRtcFor(slotA);
-        this.emitHealth(
-          'transport',
-          'reconnecting',
-          `${err.message} - switching to the WebSocket transport`,
-        );
+        this.emitRecoveryProgress(`${err.message} - switching to the WebSocket transport`);
       }
     }
     if (aborted()) {
@@ -715,37 +973,65 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
     //    inside its own organisation instead of failing over to another one.
     let wsAuthRejected = false;
     try {
-      const transport = await this.openWsTransport(sessionData.client_secret.value);
+      const transport = await this.openWsTransport(sessionData.client_secret.value, attempt);
       offer?.pc.close(); // the WebRTC peer is surplus now
       return { kind: 'websocket', transport };
     } catch (err) {
-      firstError ??= err instanceof Error ? err : new Error(String(err));
+      if (aborted()) {
+        offer?.pc.close();
+        throw attempt.signal.reason;
+      }
+      attempt.assertActive();
+      const wsError = err instanceof Error ? err : new Error(String(err));
+      const priorError = firstError;
+      firstError ??= wsError;
       wsAuthRejected = err instanceof OpenAIWsOpenError && err.isAuthRejection;
+      // A network, timeout, or local capture failure says nothing about the
+      // credential. Reporting rejectedSlot here would globally demote this key
+      // and could move meeting audio to an alternate account without evidence.
+      if (!wsAuthRejected) {
+        offer?.pc.close();
+        if (priorError !== null) {
+          throw new Error(
+            `${priorError.message} - WebSocket fallback also failed: ${wsError.message}`,
+          );
+        }
+        throw wsError;
+      }
     }
     if (aborted()) {
       offer?.pc.close();
       return { kind: 'aborted' };
     }
 
-    // 3-4. Alternate key, both transports. Reachable when this key failed on
-    //      BOTH transports, or when the WebSocket transport is unavailable in
-    //      this environment at all.
+    // 3-4. Alternate key, both transports. Reachable only when this credential
+    //      was rejected for an auth/permission reason on BOTH transports.
+    //      Network, timeout, and local capture failures do not justify moving
+    //      meeting audio to a different account.
     const rejectedSlot = sessionData.key_slot;
     if (rejectedSlot === undefined) {
       offer?.pc.close();
       throw firstError ?? new Error('OpenAI session could not be established');
     }
-    this.emitHealth(
-      'transport',
-      'reconnecting',
+    attempt.assertActive();
+    this.emitRecoveryProgress(
       wsAuthRejected
         ? `OpenAI refused the ${rejectedSlot} key on both transports - retrying with the alternate key`
         : `OpenAI rejected the ${rejectedSlot} key - retrying with the alternate key`,
     );
+    attempt.assertActive();
     // Any pre-warmed token was minted from the slot that just failed.
     warmSession.clear();
     const body = sessionRequestBody(this.langPair, this.includeSourceTranscript, this.micDistance);
-    const retrySession = await postSession(this.sessionUrl, body, rejectedSlot);
+    let retrySession: SessionResponse;
+    try {
+      retrySession = await attempt.run((signal) =>
+        postSession(this.sessionUrl, body, rejectedSlot, signal),
+      );
+    } catch (error) {
+      offer?.pc.close();
+      throw error;
+    }
     if (aborted()) {
       offer?.pc.close();
       return { kind: 'aborted' };
@@ -765,13 +1051,19 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
           offer.pc,
           offer.offerSdp,
           retrySession.client_secret.value,
+          attempt,
         );
         if (!ok) {
           offer.pc.close();
           return { kind: 'aborted' };
         }
-        return { kind: 'webrtc', pc: offer.pc, dc: offer.dc };
+        assertPeerUsable(offer);
+        return Object.assign(offer, { kind: 'webrtc' as const });
       } catch (err) {
+        if (attempt.signal.aborted) {
+          offer.pc.close();
+          throw attempt.signal.reason;
+        }
         if (!(err instanceof SdpExchangeError) || !err.isAuthRejection) {
           offer.pc.close();
           throw err;
@@ -780,12 +1072,14 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       }
     }
     try {
-      const transport = await this.openWsTransport(retrySession.client_secret.value);
+      const transport = await this.openWsTransport(retrySession.client_secret.value, attempt);
       offer?.pc.close();
       return { kind: 'websocket', transport };
     } catch (err) {
       offer?.pc.close();
-      throw firstError ?? (err instanceof Error ? err : new Error(String(err)));
+      // The alternate credential's final result determines eligibility. A
+      // primary auth rejection cannot turn an alternate network fault permanent.
+      throw err instanceof Error ? err : new Error(String(err));
     }
   }
 
@@ -795,31 +1089,74 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
    * contract is identical, so segmentation, the wedge detector and the health
    * ladder all stay transport-agnostic.
    */
-  private async openWsTransport(token: string): Promise<OpenAIWsTransport> {
+  private async openWsTransport(
+    token: string,
+    attempt: RecoveryAttempt,
+  ): Promise<OpenAIWsTransport> {
     const stream = this.stream;
     if (stream === null) throw new Error('No audio stream to send to OpenAI');
-    return await wsOpener(token, stream, {
-      onEvent: (ev) => this.handleDCEvent(ev as DCEvent),
-      onClosed: (reason) => {
-        if (this._status !== 'running') return;
-        this.emitHealth('transport', 'reconnecting', `OpenAI WebSocket dropped - ${reason}`);
-        void this.renewSession();
-      },
-      onAudioTrouble: (state, message) => this.emitHealth('audio', state, message),
-    });
+    return await attempt.run(() =>
+      wsOpener(
+        token,
+        stream,
+        {
+          onEvent: (ev) => this.handleDCEvent(ev as DCEvent),
+          onClosed: (reason) => {
+            if (!this.isCurrentGeneration(attempt.generation)) return;
+            this.activeSessionUsable = false;
+            this.emitHealth('transport', 'reconnecting', `OpenAI WebSocket dropped - ${reason}`);
+            if (this.isCurrentGeneration(attempt.generation)) void this.renewSession();
+          },
+          onAudioTrouble: (state, message, component = 'audio') =>
+            this.emitHealth(component, state, message),
+          onCaptureHealth: (event) => {
+            if (this.isCurrentGeneration(attempt.generation)) this.handlers.onHealth(event);
+          },
+        },
+        attempt.signal,
+      ).then((transport) => {
+        try {
+          attempt.assertActive();
+          return transport;
+        } catch (error) {
+          transport.close();
+          throw error;
+        }
+      }),
+    );
   }
 
   /** Attach the live event/state handlers to a freshly-built peer. */
   private wirePeer(pc: RTCPeerConnection, dc: RTCDataChannel): void {
+    const generation = this.generation;
+    const owned = () => this.isCurrentGeneration(generation) && this.pc === pc;
+    this.dc = dc;
+    const channelUnavailable = () => {
+      if (!owned() || !this.activeSessionUsable) return;
+      this.activeSessionUsable = false;
+      this.emitHealth(
+        'transport',
+        'reconnecting',
+        'Caption data channel unavailable — rebuilding session',
+      );
+      if (owned()) void this.renewSession();
+    };
+    dc.onclose = channelUnavailable;
+    dc.onerror = channelUnavailable;
     dc.onmessage = (ev: MessageEvent<string>) => {
+      if (!owned()) return;
       try {
         this.handleDCEvent(JSON.parse(ev.data) as DCEvent);
       } catch (err) {
         console.warn('[openai-rt] DC event error:', err, 'raw:', ev.data.slice(0, 200));
       }
     };
-    pc.oniceconnectionstatechange = () => this.handleIceState();
-    pc.onconnectionstatechange = () => this.handleConnectionState();
+    pc.oniceconnectionstatechange = () => {
+      if (owned()) this.handleIceState();
+    };
+    pc.onconnectionstatechange = () => {
+      if (owned()) this.handleConnectionState();
+    };
   }
 
   /**
@@ -834,25 +1171,65 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
     this.silenceEmitted = false;
   }
 
-  stop(): void {
-    if (this._status === 'stopped') {
-      // The provider is already in the 'stopped' resting state, but the
-      // persistent renewal-retry timer set in scheduleRenewalRetry() can
-      // still be pending — if we returned here without cleanup() the OLD
-      // instance would later fire start() in parallel with a newer one
-      // the user manually created, opening a duplicate mic + WebRTC
-      // session. Always cancel pending work before returning.
-      this.cleanup();
-      return;
-    }
-    this.setStatus('stopped');
-    this.flushSegment();
-    this.cleanup();
+  // User Stop waits for the tail; teardown/replacement can force it closed.
+  stop(options?: { drain?: boolean }): void {
+    const alreadyStopped = this._status === 'stopped';
+    const generation = this.finishSession(
+      !alreadyStopped,
+      !alreadyStopped && options?.drain === true,
+    );
+    if (alreadyStopped || generation !== this.generation) return;
     this.emitHealth('audio', 'stopped');
+    if (generation !== this.generation) return;
     this.emitHealth('transport', 'stopped');
   }
 
-  private cleanup(): void {
+  /** Resolves after the bounded translation tail has emitted its final events. */
+  waitForStop(): Promise<void> {
+    return this.stopComplete;
+  }
+
+  /** Complete the old generation before any observer can start its successor. */
+  private finishSession(flush: boolean, drain = false): number {
+    const changed = this._status !== 'stopped';
+    const tail = flush ? this.snapshotSegment() : null;
+    const pc = drain && this.activeSessionUsable ? this.pc : null;
+    const dc = pc ? this.dc : null;
+    const ws = drain && this.activeSessionUsable ? this.wsTransport : null;
+    // Cleanup cancels attempts/timers and releases capture, while the detached
+    // transport can only update its own bounded snapshot, never a new session.
+    if (pc) {
+      this.pc = null;
+      this.dc = null;
+    }
+    if (ws) this.wsTransport = null;
+    this._status = 'stopped';
+    const retiredTail = this.cleanup();
+    this.newSegment();
+    const generation = this.generation;
+    if (tail && (pc || ws)) {
+      this.stopComplete = new Promise<void>((resolve) => {
+        this.retireTransport(pc, dc, ws, { ...tail }, resolve);
+      });
+    }
+    if (tail) this.emitSegmentFinal(tail);
+    if (generation !== this.generation) return generation;
+    if (retiredTail) this.emitSegmentFinal(retiredTail);
+    if (generation !== this.generation) return generation;
+    if (changed) this.notifyStatus('stopped');
+    return generation;
+  }
+
+  private cleanup(): SegmentSnapshot | undefined {
+    this.pendingAcquisition = null;
+    this.captureHealth?.dispose();
+    this.captureHealth = null;
+    this.generation += 1;
+    this.lifecycle.abort(new RenewalCancelledError('Stopped'));
+    this.activeSessionUsable = false;
+    const retiredTail = this.retired?.finish(false);
+    this.renewalAttempt += 1;
+    this.cancelPendingRenewalPeer?.();
     if (this.levelInterval !== null) clearInterval(this.levelInterval);
     if (this.segmentFlushTimer !== null) clearTimeout(this.segmentFlushTimer);
     if (this.segmentDeadlineTimer !== null) clearTimeout(this.segmentDeadlineTimer);
@@ -871,12 +1248,15 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
     this.renewing = false;
     this.pc?.close();
     this.pc = null;
+    if (this.dc) this.dc.onmessage = null;
+    this.dc = null;
     this.wsTransport?.close();
     this.wsTransport = null;
     // Releasing the mic stops the shared MediaStream tracks (this.stream points
     // at the same object the mic holds), so the OS capture indicator turns off.
     this.mic.release();
     this.stream = null;
+    return retiredTail;
   }
 
   private scheduleRenewal(delayMs: number): void {
@@ -889,8 +1269,9 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
   /**
    * Make-before-break session renewal. Build a brand-new peer connection over
    * the EXISTING mic stream while the current one keeps delivering captions,
-   * then swap atomically — so a scheduled 25-min renewal costs ZERO caption gap
-   * and never re-acquires the mic. For a failure-driven renewal (ICE/connection
+   * then swap only after the replacement media connection is ready, without
+   * re-acquiring the mic. This preserves transport availability; model output
+   * can still pause during renewal. For a failure-driven renewal (ICE/connection
    * failed, session.closed, wedge) the old peer is already dead, so there's no
    * gap to save, but reusing the mic and not tearing down the level/diagnostic
    * loops still keeps recovery clean.
@@ -900,35 +1281,85 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
    * scheduled. Status stays 'running' throughout so the UI shows auto-recovery
    * (+ the cross-model failover affordance) rather than a dead Start button.
    */
-  private async renewSession(): Promise<void> {
+  private async renewSession(existingAttempt?: RecoveryAttempt): Promise<void> {
     if (this._status !== 'running') return;
     if (this.renewing) return; // one swap at a time
     if (!this.stream) return; // no mic to reuse — should not happen while running
     this.renewing = true;
-    this.emitHealth('transport', 'reconnecting', 'Renewing OpenAI session (zero-gap)');
+    if (this.renewalRetryTimer !== null) {
+      clearTimeout(this.renewalRetryTimer);
+      this.renewalRetryTimer = null;
+    }
+    const renewalId = ++this.renewalAttempt;
+    const attempt = existingAttempt ?? this.createAttempt();
+    const aborted = () => this._status !== 'running' || renewalId !== this.renewalAttempt;
+    this.emitRecoveryProgress('Renewing OpenAI session');
     try {
-      const sessionData = await this.fetchSessionToken();
-      if (sessionData === null || this._status !== 'running') return;
+      const sessionData = await this.fetchSessionToken(attempt);
+      if (sessionData === null || aborted()) return;
       this.renewDelayMs = sessionData.session_renewal_recommended_ms ?? this.renewDelayMs;
       // Build a fresh local offer unless WebRTC is known-blocked for this key
       // (then the ladder goes straight to the WebSocket transport and the peer
       // would be dead weight). Re-probing WebRTC here is deliberate and free:
       // the OLD session keeps captioning until the swap below, so a failed
-      // probe costs latency on a background renewal, never a caption gap.
+      // probe does not require closing the existing media connection.
       const slot = sessionData.key_slot ?? 'unknown';
-      let offer: { pc: RTCPeerConnection; dc: RTCDataChannel; offerSdp: string } | null = null;
+      let offer: LocalPeer | null = null;
       if (!isWebRtcBlockedFor(slot)) {
-        offer = await this.createLocalOffer(this.stream);
-        if (offer === null || this._status !== 'running') {
+        offer = await this.createLocalOffer(this.stream, attempt, true);
+        if (offer === null || aborted()) {
           offer?.pc.close();
           return;
         }
       }
-      const outcome = await this.connectSession(sessionData, offer);
-      if (outcome.kind === 'aborted' || this._status !== 'running') {
+      const outcome = await this.connectSession(sessionData, offer, attempt);
+      if (outcome.kind === 'aborted' || aborted()) {
         if (outcome.kind === 'webrtc') outcome.pc.close();
         if (outcome.kind === 'websocket') outcome.transport.close();
         return;
+      }
+
+      // SDP acceptance is not media readiness. Keep the old peer and its
+      // caption handlers active while the candidate finishes ICE/DTLS.
+      if (outcome.kind === 'webrtc') {
+        await this.waitForRenewalPeer(outcome, attempt);
+        if (aborted()) {
+          outcome.pc.close();
+          return;
+        }
+        const tracks = this.stream.getAudioTracks();
+        try {
+          await attempt.run(() =>
+            Promise.all(
+              outcome.pc
+                .getSenders()
+                .map((sender, index) => sender.replaceTrack(tracks[index] ?? null)),
+            ),
+          );
+        } catch (error) {
+          outcome.pc.close();
+          throw error;
+        }
+        if (aborted()) {
+          outcome.pc.close();
+          return;
+        }
+        assertPeerUsable(outcome);
+        // Readiness may have changed after resolving the wait but before this
+        // continuation ran. Never detach the old peer for a dead candidate.
+        if (outcome.pc.connectionState !== 'connected' || outcome.dc.readyState !== 'open') {
+          outcome.pc.close();
+          throw new Error('Renewal peer lost readiness before activation');
+        }
+      }
+
+      // Validate the ready-but-silent candidate before touching the healthy
+      // old session. Browser events cannot interleave between this synchronous
+      // check and activate(), so a candidate that closed during the promise
+      // hand-off cannot replace a healthy old transport with a dead candidate.
+      if (outcome.kind === 'websocket' && !outcome.transport.isOpen) {
+        outcome.transport.close();
+        throw new OpenAIWsOpenError('Renewal WebSocket closed before activation', false);
       }
 
       // ── Atomic make-before-break swap ──
@@ -937,13 +1368,22 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       // promote the new one. The new DataChannel handler is wired only HERE
       // (buildPeer left it unwired), so the new session's deltas can't
       // double-render alongside the old during the overlap window.
+      const retiredSegment = this.snapshotSegment();
       this.flushSegment();
+      if (aborted()) {
+        if (outcome.kind === 'webrtc') outcome.pc.close();
+        else outcome.transport.close();
+        return;
+      }
+      // Empty accumulators still belong to the retiring transport. Reserve a
+      // distinct id before new events arrive, so a late old tail cannot overwrite them.
+      if (this.currentSegmentId === retiredSegment.segmentId) this.newSegment();
       const oldPc = this.pc;
+      const oldDc = this.dc;
       if (oldPc) {
         oldPc.oniceconnectionstatechange = null;
         oldPc.onconnectionstatechange = null;
         oldPc.ontrack = null;
-        oldPc.close();
       }
       // Same contract for the WebSocket transport: detach first so the dying
       // socket cannot deliver a late event (or a close-driven renewal) into
@@ -951,38 +1391,160 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       const oldWs = this.wsTransport;
       if (oldWs) {
         oldWs.detach();
-        oldWs.close();
       }
       this.pc = null;
+      this.dc = null;
       this.wsTransport = null;
-      if (outcome.kind === 'webrtc') {
-        this.pc = outcome.pc;
-        this.wirePeer(outcome.pc, outcome.dc);
-      } else {
-        this.wsTransport = outcome.transport;
+      let retired = false;
+      try {
+        this.activeSessionUsable = true;
+        this.activeSessionClosed = false;
+        if (outcome.kind === 'webrtc') {
+          this.pc = outcome.pc;
+          this.wirePeer(outcome.pc, outcome.dc);
+        } else {
+          this.wsTransport = outcome.transport;
+          // open() returns a ready-but-silent WebSocket. Activate only after
+          // the old segment was finalized and the old transport was detached,
+          // so queued new-session deltas start in a fresh segment.
+          outcome.transport.activate();
+        }
+        this.retireTransport(oldPc, oldDc, oldWs, retiredSegment);
+        retired = true;
+      } catch (err) {
+        if (outcome.kind === 'websocket') outcome.transport.close();
+        this.pc = null;
+        this.wsTransport = null;
+        throw err;
+      } finally {
+        if (!retired) {
+          oldPc?.close();
+          oldWs?.close();
+        }
       }
 
+      if (aborted()) return;
       // A stale ICE-restart timer from the old peer would call restartIce on the
       // NEW one — clear it and reset the backoff for a clean slate.
       if (this.iceRestartTimer !== null) {
         clearTimeout(this.iceRestartTimer);
         this.iceRestartTimer = null;
       }
-      this.iceRestartAttempt = 0;
       this.resetStaleBaselines();
+      if (outcome.kind === 'websocket') {
+        this.captureHealth?.dispose();
+        this.captureHealth = null;
+      } else if (!this.captureHealth && this.stream) {
+        const generation = this.generation;
+        try {
+          const monitor = await monitorWebRtcCapture(
+            this.stream,
+            (event) => {
+              if (this.isCurrentGeneration(generation) && this.pc && !this.wsTransport)
+                this.handlers.onHealth(event);
+            },
+            this.lifecycle.signal,
+          );
+          if (aborted()) {
+            monitor.dispose();
+            return;
+          }
+          this.captureHealth = monitor;
+        } catch (error) {
+          if (aborted()) return;
+          this.emitHealth(
+            'audio',
+            'failed',
+            error instanceof Error ? error.message : '收音監測無法啟動',
+          );
+          return;
+        }
+      }
       this.renewalRetryAttempt = 0;
       this.scheduleRenewal(this.renewDelayMs);
       // Level polling + diagnostics persist across a normal swap (mic reused).
       // Start them if this renewal IS the bring-up (token-near-expiry-at-start).
       if (this.levelInterval === null) this.startLevelPolling();
       if (this.diagInterval === null) this.startDiagnosticDump();
-      this.emitHealth('transport', 'connected');
+      if (outcome.kind === 'websocket' || outcome.pc.connectionState === 'connected') {
+        this.emitHealth('transport', 'connected');
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Session renewal failed';
-      if (this._status === 'running') this.scheduleRenewalRetry(message);
+      if (!aborted() && !(err instanceof RenewalCancelledError)) {
+        const failure = finalTransportFailure(err);
+        this.scheduleRenewalRetry(message, failure.failure);
+      }
     } finally {
-      this.renewing = false;
+      if (!existingAttempt) attempt.dispose();
+      if (renewalId === this.renewalAttempt) this.renewing = false;
     }
+  }
+
+  private waitForRenewalPeer(peer: LocalPeer, attempt: RecoveryAttempt): Promise<void> {
+    attempt.assertActive();
+    assertPeerUsable(peer);
+    const { pc, dc } = peer;
+    // DTLS and SCTP can connect before the translation service accepts the
+    // session. The documented first server event is session.created; waiting
+    // for it keeps a healthy primary until the candidate can carry captions.
+    const ready = () =>
+      pc.connectionState === 'connected' && dc.readyState === 'open' && peer.sessionCreated;
+    if (ready()) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const previousHandler = pc.onconnectionstatechange;
+      const previousOpen = dc.onopen;
+      const previousClose = dc.onclose;
+      const previousError = dc.onerror;
+      const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        pc.onconnectionstatechange = previousHandler;
+        dc.onopen = previousOpen;
+        dc.onclose = previousClose;
+        dc.onerror = previousError;
+        peer.onTerminal = null;
+        peer.onSessionCreated = null;
+        attempt.signal.removeEventListener('abort', cancel);
+        if (this.cancelPendingRenewalPeer === cancel) this.cancelPendingRenewalPeer = null;
+        if (error) {
+          pc.close();
+          reject(error);
+        } else resolve();
+      };
+      const cancel = () =>
+        finish(
+          attempt.signal.reason instanceof Error
+            ? attempt.signal.reason
+            : new RenewalCancelledError('Renewal cancelled'),
+        );
+      const timer = setTimeout(() => {
+        finish(new Error('Renewal peer connection readiness timed out'));
+      }, RENEWAL_PEER_READY_TIMEOUT_MS);
+      this.cancelPendingRenewalPeer = cancel;
+      peer.onTerminal = finish;
+      peer.onSessionCreated = () => {
+        if (ready()) finish();
+      };
+      attempt.signal.addEventListener('abort', cancel, { once: true });
+      pc.onconnectionstatechange = () => {
+        if (ready()) finish();
+        else if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+          finish(new Error(`Renewal peer connection ${pc.connectionState} before readiness`));
+        }
+      };
+      dc.onopen = () => {
+        if (ready()) finish();
+      };
+      dc.onclose = () => finish(new Error('Renewal caption data channel closed before readiness'));
+      dc.onerror = () => finish(new Error('Renewal caption data channel failed before readiness'));
+      // Cover a terminal transition that happened before the listener was installed.
+      if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+        finish(new Error(`Renewal peer connection ${pc.connectionState} before readiness`));
+      }
+    });
   }
 
   /**
@@ -992,70 +1554,117 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
    * long-meeting auto-recovery actually persist — it never gives up. cleanup()
    * cancels the pending timer on user-initiated stop.
    */
-  private scheduleRenewalRetry(reason?: string): void {
-    // Disarm the stale-data detector while we're in retry mode: the retry timer
-    // is now the single driver of recovery. Left armed, the level-poll detector
+  private scheduleRenewalRetry(
+    reason?: string,
+    recoveryFailure?: HealthEvent['recoveryFailure'],
+  ): void {
+    // Disarm the stale-data detector only when the primary is unavailable:
+    // the retry timer then becomes the single driver of recovery. Left armed, the level-poll detector
     // would independently fire more renewSession() calls during the backoff
     // window (no DC events arrive on a dead/renewing session), racing the timer
     // and escalating the backoff faster than intended. resetStaleBaselines()
     // re-arms it on the next successful connection.
-    this.lastDcEventAt = 0;
-    this.audioActiveSamplesSinceDc = 0;
+    const primaryHealthy = this.isPrimaryHealthy();
+    const gate = recoveryFailureFor('openai', 'translation');
+    if (permanentRecoveryFailure(gate)) {
+      this.emitHealth(
+        'transport',
+        primaryHealthy ? 'connected' : 'failed',
+        `${reason ?? '服務拒絕'}；請修正服務設定後手動重試`,
+        recoveryFailure,
+      );
+      return;
+    }
+    if (!primaryHealthy) {
+      this.lastDcEventAt = 0;
+      this.audioActiveSamplesSinceDc = 0;
+    }
     const idx = Math.min(this.renewalRetryAttempt, RENEWAL_RETRY_BACKOFF_MS.length - 1);
-    const delay = RENEWAL_RETRY_BACKOFF_MS[idx]!;
+    const delay = Math.max(
+      RENEWAL_RETRY_BACKOFF_MS[idx]!,
+      (gate?.retryNotBeforeMs ?? 0) - performance.now(),
+    );
     this.renewalRetryAttempt += 1;
     // Format "30 sec" for sub-minute delays, "N min" for the rest. Operator
     // confidence drops if we report "auto-retry in 0 min" for a 30 s delay.
     const humanDelay =
       delay < 60_000 ? `${Math.round(delay / 1000)} sec` : `${Math.round(delay / 60_000)} min`;
     const detail = reason ? `${reason}; ` : '';
+    const generation = this.generation;
     this.emitHealth(
       'transport',
-      'failed',
-      `${detail}auto-retry in ${humanDelay} (attempt #${this.renewalRetryAttempt})`,
+      primaryHealthy ? 'connected' : 'failed',
+      `${primaryHealthy ? 'Background renewal failed; primary remains live. ' : ''}${detail}auto-retry in ${humanDelay} (attempt #${this.renewalRetryAttempt})`,
+      recoveryFailure,
     );
-    this.renewalRetryTimer = setTimeout(() => {
-      this.renewalRetryTimer = null;
-      if (this._status !== 'running') return;
-      // renewSession's own catch re-schedules the NEXT retry if this one fails.
-      void this.renewSession();
-    }, delay);
+    if (this.status !== 'running' || generation !== this.generation) return;
+    this.renewalRetryTimer = setTimeout(
+      () => {
+        this.renewalRetryTimer = null;
+        if (this._status !== 'running') return;
+        // renewSession's own catch re-schedules the NEXT retry if this one fails.
+        void this.renewSession();
+      },
+      Math.min(2_147_483_647, delay),
+    );
+  }
+
+  private isPrimaryHealthy(): boolean {
+    if (!this.activeSessionUsable) return false;
+    if (this.wsTransport) return this.wsTransport.isOpen;
+    return (
+      this.pc?.connectionState === 'connected' &&
+      this.dc?.readyState === 'open' &&
+      this.pc.iceConnectionState !== 'failed' &&
+      this.pc.iceConnectionState !== 'disconnected'
+    );
+  }
+
+  private emitRecoveryProgress(message: string): void {
+    this.emitHealth('transport', this.isPrimaryHealthy() ? 'connected' : 'reconnecting', message);
   }
 
   private handleIceState(): void {
+    const generation = this.generation;
+    if (this._status !== 'running') return;
     const state = this.pc?.iceConnectionState;
     // Diagnostic: every transition logged. Surfaces wedged-DC scenarios
     // where iceConnectionState='connected' but DC events stopped.
     console.info('[openai-rt] iceConnectionState →', state);
     if (state === 'disconnected') {
       this.emitHealth('transport', 'reconnecting');
-      this.attemptIceRestart();
+      if (this.isCurrentGeneration(generation)) this.scheduleIceRecovery();
     } else if (state === 'failed') {
       // ICE truly dead. Don't stop() — that leaves the user with a frozen
       // caption area and a manual Start button to click, defeating the
       // self-healing premise. Renew the whole session (fresh SDP + ICE)
       // and let the renewal-retry backoff escalate if it also fails.
       this.emitHealth('transport', 'reconnecting', 'ICE failed — rebuilding session');
-      void this.renewSession();
+      if (this.isCurrentGeneration(generation)) void this.renewSession();
     } else if (state === 'connected' || state === 'completed') {
-      // Healthy ICE — reset backoff so a future blip starts fresh.
-      this.iceRestartAttempt = 0;
+      if (this.iceRestartTimer !== null) clearTimeout(this.iceRestartTimer);
+      this.iceRestartTimer = null;
+      if (this.isPrimaryHealthy()) this.emitHealth('transport', 'connected');
     }
   }
 
   private handleConnectionState(): void {
+    const generation = this.generation;
+    if (this._status !== 'running') return;
     const state = this.pc?.connectionState;
     console.info('[openai-rt] connectionState →', state);
     // connectionState aggregates ICE+DTLS. 'failed' means the transport
     // can't recover via ICE restart alone — go straight to a full session
     // renewal (same self-heal premise as ICE failure above). 'disconnected'
     // is transient (browser waits ~30s before promoting to 'failed') so we
-    // surface it but don't tear down — let ICE restart or the stale
-    // detector handle recovery.
-    if (state === 'failed') {
+    // give it one grace window, then rebuild the negotiated session.
+    if (state === 'connected') {
+      this.emitHealth('transport', 'connected');
+    } else if (state === 'failed') {
       this.emitHealth('transport', 'reconnecting', 'Peer connection failed — rebuilding session');
-      void this.renewSession();
+      if (this.isCurrentGeneration(generation)) void this.renewSession();
     } else if (state === 'disconnected') {
+      this.scheduleIceRecovery();
       this.emitHealth(
         'transport',
         'reconnecting',
@@ -1064,45 +1673,59 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
     }
   }
 
-  private attemptIceRestart(): void {
-    if (this.iceRestartTimer !== null) return; // restart already pending
-    if (this.iceRestartAttempt >= ICE_RESTART_DELAYS_MS.length) {
-      // ICE restart didn't bring the connection back. Escalate to a full
-      // session renewal instead of giving up — the renewal-retry backoff
-      // takes over from there so the meeting heals without operator
-      // intervention.
-      this.emitHealth('transport', 'reconnecting', 'ICE restart exhausted — rebuilding session');
-      void this.renewSession();
-      return;
-    }
-    const delay = ICE_RESTART_DELAYS_MS[this.iceRestartAttempt];
-    this.iceRestartAttempt += 1;
+  private scheduleIceRecovery(): void {
+    if (this._status !== 'running') return;
+    const generation = this.generation;
+    if (this.iceRestartTimer !== null) return;
+    const peer = this.pc;
     this.iceRestartTimer = setTimeout(() => {
       this.iceRestartTimer = null;
-      if (this.pc?.iceConnectionState === 'disconnected') {
-        this.pc.restartIce();
+      if (this._status !== 'running' || this.pc !== peer) return;
+      if (peer?.iceConnectionState === 'disconnected' || peer?.connectionState === 'disconnected') {
+        this.emitHealth(
+          'transport',
+          'reconnecting',
+          'ICE disconnection persisted — rebuilding session',
+        );
+        if (this.isCurrentGeneration(generation)) void this.renewSession();
       }
-    }, delay);
+    }, ICE_RECOVERY_GRACE_MS);
   }
 
   private handleDCEvent(ev: DCEvent): void {
-    // Any DC event proves the upstream session is alive — feed the
-    // stale-data detector so we don't false-positive while events flow.
-    this.lastDcEventAt = Date.now();
+    const generation = this.generation;
+    if (!this.isCurrentGeneration(generation)) return;
     this.dcEventCount += 1;
-    // Reset the per-DC audio-active counter: each DC event "consumes" the
-    // accumulated audio evidence, so the next stale window starts fresh.
-    this.audioActiveSamplesSinceDc = 0;
+    // Control traffic proves connectivity, not caption progress. Source-only
+    // deltas count too: target-language speech need not produce a translation.
+    const captionProgress =
+      Boolean(ev.delta?.trim()) &&
+      (ev.type === 'session.input_transcript.delta' ||
+        ev.type === 'session.output_transcript.delta');
+    if (captionProgress) {
+      this.lastDcEventAt = Date.now();
+      this.audioActiveSamplesSinceDc = 0;
+      if (!this.activeSessionClosed && !this.activeSessionUsable) {
+        this.activeSessionUsable = true;
+        if (this.isPrimaryHealthy()) this.emitHealth('transport', 'connected');
+      }
+    }
+    if (!this.isCurrentGeneration(generation)) return;
     switch (ev.type) {
       case 'session.created':
       case 'session.updated':
-        // OpenAI confirmed the translation session is active — already emitted connected on SDP
+        // Reflect session control only while the active media path remains
+        // usable. Control traffic cannot revive a closed or stalled session.
+        if (this._status === 'running' && this.isPrimaryHealthy())
+          this.emitHealth('transport', 'connected');
         break;
 
       case 'session.closed':
         // OpenAI closed the session (likely 30-min cap hit before our 25-min renewal,
         // or upstream policy). Renew transparently — captionStore is preserved.
         if (this._status === 'running') {
+          this.activeSessionUsable = false;
+          this.activeSessionClosed = true;
           void this.renewSession();
         }
         break;
@@ -1111,20 +1734,23 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
         if (!ev.delta) break;
         this.inputDeltaCount += 1;
         this.inputAcc += ev.delta;
+        if (!this.inputAcc.trim()) break;
         const meta = LANG_PAIR_META[this.langPair] ?? DEFAULT_META;
         // Whisper transcribes Mandarin as Simplified Chinese — convert to Traditional for zh-TW source
-        const transcriptText = meta.src === 'zh-TW' ? s2tw(this.inputAcc) : this.inputAcc;
+        const transcriptText = meta.src === 'zh-TW' ? toTaiwanese(this.inputAcc) : this.inputAcc;
         const t: TranscriptEvent = {
           kind: 'transcript',
           provider: 'openai-realtime',
           mode: 'online_full',
           source: this.sourceKind,
           segmentId: this.currentSegmentId,
+          ...(this.continuationOf ? { continuationOf: this.continuationOf } : {}),
           status: 'partial',
           text: transcriptText,
           startMs: this.startMs,
         };
         this.handlers.onTranscript(t);
+        if (!this.isCurrentGeneration(generation)) return;
         this.resetSegmentFlushTimer();
         break;
       }
@@ -1133,6 +1759,7 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
         if (!ev.delta) break;
         this.outputDeltaCount += 1;
         this.outputAcc += ev.delta;
+        if (!this.outputAcc.trim()) break;
         const meta = LANG_PAIR_META[this.langPair] ?? DEFAULT_META;
 
         // Anchor the live caption from the TRANSLATION stream — in BOTH modes.
@@ -1158,21 +1785,23 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
         // segment anchored so the draft translation streams live. Same
         // segmentId on both sides lets the store bind the draft to
         // `liveTranslation`. Redundant partials are coalesced at 50 ms.
-        const srcSoFar = meta.src === 'zh-TW' ? s2tw(this.inputAcc) : this.inputAcc;
+        const srcSoFar = meta.src === 'zh-TW' ? toTaiwanese(this.inputAcc) : this.inputAcc;
         const synth: TranscriptEvent = {
           kind: 'transcript',
           provider: 'openai-realtime',
           mode: 'online_full',
           source: this.sourceKind,
           segmentId: this.currentSegmentId,
+          ...(this.continuationOf ? { continuationOf: this.continuationOf } : {}),
           status: 'partial',
           text: srcSoFar,
           startMs: this.startMs,
         };
         this.handlers.onTranscript(synth);
+        if (!this.isCurrentGeneration(generation)) return;
 
         // Convert accumulated simplified Chinese to Traditional Chinese (Taiwan)
-        const targetText = meta.tgt === 'zh-TW' ? s2tw(this.outputAcc) : this.outputAcc;
+        const targetText = meta.tgt === 'zh-TW' ? toTaiwanese(this.outputAcc) : this.outputAcc;
         const tr: TranslationEvent = {
           kind: 'translation',
           provider: 'openai-realtime',
@@ -1186,6 +1815,7 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
           updatedAt: iso(),
         };
         this.handlers.onTranslation(tr);
+        if (!this.isCurrentGeneration(generation)) return;
         // Translation-only mode: input deltas never fire, so the segment
         // flush has to be driven from here too — otherwise nothing ever
         // finalizes and the live caption sticks on a partial forever.
@@ -1211,7 +1841,20 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
 
       case 'error': {
         const msg = ev.error?.message ?? 'OpenAI Realtime error';
-        this.emitHealth('transport', 'api_error', msg);
+        const kind = protocolRecoveryKind(ev.error);
+        const failure = recoveryError(
+          kind,
+          'openai',
+          'translation',
+          msg,
+          kind === 'rate-limit' ? performance.now() + 15_000 : undefined,
+        );
+        this.emitHealth(
+          'transport',
+          permanentRecoveryFailure(failure.failure) ? 'failed' : 'api_error',
+          msg,
+          failure.failure,
+        );
         break;
       }
 
@@ -1221,6 +1864,7 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
   }
 
   private resetSegmentFlushTimer(): void {
+    if (this._status !== 'running') return;
     if (this.segmentFlushTimer !== null) clearTimeout(this.segmentFlushTimer);
     this.segmentFlushTimer = setTimeout(() => {
       if (this._status === 'running') this.flushSegment();
@@ -1231,12 +1875,12 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
     if (this.segmentDeadlineTimer === null) {
       this.segmentDeadlineTimer = setTimeout(() => {
         this.segmentDeadlineTimer = null;
-        if (this._status === 'running') this.flushSegment();
+        if (this._status === 'running') this.flushSegment('deadline');
       }, MAX_SEGMENT_DURATION_MS);
     }
   }
 
-  private flushSegment(): void {
+  private flushSegment(reason: 'boundary' | 'deadline' = 'boundary'): void {
     // Clear the deadline whether or not there's text to flush — if a stray
     // empty flush fires we still want the next segment to start with a fresh
     // deadline window, not inherit the old one.
@@ -1244,31 +1888,159 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       clearTimeout(this.segmentDeadlineTimer);
       this.segmentDeadlineTimer = null;
     }
-    if (!this.inputAcc && !this.outputAcc) return;
+    if (!this.inputAcc && !this.outputAcc) {
+      // A natural pause after an exact deadline still ends the utterance,
+      // even if no tail arrived in the newly opened storage segment.
+      if (reason === 'boundary') this.continuationOf = undefined;
+      return;
+    }
+    const generation = this.generation;
+    this.emitSegmentFinal(this.snapshotSegment());
+    if (!this.isCurrentGeneration(generation)) return;
+    this.newSegment(reason === 'deadline' ? this.currentSegmentId : undefined);
+  }
+
+  /**
+   * Stop feeding the retired session, but allow its buffered translation to
+   * finish. Only one bounded snapshot survives a swap; it never emits partials
+   * or touches the new session's live accumulator, timers, or transport health.
+   */
+  private retireTransport(
+    pc: RTCPeerConnection | null,
+    dc: RTCDataChannel | null,
+    ws: OpenAIWsTransport | null,
+    segment: SegmentSnapshot,
+    onComplete?: () => void,
+  ): void {
+    const generation = this.generation;
+    this.retired?.finish();
+    if (generation !== this.generation || (this._status !== 'running' && !onComplete)) {
+      pc?.close();
+      ws?.close();
+      onComplete?.();
+      return;
+    }
+    if (!pc && !ws) {
+      onComplete?.();
+      return;
+    }
+    let finished = false;
+    let changed = false;
+    let closed = false;
+    let grace: ReturnType<typeof setTimeout> | null = null;
+    const finish = (emit = true): SegmentSnapshot | undefined => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(cap);
+      if (grace !== null) clearTimeout(grace);
+      if (this.retired?.finish === finish) this.retired = null;
+      if (dc) dc.onmessage = null;
+      pc?.close();
+      ws?.close();
+      try {
+        if (changed) {
+          if (emit) this.emitSegmentFinal(segment);
+          else return segment;
+        }
+        return undefined;
+      } finally {
+        onComplete?.();
+      }
+    };
+    const armGrace = (): void => {
+      if (grace !== null) clearTimeout(grace);
+      grace = setTimeout(finish, RETIRED_DRAIN_GRACE_MS);
+    };
+    const receive = (event: DCEvent): void => {
+      if (finished) return;
+      if (event.type === 'error') {
+        finish();
+        return;
+      }
+      if (event.type === 'session.closed') {
+        closed = true;
+        armGrace();
+        return;
+      }
+      if (!event.delta) return;
+      if (event.type === 'session.input_transcript.delta') segment.input += event.delta;
+      else if (event.type === 'session.output_transcript.delta') segment.output += event.delta;
+      else return;
+      changed = true;
+      // Real RTC sessions can deliver final source deltas after session.closed.
+      if (closed) armGrace();
+    };
+    // The cap preserves received text, but cannot guarantee a complete tail.
+    const cap = setTimeout(finish, RETIRED_DRAIN_CAP_MS);
+    this.retired = { finish };
+    if (ws) {
+      ws.beginDrain(receive, finish);
+      return;
+    }
+    if (!pc || !dc || dc.readyState !== 'open') {
+      finish();
+      return;
+    }
+    dc.onmessage = (event: MessageEvent<string>) => {
+      try {
+        receive(JSON.parse(event.data) as DCEvent);
+      } catch {
+        // Ignore malformed frames, just as the active data channel does.
+      }
+    };
+    try {
+      // Detach old senders before committing its buffered audio. The new live
+      // session proceeds independently; Stop cancels any late promise result.
+      void Promise.all(pc.getSenders().map((sender) => sender.replaceTrack(null)))
+        .then(() => {
+          if (!finished) dc.send(JSON.stringify({ type: 'session.close' }));
+        })
+        .catch(() => finish());
+    } catch {
+      finish();
+    }
+  }
+
+  private snapshotSegment(): SegmentSnapshot {
+    return {
+      segmentId: this.currentSegmentId,
+      startMs: this.startMs,
+      endMs: Date.now(),
+      input: this.inputAcc,
+      output: this.outputAcc,
+      ...(this.continuationOf ? { continuationOf: this.continuationOf } : {}),
+    };
+  }
+
+  private emitSegmentFinal(segment: SegmentSnapshot): void {
+    const generation = this.generation;
+    if (!segment.input.trim() && !segment.output.trim()) return;
     const meta = LANG_PAIR_META[this.langPair] ?? DEFAULT_META;
     // Apply Traditional Chinese conversion to transcript text when source is zh-TW
-    const transcriptText = meta.src === 'zh-TW' ? s2tw(this.inputAcc) : this.inputAcc;
+    const transcriptText = meta.src === 'zh-TW' ? toTaiwanese(segment.input) : segment.input;
 
     const t: TranscriptEvent = {
       kind: 'transcript',
       provider: 'openai-realtime',
       mode: 'online_full',
       source: this.sourceKind,
-      segmentId: this.currentSegmentId,
+      segmentId: segment.segmentId,
+      ...(segment.continuationOf ? { continuationOf: segment.continuationOf } : {}),
       status: 'final',
       text: transcriptText,
-      startMs: this.startMs,
-      endMs: Date.now(),
+      startMs: segment.startMs,
+      endMs: segment.endMs,
     };
     this.handlers.onTranscript(t);
+    if (generation !== this.generation) return;
 
-    if (this.outputAcc) {
-      const targetText = meta.tgt === 'zh-TW' ? s2tw(this.outputAcc) : this.outputAcc;
+    if (segment.output) {
+      const targetText = meta.tgt === 'zh-TW' ? toTaiwanese(segment.output) : segment.output;
       const tr: TranslationEvent = {
         kind: 'translation',
         provider: 'openai-realtime',
         mode: 'online_full',
-        sourceSegmentId: this.currentSegmentId,
+        sourceSegmentId: segment.segmentId,
         status: 'final',
         sourceText: transcriptText,
         targetText,
@@ -1278,18 +2050,18 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       };
       this.handlers.onTranslation(tr);
     }
-
-    this.newSegment();
   }
 
-  private newSegment(): void {
+  private newSegment(continuationOf?: string): void {
     this.inputAcc = '';
     this.outputAcc = '';
+    this.continuationOf = continuationOf;
     this.currentSegmentId = crypto.randomUUID();
     this.startMs = Date.now();
   }
 
   private startLevelPolling(): void {
+    const generation = this.generation;
     const analyser = this.mic.analyser;
     if (!analyser) return;
     const buf = new Float32Array(analyser.fftSize);
@@ -1297,6 +2069,7 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
     let peakHoldUntil = 0;
 
     this.levelInterval = setInterval(() => {
+      if (!this.isCurrentGeneration(generation)) return;
       analyser.getFloatTimeDomainData(buf);
       const sumSq = buf.reduce((s, x) => s + x * x, 0);
       const rms = Math.sqrt(sumSq / buf.length);
@@ -1318,13 +2091,20 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       // 5-second sentences with 1-2 s gaps NEVER accumulated enough stretch
       // to trip the threshold even when DC was wedged for minutes.
       const audioActiveDb = STALE_AUDIO_ACTIVE_DB_BY_MIC[this.micDistance];
-      if (rmsDb > audioActiveDb) {
+      const captureHealthy =
+        this.wsTransport?.captureHealthy ?? this.captureHealth?.healthy ?? true;
+      if (!captureHealthy) {
+        this.lastDcEventAt = nowMs;
+        this.audioActiveSamplesSinceDc = 0;
+      }
+      if (captureHealthy && rmsDb > audioActiveDb) {
         this.lastAudioActiveAt = nowMs;
         this.audioActiveSamplesSinceDc += 1;
         // Speech resumed after silence — recover the health state.
         if (this.silenceEmitted) {
           this.silenceEmitted = false;
           this.emitHealth('audio', 'connected');
+          if (!this.isCurrentGeneration(generation)) return;
         }
       }
 
@@ -1335,12 +2115,14 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
       // brief quiet window between mic grant and the user's first word.
       const SILENCE_DETECT_MS = 30_000;
       if (
+        captureHealthy &&
         !this.silenceEmitted &&
         this.lastAudioActiveAt > 0 &&
         nowMs - this.lastAudioActiveAt > SILENCE_DETECT_MS
       ) {
         this.silenceEmitted = true;
         this.emitHealth('audio', 'silence_detected');
+        if (!this.isCurrentGeneration(generation)) return;
       }
 
       // Fire when: DC has been silent past the threshold AND we have at least
@@ -1360,11 +2142,20 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
             'transport',
             'degraded',
             `Wedged: ${Math.round(dcGap / 1000)}s no DC events while audio active — auto-renewing session`,
+            {
+              layer: 'provider',
+              kind: 'stalled',
+              provider: 'openai',
+              purpose: 'translation',
+              attemptId: crypto.randomUUID(),
+            },
           );
+          if (!this.isCurrentGeneration(generation)) return;
           // Reset to suppress double-fire while renewSession runs (it will
           // tear down and re-init, resetting lastDcEventAt on success).
           this.lastDcEventAt = 0;
           this.audioActiveSamplesSinceDc = 0;
+          this.activeSessionUsable = false;
           void this.renewSession();
         }
       }
@@ -1410,9 +2201,15 @@ export class OpenAIRealtimeProvider implements CaptionProvider {
     }, 10_000);
   }
 
-  private emitHealth(component: HealthComponent, state: HealthState, message?: string): void {
+  private emitHealth(
+    component: HealthComponent,
+    state: HealthState,
+    message?: string,
+    recoveryFailure?: HealthEvent['recoveryFailure'],
+  ): void {
     const ev: HealthEvent = { kind: 'health', component, state, timestamp: iso() };
     if (message !== undefined) ev.message = message;
+    if (recoveryFailure !== undefined) ev.recoveryFailure = recoveryFailure;
     this.handlers.onHealth(ev);
   }
 }

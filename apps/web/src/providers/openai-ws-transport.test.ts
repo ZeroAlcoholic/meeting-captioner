@@ -32,6 +32,9 @@ let workletPort: { onmessage: ((e: { data: ArrayBuffer }) => void) | null; close
   onmessage: null,
   close: () => {},
 };
+let workletModulePromise: Promise<void>;
+let sourceConnectCalls = 0;
+let workletConnectCalls = 0;
 
 function fakeStream(): MediaStream {
   return { getAudioTracks: () => [] } as unknown as MediaStream;
@@ -40,6 +43,9 @@ function fakeStream(): MediaStream {
 beforeEach(() => {
   lastSocket = null;
   workletPort = { onmessage: null, close: () => {} };
+  workletModulePromise = Promise.resolve();
+  sourceConnectCalls = 0;
+  workletConnectCalls = 0;
 
   class FakeWebSocket {
     static readonly OPEN = 1;
@@ -72,11 +78,17 @@ beforeEach(() => {
   vi.stubGlobal(
     'AudioContext',
     class {
-      audioWorklet = { addModule: vi.fn().mockResolvedValue(undefined) };
+      state: AudioContextState = 'running';
+      audioWorklet = { addModule: vi.fn(() => workletModulePromise) };
       destination = {};
       sampleRate = 16000;
       createMediaStreamSource() {
-        return { connect() {}, disconnect() {} };
+        return {
+          connect() {
+            sourceConnectCalls += 1;
+          },
+          disconnect() {},
+        };
       }
       resume() {
         return Promise.resolve();
@@ -90,7 +102,9 @@ beforeEach(() => {
     'AudioWorkletNode',
     class {
       port = workletPort;
-      connect(): void {}
+      connect(): void {
+        workletConnectCalls += 1;
+      }
       disconnect(): void {}
     },
   );
@@ -102,6 +116,185 @@ afterEach(() => {
 });
 
 describe('OpenAIWsTransport', () => {
+  it('counts active capture frames while a socket is closing without sending them', async () => {
+    const onCaptureHealth = vi.fn();
+    const pending = OpenAIWsTransport.open('ek', fakeStream(), {
+      onEvent: vi.fn(),
+      onClosed: vi.fn(),
+      onAudioTrouble: vi.fn(),
+      onCaptureHealth,
+    });
+    serverSends({ type: 'session.created' });
+    const transport = await pending;
+    transport.activate();
+    lastSocket!.readyState = 2;
+    try {
+      const sent = lastSocket!.sent.length;
+      workletPort.onmessage?.({ data: new Float32Array(512).buffer });
+      expect(onCaptureHealth).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: 'capture_resumed' }),
+      );
+      expect(lastSocket!.sent).toHaveLength(sent);
+    } finally {
+      transport.close();
+    }
+  });
+  it('publishes first-frame recovery only after the candidate is activated', async () => {
+    const onCaptureHealth = vi.fn();
+    const pending = OpenAIWsTransport.open('ek', fakeStream(), {
+      onEvent: vi.fn(),
+      onClosed: vi.fn(),
+      onAudioTrouble: vi.fn(),
+      onCaptureHealth,
+    });
+    serverSends({ type: 'session.created' });
+    const transport = await pending;
+    workletPort.onmessage?.({ data: new Float32Array(512).buffer });
+    expect(onCaptureHealth).not.toHaveBeenCalled();
+    transport.activate();
+    workletPort.onmessage?.({ data: new Float32Array(512).buffer });
+    expect(onCaptureHealth).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: 'capture_resumed' }),
+    );
+    transport.close();
+  });
+  it('close cancels its worklet wait without leaving an engine deadline', async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    let loaded!: () => void;
+    workletModulePromise = new Promise<void>((resolve) => {
+      loaded = resolve;
+    });
+    const pending = OpenAIWsTransport.open(
+      'ek',
+      fakeStream(),
+      {
+        onEvent: vi.fn(),
+        onClosed: vi.fn(),
+        onAudioTrouble: vi.fn(),
+      },
+      controller.signal,
+    ).catch(() => {});
+    serverSends({ type: 'session.created' });
+    await vi.advanceTimersByTimeAsync(1);
+    controller.abort(new Error('Stopped'));
+    await pending;
+    // The engine's aborted waiter releases its deadline in its async finally.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.getTimerCount()).toBe(0);
+    loaded();
+    await Promise.resolve();
+    expect(sourceConnectCalls).toBe(0);
+  });
+
+  it('cancels pending setup on Stop without waiting for its timeout', async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const handlers = { onEvent: vi.fn(), onClosed: vi.fn(), onAudioTrouble: vi.fn() };
+    let outcome: unknown;
+    const pending = OpenAIWsTransport.open('ek', fakeStream(), handlers, controller.signal).catch(
+      (error: unknown) => {
+        outcome = error;
+      },
+    );
+    controller.abort(new Error('Stopped'));
+    await Promise.resolve();
+    expect(outcome).toBeInstanceOf(Error);
+    expect(lastSocket?.readyState).toBe(3);
+    expect(handlers.onClosed).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+    await pending;
+  });
+
+  it.each(['session.closed', 'error'])(
+    'rejects %s during audio setup without exposing it to the owner',
+    async (type) => {
+      let finishWorklet!: () => void;
+      workletModulePromise = new Promise<void>((resolve) => {
+        finishWorklet = resolve;
+      });
+      const handlers = { onEvent: vi.fn(), onClosed: vi.fn(), onAudioTrouble: vi.fn() };
+      const pending = OpenAIWsTransport.open('ek', fakeStream(), handlers);
+      const outcome = pending.then(
+        () => null,
+        (error: unknown) => error,
+      );
+      serverSends({ type: 'session.created' });
+      serverSends({ type, error: { code: 'session_expired', message: 'Session expired' } });
+      finishWorklet();
+      expect(await outcome).toBeInstanceOf(OpenAIWsOpenError);
+      expect(lastSocket!.readyState).toBe(3);
+      expect(handlers.onEvent).not.toHaveBeenCalled();
+      expect(handlers.onClosed).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['session.closed', 'error'])(
+    'invalidates a ready candidate on %s before activation',
+    async (type) => {
+      const handlers = { onEvent: vi.fn(), onClosed: vi.fn(), onAudioTrouble: vi.fn() };
+      const pending = OpenAIWsTransport.open('ek', fakeStream(), handlers);
+      serverSends({ type: 'session.created' });
+      const transport = await pending;
+      serverSends({ type, error: { code: 'session_expired', message: 'Session expired' } });
+      expect(transport.isOpen).toBe(false);
+      expect(() => transport.activate()).toThrow(OpenAIWsOpenError);
+      workletPort.onmessage?.({ data: new Float32Array(160).fill(0.25).buffer });
+      expect(lastSocket!.sent).toEqual([]);
+      expect(handlers.onEvent).not.toHaveBeenCalled();
+      expect(handlers.onClosed).not.toHaveBeenCalled();
+      transport.close();
+    },
+  );
+
+  it('a ready candidate sends no PCM before activation', async () => {
+    const pending = OpenAIWsTransport.open('ek', fakeStream(), {
+      onEvent: () => {},
+      onClosed: () => {},
+      onAudioTrouble: () => {},
+    });
+    serverSends({ type: 'session.created' });
+    const transport = await pending;
+    workletPort.onmessage?.({ data: new Float32Array(160).fill(0.25).buffer });
+    expect(lastSocket!.sent).toEqual([]);
+    transport.activate();
+    workletPort.onmessage?.({ data: new Float32Array(160).fill(0.25).buffer });
+    expect(lastSocket!.sent).toHaveLength(1);
+    transport.close();
+  });
+
+  it('drains retired events without sending more audio or invoking normal recovery', async () => {
+    const normal = { onEvent: vi.fn(), onClosed: vi.fn(), onAudioTrouble: vi.fn() };
+    const pending = OpenAIWsTransport.open('ek', fakeStream(), normal);
+    serverSends({ type: 'session.created' });
+    const transport = await pending;
+    transport.activate();
+    normal.onEvent.mockClear();
+    const drained = vi.fn();
+    const closed = vi.fn();
+    (
+      transport as OpenAIWsTransport & {
+        beginDrain?: (event: typeof drained, close: typeof closed) => void;
+      }
+    ).beginDrain?.(drained, closed);
+    expect(lastSocket!.sent.map((frame) => JSON.parse(frame))).toContainEqual({
+      type: 'session.close',
+    });
+    const sentCount = lastSocket!.sent.length;
+    workletPort.onmessage?.({ data: new Float32Array(512).buffer });
+    expect(lastSocket!.sent).toHaveLength(sentCount);
+    serverSends({ type: 'session.output_transcript.delta', delta: 'tail' });
+    serverSends({ type: 'session.closed' });
+    expect(drained).toHaveBeenCalledTimes(2);
+    expect(normal.onEvent).not.toHaveBeenCalled();
+    serverCloses(1000);
+    expect(closed).toHaveBeenCalledOnce();
+    expect(normal.onClosed).not.toHaveBeenCalled();
+    transport.close();
+    serverSends({ type: 'session.output_transcript.delta', delta: 'late' });
+    expect(drained).toHaveBeenCalledTimes(2);
+  });
+
   it('carries the ephemeral token in the subprotocol, never in a query string', async () => {
     const pending = OpenAIWsTransport.open('ek_test123', fakeStream(), {
       onEvent: () => {},
@@ -134,8 +327,75 @@ describe('OpenAIWsTransport', () => {
     expect(events).toEqual([]);
 
     serverSends({ type: 'session.created' });
-    await pending;
+    const transport = await pending;
+    expect(events).toEqual([]);
+    transport.activate();
     expect(events).toEqual(['session.created', 'session.output_transcript.delta']);
+  });
+
+  it('buffers every setup event until the owner atomically activates the transport', async () => {
+    let finishWorklet!: () => void;
+    workletModulePromise = new Promise<void>((resolve) => {
+      finishWorklet = resolve;
+    });
+    const events: string[] = [];
+    const pending = OpenAIWsTransport.open('ek', fakeStream(), {
+      onEvent: (e) => events.push(e.type),
+      onClosed: () => {},
+      onAudioTrouble: () => {},
+    });
+
+    serverSends({ type: 'session.created' });
+    serverSends({ type: 'session.output_transcript.delta', delta: 'new-session text' });
+    await Promise.resolve();
+    expect(events).toEqual([]);
+
+    finishWorklet();
+    const transport = await pending;
+    // open() only makes the transport ready. The provider owns the exact
+    // make-before-break boundary and must opt in before any new-session event
+    // can touch the shared caption accumulators.
+    expect(events).toEqual([]);
+    transport.activate();
+    expect(events).toEqual(['session.created', 'session.output_transcript.delta']);
+  });
+
+  it('times out the whole setup and a late worklet completion cannot revive audio or events', async () => {
+    vi.useFakeTimers();
+    let finishWorklet!: () => void;
+    workletModulePromise = new Promise<void>((resolve) => {
+      finishWorklet = resolve;
+    });
+    const events: string[] = [];
+    let outcome: unknown;
+    const pending = OpenAIWsTransport.open('ek', fakeStream(), {
+      onEvent: (e) => events.push(e.type),
+      onClosed: () => {},
+      onAudioTrouble: () => {},
+    }).then(
+      () => {
+        outcome = 'resolved';
+      },
+      (err: unknown) => {
+        outcome = err;
+      },
+    );
+
+    serverSends({ type: 'session.created' });
+    await vi.advanceTimersByTimeAsync(5_001);
+
+    expect(outcome).toBeInstanceOf(OpenAIWsOpenError);
+    expect((outcome as Error).message).toContain('AudioWorklet loading timed out');
+    expect(lastSocket?.readyState).toBe(3);
+
+    finishWorklet();
+    await Promise.resolve();
+    await Promise.resolve();
+    serverSends({ type: 'session.output_transcript.delta', delta: 'too late' });
+    expect(sourceConnectCalls).toBe(0);
+    expect(workletConnectCalls).toBe(0);
+    expect(events).toEqual([]);
+    await pending;
   });
 
   it('rejects a refused handshake as an AUTH rejection so the ladder can switch keys', async () => {
@@ -148,6 +408,24 @@ describe('OpenAIWsTransport', () => {
     const err = await pending.catch((e: unknown) => e);
     expect(err).toBeInstanceOf(OpenAIWsOpenError);
     expect((err as OpenAIWsOpenError).isAuthRejection).toBe(true);
+  });
+
+  it.each([
+    ['', false],
+    ['invalid audio payload', false],
+    ['request 4012 exceeded policy', false],
+    ['ip_not_authorized', true],
+    ['403 Forbidden', true],
+  ])('classifies policy close 1008 using reason %s', async (reason, auth) => {
+    const pending = OpenAIWsTransport.open('ek', fakeStream(), {
+      onEvent: () => {},
+      onClosed: () => {},
+      onAudioTrouble: () => {},
+    });
+    serverCloses(1008, reason);
+    const error = await pending.catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(OpenAIWsOpenError);
+    expect((error as OpenAIWsOpenError).isAuthRejection).toBe(auth);
   });
 
   it('rejects a network-shaped close as NOT an auth rejection', async () => {
@@ -184,7 +462,8 @@ describe('OpenAIWsTransport', () => {
       onAudioTrouble: () => {},
     });
     serverSends({ type: 'session.created' });
-    await pending;
+    const transport = await pending;
+    transport.activate();
 
     // 160 samples @ 16 kHz (10 ms) leave as ~240 samples @ 24 kHz. The very
     // first chunk emits 239: the 240th output sample sits between this chunk's
@@ -199,6 +478,37 @@ describe('OpenAIWsTransport', () => {
     expect(atob(frames[1]!.audio)).toHaveLength(240 * 2);
   });
 
+  it('reports the first backpressure drop and resumes transport health after sending again', async () => {
+    const health = vi.fn();
+    const pending = OpenAIWsTransport.open('ek', fakeStream(), {
+      onEvent: () => {},
+      onClosed: () => {},
+      onAudioTrouble: health,
+    });
+    serverSends({ type: 'session.created' });
+    const transport = await pending;
+    transport.activate();
+    const push = () => workletPort.onmessage?.({ data: new Float32Array(512).fill(0.1).buffer });
+    lastSocket!.bufferedAmount = 2_000_000;
+    push();
+    expect(health).toHaveBeenCalledWith(
+      'degraded',
+      expect.stringContaining('audio frames dropped'),
+      'transport',
+    );
+    for (let i = 0; i < 8; i++) push();
+    expect(health).toHaveBeenCalledTimes(1);
+    expect(lastSocket!.sent).toHaveLength(0);
+    lastSocket!.bufferedAmount = 0;
+    push();
+    expect(lastSocket!.sent).toHaveLength(1);
+    expect(health).toHaveBeenLastCalledWith('connected', expect.any(String), 'transport');
+    lastSocket!.bufferedAmount = 2_000_000;
+    push();
+    expect(health).toHaveBeenCalledTimes(3);
+    transport.detach();
+  });
+
   it('drops frames instead of growing the send buffer without bound', async () => {
     const trouble: string[] = [];
     const pending = OpenAIWsTransport.open('ek', fakeStream(), {
@@ -207,7 +517,8 @@ describe('OpenAIWsTransport', () => {
       onAudioTrouble: (_s, m) => trouble.push(m),
     });
     serverSends({ type: 'session.created' });
-    await pending;
+    const transport = await pending;
+    transport.activate();
     lastSocket!.bufferedAmount = 2_000_000;
 
     for (let i = 0; i < 50; i++) workletPort.onmessage?.({ data: new Float32Array([0.1]).buffer });
@@ -228,6 +539,7 @@ describe('OpenAIWsTransport', () => {
     serverSends({ type: 'session.created' });
     const transport = await pending;
 
+    transport.activate();
     transport.detach();
     serverCloses(1000, 'replaced');
 
@@ -242,7 +554,8 @@ describe('OpenAIWsTransport', () => {
       onAudioTrouble: () => {},
     });
     serverSends({ type: 'session.created' });
-    await pending;
+    const transport = await pending;
+    transport.activate();
 
     serverCloses(1006, 'abnormal');
 

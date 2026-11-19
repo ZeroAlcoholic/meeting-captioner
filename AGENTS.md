@@ -38,6 +38,16 @@ Always run `scripts/doctor` after setup to verify the environment.
 
 ## Development Commands
 
+### 日常服務所有權（2026-10-06）
+
+- Windows 日常啟動一律優先使用 `pnpm service:start`，先以
+  `pnpm service:status` 查現有實例。重複 start 會重用，不再手動背景啟動 `8787`／`8000`。
+- 實際網址以 status 的 `url` 為準，不能假定候選埠 `43871` 永遠可用。
+- 使用 `pnpm service:stop` 停止本工作區實例。不可只依 PORT、程序名稱或 PID 檔殺程序。
+- 此入口由工作區 owner 持有單一線上 HTTP 子程序；完整 Offline／Hybrid 與 HMR 開發僅在任務確實需要時另啟動。W08.1 程序復原與 W08.2 舊頁接續已完成本機驗收；真服務與場域放行仍待驗。
+- `pnpm dev`／既有發行 ZIP 是獨立的舊入口，不受 managed singleton 管理；
+  不可與日常服務無目的地重複啟動。更新日常版本須先 stop 再 start。
+
 ```
 pnpm install              # install all workspace deps
 pnpm dev                  # start web + online (concurrently)

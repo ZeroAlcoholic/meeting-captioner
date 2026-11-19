@@ -30,14 +30,12 @@ Write-Host "==> Preparing $StageDir"
 New-Item -ItemType Directory -Path $StageDir | Out-Null
 
 # 1. Build the web app in online-slim mode.
-Write-Host "==> Building apps/web (VITE_DEPLOYMENT_MODE=online)"
+Write-Host "==> Building apps/web (online profile)"
 Push-Location (Join-Path $RepoRoot 'apps/web')
 try {
-  $env:VITE_DEPLOYMENT_MODE = 'online'
-  pnpm run build
+  pnpm run build:online
   if ($LASTEXITCODE -ne 0) { throw 'apps/web build failed' }
 } finally {
-  Remove-Item Env:\VITE_DEPLOYMENT_MODE
   Pop-Location
 }
 

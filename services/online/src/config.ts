@@ -13,7 +13,22 @@ import { z } from 'zod';
 // from Node 20.6+). The bundled server itself is hard-locked to
 // `process.env` and nothing else.
 
+const OptionalApiKey = z
+  .string()
+  .trim()
+  .optional()
+  .transform((value) => value || undefined);
+
 const ConfigSchema = z.object({
+  // Explicit deployment qualification, never inferred from token/model availability.
+  OPENAI_TRANSCRIPTION_CONCURRENT_RENEWAL_ALLOWED: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((value) => value === 'true'),
+  GEMINI_TRANSCRIPTION_CONCURRENT_RENEWAL_ALLOWED: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((value) => value === 'true'),
   ONLINE_PORT: z.coerce.number().int().positive().default(8787),
   /**
    * Bind host. Defaults to 127.0.0.1 (loopback only) — the slim distribution
@@ -23,7 +38,7 @@ const ConfigSchema = z.object({
    */
   ONLINE_HOST: z.string().default('127.0.0.1'),
   ONLINE_CORS_ORIGIN: z.string().default('http://localhost:5173'),
-  OPENAI_API_KEY: z.string().optional(),
+  OPENAI_API_KEY: OptionalApiKey,
   /**
    * Alternate private OpenAI key. The primary OPENAI_API_KEY may be
    * endpoint/domain-restricted (scoped service-account policy); when an
@@ -31,14 +46,14 @@ const ConfigSchema = z.object({
    * this key and sticks to whichever works (see openai-keys.ts). Optional —
    * single-key deployments are unaffected.
    */
-  OPENAI_API_KEY_AUDIO: z.string().optional(),
+  OPENAI_API_KEY_AUDIO: OptionalApiKey,
   /**
    * Google Gemini Developer API key (AI Studio). When set, the server can mint
    * short-lived ephemeral tokens for the browser to open a Gemini Live API
    * WebSocket directly (the raw key never reaches the browser). This enables
    * Gemini as a second online realtime backend selectable in the UI.
    */
-  GEMINI_API_KEY: z.string().optional(),
+  GEMINI_API_KEY: OptionalApiKey,
   /**
    * Gemini Live model id — ALLOWLISTED to the latest dedicated live-translation
    * model only (continuous streaming, purpose-built translation via
@@ -84,9 +99,11 @@ const hasGeminiKey = (config.GEMINI_API_KEY?.length ?? 0) > 0;
 // A missing OpenAI key is only a problem if it leaves NO backend. Shouting
 // MISSING at a deliberate Gemini-only deployment trains people to ignore the
 // startup output, which is where a real problem would also appear.
-const openaiMissingNote = hasGeminiKey
-  ? 'not set — OpenAI backend disabled (Gemini is configured)'
-  : 'MISSING — set OPENAI_API_KEY or GEMINI_API_KEY in your user/system env, then restart';
+const openaiMissingNote = config.OPENAI_API_KEY_AUDIO
+  ? 'not set — OpenAI uses OPENAI_API_KEY_AUDIO'
+  : hasGeminiKey
+    ? 'not set — OpenAI backend disabled (Gemini is configured)'
+    : 'MISSING — set OPENAI_API_KEY, OPENAI_API_KEY_AUDIO or GEMINI_API_KEY, then restart';
 // eslint-disable-next-line no-console
 console.log(
   `[config] OPENAI_API_KEY: ${

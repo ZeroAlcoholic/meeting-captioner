@@ -1,21 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { HealthEvent, HealthState } from '@meeting-audio/contracts';
 import { ONLINE_SERVICE_URL } from '../config.js';
 import { settingsStore, useSettingsStore } from '../settings/use-settings-store.js';
 import {
   OpenAIRealtimeProvider,
+  cancelOpenAIPrewarm,
   prewarmOpenAISession,
   sessionRequestBody,
 } from './openai-realtime-provider.js';
+import { startSessionInfoPolling } from './session-info-polling.js';
 import { leaseCapture } from './capture-lease.js';
-import { createStoreBoundHandlers } from './coalesce-handlers.js';
-import type { AudioSource, ProviderStatus } from './types.js';
+import { createStoreBoundHandlers, type CoalescingHandlersOptions } from './coalesce-handlers.js';
+import { translationReadiness } from './translation-readiness.js';
+import type { AudioSource, ProviderStatus, TranslationTrackScope } from './types.js';
 
 const SESSION_URL = `${ONLINE_SERVICE_URL}/session`;
 const SESSION_INFO_URL = `${ONLINE_SERVICE_URL}/session/info`;
-
-// Polling backoff: tight when something is wrong, relaxed once stable.
-const POLL_FAST_MS = 3_000;
-const POLL_SLOW_MS = 10_000;
 
 export type ApiKeyStatus = 'checking' | 'present' | 'no-key' | 'service-down';
 
@@ -29,8 +29,12 @@ export interface UseOpenAIRealtime {
    * exchange failed, etc.). Callers use this to gate side effects like
    * the session-cost timer that must not run for failed sessions.
    */
-  start: () => Promise<boolean>;
-  stop: () => void;
+  start: (options?: {
+    awaitContent?: boolean;
+    archive?: CoalescingHandlersOptions['archive'];
+  }) => Promise<boolean>;
+  stop: (options?: { preserveHealth?: boolean }) => void;
+  restoreHealth: () => void;
   retry: () => void;
   /**
    * Read the renewal ETA on demand. Returns null when no session is running.
@@ -45,10 +49,18 @@ export interface UseOpenAIRealtime {
    * knows what is running, and warm tokens expire.
    */
   prewarmStandby: (refreshIfOlderThanMs?: number) => void;
+  /**
+   * This backend's own transport health, read at call time. A failover that
+   * awaited the standby needs to know whether THIS backend reconnected in the
+   * meantime; the shared health slot carries whichever provider wrote last.
+   */
+  getTransport: () => HealthState;
 }
 
-export function useOpenAIRealtime(): UseOpenAIRealtime {
+export function useOpenAIRealtime(track?: TranslationTrackScope): UseOpenAIRealtime {
+  const trackRef = useRef(track);
   const providerRef = useRef<OpenAIRealtimeProvider | null>(null);
+  const healthRef = useRef(new Map<HealthEvent['component'], HealthEvent>());
   const handlersRef = useRef<ReturnType<typeof createStoreBoundHandlers> | null>(null);
   // Holds the current provider's onStatus unsubscribe so we can detach
   // before swapping providers (start-restart cycle) without leaking the
@@ -56,41 +68,37 @@ export function useOpenAIRealtime(): UseOpenAIRealtime {
   const statusUnsubRef = useRef<(() => void) | null>(null);
   const [status, setStatus] = useState<ProviderStatus>('idle');
   const [error, setError] = useState<string | null>(null);
+  // This backend's own transport health, kept in a ref so a failover that
+  // awaited a standby bring-up reads the state as it is then, not as it was
+  // when the callback closed over it — the same-vendor-wins decision has to
+  // be made on a current value.
+  const transportRef = useRef<HealthState>('idle');
+  const errorComponentRef = useRef<string | null>(null);
+  const acceptingHealthRef = useRef(false);
   const [apiKeyStatus, setApiKeyStatus] = useState<ApiKeyStatus>('checking');
   const modeId = useSettingsStore((s) => s.modeId);
   const onlineProvider = useSettingsStore((s) => s.onlineProvider);
 
   // ── /session/info polling with backoff ───────────────────────────────────────
   useEffect(() => {
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-
-    const schedule = (delay: number) => {
-      timer = setTimeout(poll, delay);
-    };
-
-    const poll = (): void => {
-      fetch(SESSION_INFO_URL)
-        .then((r) => r.json())
-        .then((d: { hasApiKey: boolean }) => {
-          if (cancelled) return;
-          setApiKeyStatus(d.hasApiKey ? 'present' : 'no-key');
-          schedule(POLL_SLOW_MS);
-        })
-        .catch(() => {
-          if (cancelled) return;
-          setApiKeyStatus('service-down');
-          schedule(POLL_FAST_MS);
-        });
-    };
-
-    poll();
+    const stopPolling = startSessionInfoPolling(
+      SESSION_INFO_URL,
+      (info) => {
+        setApiKeyStatus(info.hasApiKey ? 'present' : 'no-key');
+      },
+      () => setApiKeyStatus('service-down'),
+    );
     return () => {
-      cancelled = true;
-      if (timer !== null) clearTimeout(timer);
+      stopPolling();
+      acceptingHealthRef.current = false;
+      const provider = providerRef.current;
+      providerRef.current = null;
       statusUnsubRef.current?.();
       statusUnsubRef.current = null;
-      providerRef.current?.stop();
+      provider?.stop();
+      handlersRef.current?.finish();
+      handlersRef.current = null;
+      if (!trackRef.current) cancelOpenAIPrewarm();
     };
   }, []);
 
@@ -114,9 +122,21 @@ export function useOpenAIRealtime(): UseOpenAIRealtime {
   }, []);
 
   useEffect(() => {
-    if (modeId !== 'online_full' || onlineProvider !== 'openai') return;
-    if (apiKeyStatus !== 'present' || status === 'running') return;
+    if (trackRef.current) return;
+    if (modeId !== 'online_full') {
+      if (!trackRef.current) cancelOpenAIPrewarm();
+      return;
+    }
+    if (onlineProvider !== 'openai') return;
+    if (apiKeyStatus !== 'present' || status !== 'idle') return;
     mintWarmToken();
+    return () => {
+      const settings = settingsStore.getState();
+      // Starting may still be waiting for permission before consuming this token.
+      if (settings.modeId !== 'online_full' || settings.onlineProvider !== 'openai') {
+        if (!trackRef.current) cancelOpenAIPrewarm();
+      }
+    };
   }, [apiKeyStatus, modeId, onlineProvider, status, mintWarmToken]);
 
   // Same mint, for when this backend is the STANDBY rather than the selection —
@@ -126,127 +146,173 @@ export function useOpenAIRealtime(): UseOpenAIRealtime {
   // stale long before the failure it exists for.
   const prewarmStandby = useCallback(
     (refreshIfOlderThanMs?: number) => {
-      if (apiKeyStatus !== 'present') return;
+      if (trackRef.current || apiKeyStatus !== 'present') return;
       mintWarmToken(refreshIfOlderThanMs);
     },
     [apiKeyStatus, mintWarmToken],
   );
 
-  const start = useCallback(async (): Promise<boolean> => {
-    setError(null);
-    // If a previous provider instance exists, stop it cleanly first.
-    // Without this, a fast double-click on Start (or a renewal racing a
-    // manual restart) would orphan the prior provider with its timers,
-    // mic stream, and WebRTC pc still alive — a real memory + audio leak.
-    //
-    // Critically: we must call stop() even when previous.status is already
-    // 'stopped', because the persistent renewal-retry path leaves the
-    // instance in the stopped state with a pending renewalRetryTimer.
-    // Without this cleanup the old timer fires later and spins up a
-    // parallel session under the user's new manual session.
-    const previous = providerRef.current;
-    if (previous) {
-      previous.stop();
-      handlersRef.current?.flushPending();
-    }
-    // Drop the previous provider's status subscription before overwriting
-    // its ref — otherwise the old instance's late callbacks (timer-driven
-    // retry, in-flight cleanup) would still mutate React state and step on
-    // the new provider's events.
-    statusUnsubRef.current?.();
-    statusUnsubRef.current = null;
+  const start = useCallback(
+    async (options?: {
+      awaitContent?: boolean;
+      archive?: CoalescingHandlersOptions['archive'];
+    }): Promise<boolean> => {
+      setError(null);
+      errorComponentRef.current = null;
+      // A new start owns a new provider; cancel all work from the previous one.
+      const previous = providerRef.current;
+      if (previous) {
+        previous.stop();
+        handlersRef.current?.finish();
+      }
+      // Drop the previous provider's status subscription before overwriting
+      // its ref — otherwise the old instance's late callbacks (timer-driven
+      // retry, in-flight cleanup) would still mutate React state and step on
+      // the new provider's events.
+      statusUnsubRef.current?.();
+      statusUnsubRef.current = null;
 
-    const { langPair, includeSourceTranscript, micDistance, audioSource } =
-      settingsStore.getState();
-    const handlers = createStoreBoundHandlers();
-    // Intercept health failure events so audio-layer errors (mic permission
-    // denied, device disconnect) and transport errors surface in the React
-    // error banner. Without this, provider.start() returns false silently
-    // when the mic is denied — the user sees the Start button revert with
-    // no explanation. setError(null) at the top of start() clears on retry.
-    const origOnHealth = handlers.onHealth;
-    handlers.onHealth = (ev) => {
-      origOnHealth(ev);
-      if (ev.state === 'failed' && ev.message) setError(ev.message);
-      if (ev.state === 'api_error' && ev.message) setError(ev.message);
-      if (ev.state === 'no_audio_track' && ev.message) setError(ev.message);
-    };
-    handlersRef.current = handlers;
-    // Branch on the user-chosen audio source. 'system' uses getDisplayMedia
-    // for browser tab / system-audio capture (Teams/Zoom in another window);
-    // 'mic' uses getUserMedia for an attached microphone. The OpenAI side of
-    // the audio path doesn't care which one fed it — it just consumes the
-    // MediaStream — so we keep the AudioSource interface symmetric.
-    //
-    // For system audio, micDistance is forced to 'off' so the upstream
-    // noise_reduction profile doesn't fight pre-mixed clean signal. The
-    // SettingsPanel mirrors this by greying out the mic-distance buttons
-    // when audioSource === 'system', so the UI and the actual /session
-    // payload stay in sync.
-    const isSystemAudio = audioSource === 'system';
-    const effectiveMicDistance: 'meeting' | 'close' | 'far' | 'off' = isSystemAudio
-      ? 'off'
-      : micDistance;
-    // Leased, not constructed: a failover handoff reuses the capture that is
-    // already running instead of re-opening the device mid-meeting.
-    const audio: AudioSource = leaseCapture({
-      kind: isSystemAudio ? 'system' : 'mic',
-      micDistance: effectiveMicDistance,
-    });
-    const provider = new OpenAIRealtimeProvider(
-      SESSION_URL,
-      handlers,
-      langPair,
-      audio,
-      includeSourceTranscript,
-      effectiveMicDistance,
-      // Stamp what was really captured. Events used to claim 'microphone' even
-      // when the audio came from a shared screen, which quietly made the 🔊
-      // system-capture chip and the event log disagree about the same session.
-      isSystemAudio ? 'browser_system' : 'microphone',
-    );
-    providerRef.current = provider;
-    // Subscribe to internal status transitions — keeps React in sync when
-    // the provider self-transitions during transparent renewal (running →
-    // idle → running) or falls into retry backoff (running → stopped). The
-    // optimistic setStatus('running') below stays so the button reflects
-    // intent immediately; the subscription corrects later if start() failed
-    // or a renewal mid-session changed state behind the consumer's back.
-    statusUnsubRef.current = provider.onStatus((s) => {
-      if (providerRef.current !== provider) return; // stale callback
-      // Re-frame internal 'stopped' as 'idle' for the UI: the provider's
-      // retry timer will spin a new start() up, so the consumer's "is the
-      // button labelled running?" state matters more than the literal
-      // internal transition. 'idle' makes the user see Start as available.
-      setStatus(s === 'stopped' ? 'idle' : s);
-    });
-    setStatus('running');
+      const { langPair, includeSourceTranscript, micDistance, audioSource } =
+        settingsStore.getState();
+      const scope = trackRef.current;
+      const handlers = createStoreBoundHandlers({
+        ...(options?.archive ? { archive: options.archive } : {}),
+        ...(scope
+          ? { trackId: scope.trackId, onHealth: scope.onHealth, onAudioLevel: scope.onAudioLevel }
+          : {}),
+      });
+      const readiness = translationReadiness(options?.awaitContent === true);
+      healthRef.current.clear();
+      // Intercept health failure events so audio-layer errors (mic permission
+      // denied, device disconnect) and transport errors surface in the React
+      // error banner. Without this, provider.start() returns false silently
+      // when the mic is denied — the user sees the Start button revert with
+      // no explanation. setError(null) at the top of start() clears on retry.
+      const origOnHealth = handlers.onHealth;
+      handlers.onHealth = (ev) => {
+        if (!acceptingHealthRef.current || providerRef.current !== provider) return;
+        ev = readiness.health(ev);
+        if (ev.component === 'transport') transportRef.current = ev.state;
+        const failed =
+          ev.state === 'failed' || ev.state === 'api_error' || ev.state === 'no_audio_track';
+        if (failed && ev.component === 'audio') {
+          // An ended source cannot heal by rotating cloud sessions. Stop its
+          // transport and keep the source failure visible until the user retries.
+          provider.stop();
+          setStatus('idle');
+        }
+        // stop() can synchronously emit stopped; cache the final published event.
+        healthRef.current.set(ev.component, ev);
+        origOnHealth(ev);
+        if (failed && ev.message) {
+          errorComponentRef.current = ev.component;
+          setError(ev.message);
+        } else if (ev.state === 'connected' && errorComponentRef.current === ev.component) {
+          errorComponentRef.current = null;
+          setError(null);
+        }
+      };
+      // Keep graceful Stop tails, but never let a replaced/unmounted owner write.
+      const onTranscript = handlers.onTranscript;
+      const onTranslation = handlers.onTranslation;
+      const onAudioLevel = handlers.onAudioLevel;
+      handlers.onTranscript = (event) => {
+        if (providerRef.current !== provider) return;
+        onTranscript(event);
+        const restored = readiness.content(event.text);
+        if (restored) handlers.onHealth(restored);
+      };
+      handlers.onTranslation = (event) => {
+        if (providerRef.current !== provider) return;
+        onTranslation(event);
+        const restored = readiness.content(event.targetText);
+        if (restored) handlers.onHealth(restored);
+      };
+      handlers.onAudioLevel = (event) => {
+        if (providerRef.current === provider) onAudioLevel(event);
+      };
+      handlersRef.current = handlers;
+      // Branch on the user-chosen audio source. 'system' uses getDisplayMedia
+      // for browser tab / system-audio capture (Teams/Zoom in another window);
+      // 'mic' uses getUserMedia for an attached microphone. The OpenAI side of
+      // the audio path doesn't care which one fed it — it just consumes the
+      // MediaStream — so we keep the AudioSource interface symmetric.
+      //
+      // For system audio, micDistance is forced to 'off' so the upstream
+      // noise_reduction profile doesn't fight pre-mixed clean signal. The
+      // SettingsPanel mirrors this by greying out the mic-distance buttons
+      // when audioSource === 'system', so the UI and the actual /session
+      // payload stay in sync.
+      const isSystemAudio = scope ? scope.trackId === 'remote' : audioSource === 'system';
+      const effectiveMicDistance: 'meeting' | 'close' | 'far' | 'off' = isSystemAudio
+        ? 'off'
+        : micDistance;
+      // Leased, not constructed: a failover handoff reuses the capture that is
+      // already running instead of re-opening the device mid-meeting.
+      const audio: AudioSource =
+        scope?.createAudio() ??
+        leaseCapture({
+          kind: isSystemAudio ? 'system' : 'mic',
+          micDistance: effectiveMicDistance,
+          deviceId: settingsStore.getState().micDeviceId,
+        });
+      const provider = new OpenAIRealtimeProvider(
+        SESSION_URL,
+        handlers,
+        langPair,
+        audio,
+        includeSourceTranscript,
+        effectiveMicDistance,
+        // Stamp what was really captured. Events used to claim 'microphone' even
+        // when the audio came from a shared screen, which quietly made the 🔊
+        // system-capture chip and the event log disagree about the same session.
+        isSystemAudio ? 'browser_system' : 'microphone',
+      );
+      providerRef.current = provider;
+      acceptingHealthRef.current = true;
+      // Keep startup failures reflected in the UI; renewal stays running.
+      statusUnsubRef.current = provider.onStatus((s) => {
+        if (providerRef.current !== provider) return; // stale callback
+        // Failed startup leaves the meeting available for recovery or Retry.
+        setStatus(s === 'stopped' ? 'idle' : s);
+      });
+      setStatus('running');
 
-    try {
-      await provider.start();
-      // If a newer start() raced and replaced providerRef while we were
-      // awaiting, leave the newer one's state alone.
-      if (providerRef.current !== provider) return false;
-      if (provider.status === 'stopped') {
-        // Internal error path (mic denied, /session non-2xx, SDP exchange
-        // failed). The provider already cleaned up; surface as not-running
-        // so callers don't start the cost timer.
+      try {
+        await provider.start();
+        // If a newer start() raced and replaced providerRef while we were
+        // awaiting, leave the newer one's state alone.
+        if (!acceptingHealthRef.current || providerRef.current !== provider) return false;
+        if (provider.status === 'stopped') {
+          // Internal error path (mic denied, /session non-2xx, SDP exchange
+          // failed). The provider already cleaned up; surface as not-running
+          // so callers don't start the cost timer.
+          setStatus('idle');
+          return false;
+        }
+        return true;
+      } catch (err) {
+        if (!acceptingHealthRef.current || providerRef.current !== provider) return false;
+        setError(err instanceof Error ? err.message : String(err));
         setStatus('idle');
         return false;
       }
-      return true;
-    } catch (err) {
-      if (providerRef.current !== provider) return false;
-      setError(err instanceof Error ? err.message : String(err));
-      setStatus('idle');
-      return false;
-    }
-  }, []);
+    },
+    [],
+  );
 
-  const stop = useCallback(() => {
-    providerRef.current?.stop();
-    handlersRef.current?.flushPending();
+  const stop = useCallback((options?: { preserveHealth?: boolean }) => {
+    if (!trackRef.current) cancelOpenAIPrewarm();
+    if (options?.preserveHealth) acceptingHealthRef.current = false;
+    const provider = providerRef.current;
+    provider?.stop({ drain: true });
+    handlersRef.current?.finish();
+    acceptingHealthRef.current = false;
+    transportRef.current = 'stopped';
+    errorComponentRef.current = null;
+    setError(null);
     setStatus('stopped');
+    return provider?.waitForStop() ?? Promise.resolve();
   }, []);
 
   const retry = useCallback(() => {
@@ -259,5 +325,20 @@ export function useOpenAIRealtime(): UseOpenAIRealtime {
     return providerRef.current?.getRenewalEtaMs() ?? null;
   }, []);
 
-  return { status, error, apiKeyStatus, start, stop, retry, getRenewalEtaMs, prewarmStandby };
+  return {
+    status,
+    error,
+    apiKeyStatus,
+    start,
+    stop,
+    retry,
+    getRenewalEtaMs,
+    prewarmStandby,
+    getTransport: () => transportRef.current,
+    restoreHealth: () => {
+      if (acceptingHealthRef.current)
+        for (const event of healthRef.current.values())
+          (trackRef.current?.onHealth ?? settingsStore.getState().applyHealth)(event);
+    },
+  };
 }

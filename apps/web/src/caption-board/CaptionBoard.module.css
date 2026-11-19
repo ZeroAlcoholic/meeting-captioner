@@ -1,4 +1,25 @@
 /* ─── Caption board ──────────────────────────────────────────────────────────── */
+.trackPair {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  min-height: 0;
+}
+
+.track {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.trackLabel {
+  color: #b8c4d8;
+  font-size: 0.875rem;
+  flex-shrink: 0;
+}
+
 .board {
   position: relative;
   display: grid;

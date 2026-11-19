@@ -1,3 +1,12 @@
+import { createRecoveryAttempt } from './recovery-attempt.js';
+
+/** Opt-in pcm-worklet message; startFrame uses this AudioContext's native rate. */
+export interface CapturedPcmChunk {
+  type: 'pcm';
+  startFrame: number;
+  pcm: ArrayBuffer;
+}
+
 // ─── Shared audio-capture engine ─────────────────────────────────────────────
 //
 // A single long-lived AudioContext + compiled AudioWorklet module, reused across
@@ -14,7 +23,9 @@
 // worklet (no audio flows until a provider attaches a MediaStream). The OS mic
 // indicator therefore stays off until a real session calls getUserMedia.
 
-const PCM_WORKLET_URL = '/pcm-worklet.js';
+// Resolved against the build's base: '/' for the server-backed builds, './'
+// for the static phone build, which is served from a project subpath.
+const PCM_WORKLET_URL = `${import.meta.env.BASE_URL}pcm-worklet.js`;
 // 16 kHz: the rate the Gemini/offline PCM worklet expects, and perfectly fine for
 // the OpenAI level/wedge analyser (OpenAI's actual audio rides the WebRTC track,
 // not this context). createMediaStreamSource resamples the mic into it.
@@ -26,8 +37,9 @@ const REALTIME_PRECONNECT_HOSTS = [
 ];
 
 let sharedCtx: AudioContext | null = null;
-let workletPromise: Promise<void> | null = null;
-let workletForCtx: AudioContext | null = null;
+let workletLoads = new WeakMap<AudioContext, Promise<void>>();
+let workletLoadAttempts = new WeakMap<AudioContext, number>();
+let contextResumes = new WeakMap<AudioContext, Promise<void>>();
 let preconnected = false;
 
 type AudioContextCtor = typeof AudioContext;
@@ -63,40 +75,108 @@ function createContext(): AudioContext | null {
 export function getCaptureContext(): AudioContext | null {
   if (sharedCtx && sharedCtx.state !== 'closed') return sharedCtx;
   sharedCtx = createContext();
-  // A brand-new context means any previously-loaded worklet is gone with it.
-  if (sharedCtx !== workletForCtx) {
-    workletPromise = null;
-    workletForCtx = null;
-  }
   return sharedCtx;
 }
 
 /**
- * Load the PCM worklet module into `ctx` exactly once (cached per context).
- * Idempotent — concurrent callers share the same in-flight promise.
+ * Native addModule/resume cannot be aborted. Bound this caller's wait without
+ * closing the shared context or cancelling another provider's in-flight work.
  */
-export function ensureCaptureWorklet(ctx: AudioContext): Promise<void> {
-  if (workletForCtx === ctx && workletPromise) return workletPromise;
-  workletForCtx = ctx;
-  const addModule = ctx.audioWorklet?.addModule?.bind(ctx.audioWorklet);
-  workletPromise = addModule ? addModule(PCM_WORKLET_URL) : Promise.resolve();
-  return workletPromise;
+async function waitForAudioOperation(
+  operation: () => Promise<void>,
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+  label: string,
+): Promise<void> {
+  const attempt = createRecoveryAttempt({
+    ...(signal ? { parentSignal: signal } : {}),
+    generation: 0,
+    isCurrent: () => true,
+    timeoutMs,
+    label,
+  });
+  try {
+    await attempt.run(operation);
+  } finally {
+    attempt.dispose();
+  }
 }
 
 /**
- * Resume the shared context. Browsers create an AudioContext SUSPENDED when it
- * is constructed outside a user gesture (the pre-warm path), so a provider must
- * resume it from within the Start click. No-op when already running / absent.
+ * Share one native module load per context. Retry one actual rejection; evict
+ * only rejected loads. A timed-out caller must not launch a duplicate module
+ * registration while the original native operation can still finish.
  */
-export async function resumeCaptureContext(): Promise<void> {
+export function ensureCaptureWorklet(ctx: AudioContext, signal?: AbortSignal): Promise<void> {
+  return waitForAudioOperation(
+    () => {
+      const cached = workletLoads.get(ctx);
+      if (cached) return cached;
+      const addModule = ctx.audioWorklet?.addModule?.bind(ctx.audioWorklet);
+      if (!addModule) throw new Error('AudioWorklet unavailable');
+      const load = (): Promise<void> => {
+        const attempt = workletLoadAttempts.get(ctx) ?? 0;
+        workletLoadAttempts.set(ctx, attempt + 1);
+        // Native module maps can cache failed fetches. Retry the same local
+        // asset under a new URL, without replacing an otherwise usable context.
+        const url = attempt === 0 ? PCM_WORKLET_URL : `${PCM_WORKLET_URL}?attempt=${attempt}`;
+        return addModule(url);
+      };
+      const loading = (async () => {
+        try {
+          await load();
+        } catch {
+          await load();
+        }
+      })();
+      const shared = loading.catch((error: unknown) => {
+        if (workletLoads.get(ctx) === shared) workletLoads.delete(ctx);
+        throw error;
+      });
+      workletLoads.set(ctx, shared);
+      return shared;
+    },
+    signal,
+    5_000,
+    'AudioWorklet loading',
+  );
+}
+
+/**
+ * Resume within the initiating gesture. A rejected or stalled resume is a real
+ * capture failure, not successful audio. Permission prompts are owned by capture
+ * sources and are never included in this deadline.
+ */
+export function resumeAudioContext(ctx: AudioContext, signal?: AbortSignal): Promise<void> {
+  return waitForAudioOperation(
+    async () => {
+      if (ctx.state === 'running') return;
+      let pending = contextResumes.get(ctx);
+      if (!pending) {
+        const nativeResume = ctx.resume();
+        const shared = nativeResume.finally(() => {
+          if (contextResumes.get(ctx) === shared) contextResumes.delete(ctx);
+        });
+        contextResumes.set(ctx, shared);
+        pending = shared;
+      }
+      await pending;
+      if ((ctx.state as AudioContextState) !== 'running') {
+        throw new Error('AudioContext is not running after resume');
+      }
+    },
+    signal,
+    3_000,
+    'AudioContext resume',
+  );
+}
+
+/** Resume the shared capture engine; private display contexts pass themselves above. */
+export function resumeCaptureContext(signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(signal.reason);
   const ctx = getCaptureContext();
-  if (ctx && ctx.state === 'suspended' && typeof ctx.resume === 'function') {
-    try {
-      await ctx.resume();
-    } catch {
-      /* a failed resume must never block capture bring-up */
-    }
-  }
+  if (!ctx) return Promise.resolve();
+  return resumeAudioContext(ctx, signal);
 }
 
 /**
@@ -132,7 +212,8 @@ export function prewarmCapture(opts: { online: boolean }): void {
 /** Test hook: drop all cached engine state so each test starts clean. */
 export function __resetAudioEngineForTests(): void {
   sharedCtx = null;
-  workletPromise = null;
-  workletForCtx = null;
+  workletLoads = new WeakMap();
+  workletLoadAttempts = new WeakMap();
+  contextResumes = new WeakMap();
   preconnected = false;
 }

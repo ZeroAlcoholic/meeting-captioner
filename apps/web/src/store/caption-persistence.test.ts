@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CaptionState, PersistedState } from './caption-store.js';
-import { createCaptionPersistenceController } from './caption-persistence.js';
+import { createCaptionPersistenceController, mergeSnapshots } from './caption-persistence.js';
 
 function memoryStorage(initial: Record<string, string> = {}): Storage {
   const values = new Map(Object.entries(initial));
@@ -18,6 +18,8 @@ function memoryStorage(initial: Record<string, string> = {}): Storage {
 
 function state(segmentId = 's1'): CaptionState {
   return {
+    liveTracks: {},
+    separateTracks: false,
     maxSegments: 20_000,
     segments: [
       {
@@ -38,6 +40,7 @@ function state(segmentId = 's1'): CaptionState {
     sessionEndedAt: null,
     sessionMode: 'fake',
     sessionPhase: 'running',
+    captionTask: null,
     restoredFromStorage: false,
     applyTranscript: vi.fn(),
     applyTranslation: vi.fn(),
@@ -72,6 +75,131 @@ afterEach(() => {
 });
 
 describe('caption persistence opt-in controller', () => {
+  it('flushes both live tracks and translations without changing the in-memory history', () => {
+    const storage = memoryStorage();
+    const controller = createCaptionPersistenceController({
+      enabled: true,
+      storage,
+      indexedDbAvailable: false,
+    });
+    controllers.push(controller);
+    const snapshot = state();
+    snapshot.separateTracks = true;
+    const history = snapshot.segments;
+    for (const key of ['mic', 'remote'] as const) {
+      snapshot.liveTracks[key] = {
+        partial: {
+          ...history[0]!,
+          segmentId: key,
+          source: key === 'mic' ? 'microphone' : 'browser_system',
+          status: 'partial',
+          text: key,
+        },
+        translation: {
+          sourceSegmentId: key,
+          provider: 'test',
+          status: 'draft',
+          sourceText: key,
+          targetText: key + '譯文',
+          sourceLanguage: 'en',
+          targetLanguage: 'zh-TW',
+          updatedAt: new Date().toISOString(),
+        },
+      };
+    }
+    controller.flush(snapshot);
+    const saved = controller.loadSync()!;
+    expect(saved.separateTracks).toBe(true);
+    expect(saved.segments.map((segment) => segment.segmentId)).toEqual(['s1', 'mic', 'remote']);
+    expect(saved.translations.mic?.targetText).toBe('mic譯文');
+    expect(saved.translations.remote?.targetText).toBe('remote譯文');
+    expect(snapshot.segments).toBe(history);
+    expect(snapshot.segments).toHaveLength(1);
+  });
+
+  it('persists archive identity and never merges snapshots from different restores', () => {
+    const storage = memoryStorage();
+    const controller = createCaptionPersistenceController({
+      enabled: true,
+      storage,
+      indexedDbAvailable: false,
+    });
+    controllers.push(controller);
+    const generation = crypto.randomUUID();
+    controller.flush({ ...state('current'), archiveGeneration: generation });
+    const current = controller.loadSync()!;
+    expect(current.archiveGeneration).toBe(generation);
+    controller.flush({ ...state('old'), archiveGeneration: null });
+    const old = controller.loadSync()!;
+    const merged = mergeSnapshots({ ...old, savedAtMs: 1 }, { ...current, savedAtMs: 2 }, 100);
+    expect(merged.archiveGeneration).toBe(generation);
+    expect(merged.segments.map((segment) => segment.segmentId)).toEqual(['current']);
+  });
+  it.each([2, 3, 4])(
+    'migrates v%s without purpose as ended legacy translation, preserving history',
+    (v) => {
+      const record = { ...persisted('legacy'), v, sessionPhase: undefined };
+      const storage = memoryStorage({ 'meeting-audio:captions:v4': JSON.stringify(record) });
+      const controller = createCaptionPersistenceController({
+        enabled: true,
+        storage,
+        indexedDbAvailable: false,
+      });
+      controllers.push(controller);
+      expect(controller.loadSync()).toMatchObject({
+        sessionPhase: 'ended',
+        captionTask: { purpose: 'translation', langPair: 'en→zh-TW' },
+        segments: [{ segmentId: 'legacy' }],
+      });
+      expect(storage.removeItem).not.toHaveBeenCalled();
+    },
+  );
+  it('never unions snapshots from different meetings or caption purposes', async () => {
+    const storage = memoryStorage({
+      'meeting-audio:captions:v4': JSON.stringify({
+        ...persisted('pure'),
+        captionTask: {
+          purpose: 'transcription',
+          inputLanguages: ['zh-tw', 'en'],
+          textPolicy: 'zh-TW-preserve-original',
+        },
+        savedAt: '2026-10-08T01:00:00.000Z',
+      }),
+    });
+    const controller = createCaptionPersistenceController({
+      enabled: true,
+      storage,
+      indexedDbAvailable: true,
+      idbLoad: async () => ({
+        ...persisted('old-translation'),
+        captionTask: { purpose: 'translation', langPair: 'en→zh-TW' },
+      }),
+    });
+    controllers.push(controller);
+    const recovered = await controller.loadAsync();
+    expect(recovered?.segments.map((s) => s.segmentId)).toEqual(['pure']);
+    expect(recovered?.captionTask?.purpose).toBe('transcription');
+    const other = {
+      ...recovered!,
+      sessionId: 'another-meeting',
+      segments: state('other').segments,
+      savedAtMs: recovered!.savedAtMs - 1,
+    };
+    expect(mergeSnapshots(recovered!, other, 20_000).segments.map((s) => s.segmentId)).toEqual([
+      'pure',
+    ]);
+    const stopped = { ...recovered!, sessionPhase: 'ended' as const, sessionEndedAt: 1000 };
+    const resumed = {
+      ...recovered!,
+      sessionPhase: 'running' as const,
+      sessionEndedAt: null,
+      savedAtMs: recovered!.savedAtMs + 1,
+    };
+    expect(mergeSnapshots(resumed, stopped, 20_000)).toMatchObject({
+      sessionPhase: 'running',
+      sessionEndedAt: null,
+    });
+  });
   it('disabled construction purges transcript keys without loading or saving them', async () => {
     const storage = memoryStorage({
       'meeting-audio:captions:v4': JSON.stringify(persisted('current')),

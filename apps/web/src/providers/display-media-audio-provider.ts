@@ -1,5 +1,6 @@
 import type { HealthEvent } from '@meeting-audio/contracts';
 import type { AudioSource } from './types.js';
+import { resumeAudioContext } from './audio-engine.js';
 
 function now(): string {
   return new Date().toISOString();
@@ -35,12 +36,17 @@ function now(): string {
  */
 export class DisplayMediaAudioProvider implements AudioSource {
   private stream: MediaStream | null = null;
+  private capture: AbortController | null = null;
   private audioCtx: AudioContext | null = null;
   analyser: AnalyserNode | null = null;
   private visibilityHandler: (() => void) | null = null;
   private trackEndedHandler: (() => void) | null = null;
 
   async acquire(onHealth: (e: HealthEvent) => void): Promise<MediaStream> {
+    this.release();
+    const capture = new AbortController();
+    this.capture = capture;
+    const { signal } = capture;
     onHealth({
       kind: 'health',
       component: 'audio',
@@ -48,12 +54,18 @@ export class DisplayMediaAudioProvider implements AudioSource {
       timestamp: now(),
     });
     try {
+      signal.throwIfAborted();
       // video: true is the price of admission for system audio on Chrome.
       // Without it the picker omits the "Share audio" checkbox.
-      this.stream = await navigator.mediaDevices.getDisplayMedia({
+      const stream = await navigator.mediaDevices.getDisplayMedia({
         audio: true,
         video: true,
       });
+      if (signal.aborted) {
+        stream.getTracks().forEach((track) => track.stop());
+        signal.throwIfAborted();
+      }
+      this.stream = stream;
 
       const audioTracks = this.stream.getAudioTracks();
       if (audioTracks.length === 0) {
@@ -88,10 +100,22 @@ export class DisplayMediaAudioProvider implements AudioSource {
       this.analyser = this.audioCtx.createAnalyser();
       this.analyser.fftSize = 2048;
       source.connect(this.analyser);
+      await resumeAudioContext(this.audioCtx, signal);
+      signal.throwIfAborted();
 
       this.visibilityHandler = () => {
         if (!document.hidden && this.audioCtx?.state === 'suspended') {
-          void this.audioCtx.resume();
+          void resumeAudioContext(this.audioCtx, signal).catch((error: unknown) => {
+            if (signal.aborted || this.capture !== capture) return;
+            this.release();
+            onHealth({
+              kind: 'health',
+              component: 'audio',
+              state: 'failed',
+              message: error instanceof Error ? error.message : 'AudioContext resume failed',
+              timestamp: now(),
+            });
+          });
         }
       };
       document.addEventListener('visibilitychange', this.visibilityHandler);
@@ -104,11 +128,13 @@ export class DisplayMediaAudioProvider implements AudioSource {
       const audioTrack = audioTracks[0];
       if (audioTrack && typeof audioTrack.addEventListener === 'function') {
         this.trackEndedHandler = () => {
+          if (signal.aborted) return;
           onHealth({
             kind: 'health',
             component: 'audio',
             state: 'failed',
             message: 'System audio capture stopped — click Start to share again',
+            reason: 'track_ended',
             timestamp: now(),
           });
         };
@@ -116,8 +142,12 @@ export class DisplayMediaAudioProvider implements AudioSource {
       }
 
       onHealth({ kind: 'health', component: 'audio', state: 'connected', timestamp: now() });
-      return this.stream;
+      signal.throwIfAborted();
+      return stream;
     } catch (err) {
+      const owned = this.capture === capture && !signal.aborted;
+      if (!owned) throw err;
+      this.release();
       // Re-emit failed unless we already emitted no_audio_track above.
       const message = err instanceof Error ? err.message : 'System audio permission denied';
       if (!message.includes('No audio track')) {
@@ -134,6 +164,8 @@ export class DisplayMediaAudioProvider implements AudioSource {
   }
 
   release(): void {
+    this.capture?.abort(new DOMException('Audio capture released', 'AbortError'));
+    this.capture = null;
     if (this.visibilityHandler) {
       document.removeEventListener('visibilitychange', this.visibilityHandler);
       this.visibilityHandler = null;
@@ -146,7 +178,7 @@ export class DisplayMediaAudioProvider implements AudioSource {
       this.trackEndedHandler = null;
     }
     this.stream?.getTracks().forEach((t) => t.stop());
-    void this.audioCtx?.close();
+    void this.audioCtx?.close().catch(() => {});
     this.stream = null;
     this.audioCtx = null;
     this.analyser = null;

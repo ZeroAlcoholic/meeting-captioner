@@ -21,6 +21,8 @@
 // `session.input_audio_buffer.append` frames.
 
 import { ensureCaptureWorklet, getCaptureContext, resumeCaptureContext } from './audio-engine.js';
+import type { HealthEvent } from '@meeting-audio/contracts';
+import { monitorCaptureHealth } from './capture-health.js';
 import { arrayBufferToBase64, floatTo16BitPCM } from './gemini-live-provider.js';
 
 const OPENAI_TRANSLATION_WS_URL = 'wss://api.openai.com/v1/realtime/translations';
@@ -116,12 +118,17 @@ export interface OpenAIWsEvent {
 }
 
 export interface OpenAIWsTransportHandlers {
+  onCaptureHealth?: (event: HealthEvent) => void;
   /** One server event — hand straight to the provider's event handler. */
   onEvent: (ev: OpenAIWsEvent) => void;
   /** The socket closed after coming up (never fires after detach()/close()). */
   onClosed: (reason: string) => void;
   /** Audio-path trouble worth surfacing (backpressure, capture failure). */
-  onAudioTrouble: (state: 'degraded' | 'failed', message: string) => void;
+  onAudioTrouble: (
+    state: 'connected' | 'degraded' | 'failed',
+    message: string,
+    component?: 'audio' | 'transport',
+  ) => void;
 }
 
 /**
@@ -142,8 +149,9 @@ export class OpenAIWsOpenError extends Error {
 
 /** Close codes/reasons that mean "these credentials were refused". */
 function looksLikeAuthRejection(code: number, reason: string): boolean {
-  if (code === 4001 || code === 4003 || code === 1008) return true;
-  return /unauthor|not authorized|invalid_?api_?key|forbidden|401|403/i.test(reason);
+  if (code === 4001 || code === 4003) return true;
+  // 1008 is a generic policy violation, not evidence for switching accounts.
+  return /unauthor|not[_ ]authorized|invalid_?api_?key|forbidden|\b(?:401|403)\b/i.test(reason);
 }
 
 export class OpenAIWsTransport {
@@ -152,9 +160,20 @@ export class OpenAIWsTransport {
     private readonly handlers: OpenAIWsTransportHandlers,
   ) {}
 
+  private readonly capture = new AbortController();
   private sourceNode: MediaStreamAudioSourceNode | null = null;
   private workletNode: AudioWorkletNode | null = null;
+  private captureHealth: ReturnType<typeof monitorCaptureHealth> | null = null;
+  get captureHealthy(): boolean {
+    return this.captureHealth?.healthy ?? true;
+  }
   private detached = false;
+  private activated = false;
+  private activationError: OpenAIWsOpenError | null = null;
+  private drainSink: { onEvent: (event: OpenAIWsEvent) => void; onClosed: () => void } | null =
+    null;
+  private readonly pendingEvents: OpenAIWsEvent[] = [];
+  private closedBeforeActivation: { code: number; reason: string } | null = null;
   private dropCount = 0;
   private consecutiveDrops = 0;
   /** Whatever rate the shared capture context actually came up at. */
@@ -168,13 +187,15 @@ export class OpenAIWsTransport {
    * that looks connected while producing nothing.
    *
    * Rejects with OpenAIWsOpenError on refusal/timeout. Any events that arrive
-   * during bring-up (deltas can precede the caller's first tick) are replayed
-   * to `onEvent` in order once the promise settles.
+   * during bring-up (deltas can precede the caller's first tick) stay buffered
+   * until the owner calls `activate()`. This gives make-before-break renewal an
+   * atomic hand-off point before new-session events touch shared caption state.
    */
   static open(
     token: string,
     stream: MediaStream,
     handlers: OpenAIWsTransportHandlers,
+    signal?: AbortSignal,
   ): Promise<OpenAIWsTransport> {
     return new Promise<OpenAIWsTransport>((resolve, reject) => {
       let ws: WebSocket;
@@ -201,20 +222,32 @@ export class OpenAIWsTransport {
       // racing to become the live one.
       let settled = false;
       let opened = false;
-      let closedDuringSetup: { code: number; reason: string } | null = null;
-      const pending: OpenAIWsEvent[] = [];
+      let sessionCreated = false;
       const transport = new OpenAIWsTransport(ws, handlers);
 
+      const clearSetup = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', cancel);
+      };
+      const cancel = () => {
+        if (settled) return;
+        settled = true;
+        clearSetup();
+        transport.close();
+        reject(new OpenAIWsOpenError('OpenAI WebSocket setup cancelled', false));
+      };
       const timer = setTimeout(() => {
         if (settled) return;
         settled = true;
-        try {
-          ws.close();
-        } catch {
-          /* already gone */
-        }
+        clearSetup();
+        transport.close();
         reject(new OpenAIWsOpenError('OpenAI WebSocket session did not start in time', false));
       }, SESSION_OPEN_TIMEOUT_MS);
+      if (signal?.aborted) {
+        cancel();
+        return;
+      }
+      signal?.addEventListener('abort', cancel, { once: true });
 
       ws.onmessage = (m: MessageEvent<string>) => {
         let ev: OpenAIWsEvent;
@@ -223,37 +256,50 @@ export class OpenAIWsTransport {
         } catch {
           return;
         }
-        if (settled) {
-          if (!transport.detached) handlers.onEvent(ev);
+        // A socket can stay OPEN after its upstream session has ended. Reject
+        // that candidate before the owner detaches a healthy primary.
+        if (!transport.activated && (ev.type === 'session.closed' || ev.type === 'error')) {
+          const message = ev.error?.message ?? 'OpenAI session closed before activation';
+          const code = ev.error?.code;
+          const error = new OpenAIWsOpenError(
+            `OpenAI WebSocket session failed${code ? ` (${code})` : ''}: ${message}`,
+            ev.type === 'error' && looksLikeAuthRejection(0, `${code ?? ''} ${message}`),
+          );
+          transport.activationError = error;
+          if (!settled) {
+            settled = true;
+            clearSetup();
+            transport.close();
+            reject(error);
+          } else transport.close();
           return;
         }
-        if (ev.type === 'session.created') {
-          settled = true;
-          clearTimeout(timer);
+        if (settled) {
+          transport.deliverOrQueue(ev);
+          return;
+        }
+        if (ev.type === 'session.created' && !sessionCreated) {
+          sessionCreated = true;
+          // The owner decides when this new session may touch its shared
+          // caption state. Keep session.created first even if a malformed or
+          // unusually eager server sent another event before it.
+          transport.queueForActivation(ev, true);
           transport
             .startAudioPump(stream)
             .then(() => {
-              // The socket can die while the pump is starting. Resolving here
-              // would hand back a transport whose socket is already gone — a
-              // session that looks connected and produces nothing.
-              if (closedDuringSetup !== null) {
-                transport.close();
-                reject(
-                  new OpenAIWsOpenError(
-                    `OpenAI WebSocket closed during setup (${closedDuringSetup.code}${
-                      closedDuringSetup.reason ? `: ${closedDuringSetup.reason}` : ''
-                    })`,
-                    looksLikeAuthRejection(closedDuringSetup.code, closedDuringSetup.reason),
-                  ),
-                );
-                return;
-              }
+              // A timeout/error/close may have won while an audio API promise
+              // was pending. It already rejected open() and closed the socket;
+              // a late completion must not resurrect the transport.
+              if (settled) return;
+              settled = true;
               opened = true;
-              handlers.onEvent(ev);
-              for (const queued of pending) handlers.onEvent(queued);
+              clearSetup();
               resolve(transport);
             })
             .catch((err: unknown) => {
+              if (settled) return;
+              settled = true;
+              clearSetup();
               transport.close();
               reject(
                 new OpenAIWsOpenError(
@@ -264,31 +310,17 @@ export class OpenAIWsTransport {
             });
           return;
         }
-        if (ev.type === 'error') {
-          settled = true;
-          clearTimeout(timer);
-          const message = ev.error?.message ?? 'OpenAI rejected the WebSocket session';
-          const code = ev.error?.code;
-          try {
-            ws.close();
-          } catch {
-            /* already gone */
-          }
-          reject(
-            new OpenAIWsOpenError(
-              `OpenAI WebSocket session failed${code ? ` (${code})` : ''}: ${message}`,
-              looksLikeAuthRejection(0, `${code ?? ''} ${message}`),
-            ),
-          );
-          return;
-        }
-        pending.push(ev);
+        transport.queueForActivation(ev);
       };
 
       ws.onclose = (e: CloseEvent) => {
         if (!settled) {
           settled = true;
-          clearTimeout(timer);
+          clearSetup();
+          // A close can win while addModule()/resume() is pending. Mark the
+          // transport cancelled and tear down any nodes already created so the
+          // late promise continuation cannot revive them.
+          transport.close();
           reject(
             new OpenAIWsOpenError(
               `OpenAI WebSocket closed during setup (${e.code}${e.reason ? `: ${e.reason}` : ''})`,
@@ -298,14 +330,18 @@ export class OpenAIWsTransport {
           return;
         }
         transport.teardownAudio();
-        // Settled but never opened: the failure belongs to open()'s rejection
-        // path, not to the provider's recovery ladder. Record it so a pump
-        // still in flight can reject instead of resolving a dead session.
-        if (!opened) {
-          closedDuringSetup = { code: e.code, reason: e.reason ?? '' };
+        if (transport.drainSink) {
+          transport.drainSink.onClosed();
           return;
         }
-        if (!transport.detached) {
+        // Settled but never opened belongs to open()'s rejection path. An
+        // opened transport is still silent until its owner activates it; if it
+        // dies in that hand-off window, activate() reports the failure instead
+        // of starting a parallel recovery ladder before ownership is assigned.
+        if (!opened) return;
+        if (!transport.activated) {
+          transport.closedBeforeActivation = { code: e.code, reason: e.reason ?? '' };
+        } else if (!transport.detached) {
           handlers.onClosed(`WebSocket closed (${e.code}${e.reason ? `: ${e.reason}` : ''})`);
         }
       };
@@ -317,7 +353,28 @@ export class OpenAIWsTransport {
   }
 
   get isOpen(): boolean {
-    return this.ws.readyState === WebSocket.OPEN;
+    return this.activationError === null && this.ws.readyState === WebSocket.OPEN;
+  }
+
+  /**
+   * Atomically hand event delivery to the owner. open() deliberately returns a
+   * ready-but-silent transport so make-before-break renewal can finalize and
+   * detach the old session before any new-session delta reaches shared state.
+   */
+  activate(): void {
+    if (this.activated) return;
+    if (this.activationError) throw this.activationError;
+    const closed = this.closedBeforeActivation;
+    if (this.detached || closed !== null || !this.isOpen) {
+      const code = closed?.code ?? this.ws.readyState;
+      const reason = closed?.reason ?? '';
+      throw new OpenAIWsOpenError(
+        `OpenAI WebSocket closed before activation (${code}${reason ? `: ${reason}` : ''})`,
+        looksLikeAuthRejection(code, reason),
+      );
+    }
+    this.activated = true;
+    for (const ev of this.pendingEvents.splice(0)) this.handlers.onEvent(ev);
   }
 
   /**
@@ -327,15 +384,35 @@ export class OpenAIWsTransport {
    */
   detach(): void {
     this.detached = true;
+    this.pendingEvents.length = 0;
   }
 
   close(): void {
+    this.drainSink = null;
     this.detached = true;
+    this.pendingEvents.length = 0;
     this.teardownAudio();
     try {
       this.ws.close();
     } catch {
       /* already gone */
+    }
+  }
+
+  /** Stop input while a retired session finishes its pending translated output. */
+  beginDrain(onEvent: (event: OpenAIWsEvent) => void, onClosed: () => void): void {
+    this.detached = true;
+    this.pendingEvents.length = 0;
+    this.teardownAudio();
+    this.drainSink = { onEvent, onClosed };
+    if (!this.isOpen) {
+      onClosed();
+      return;
+    }
+    try {
+      this.ws.send(JSON.stringify({ type: 'session.close' }));
+    } catch {
+      onClosed();
     }
   }
 
@@ -345,7 +422,12 @@ export class OpenAIWsTransport {
     // Read the REAL rate: the engine asks for 16 kHz but falls back to the
     // hardware default when a browser rejects an explicit rate.
     this.inputSampleRate = ctx.sampleRate;
-    await ensureCaptureWorklet(ctx);
+    await ensureCaptureWorklet(ctx, this.capture.signal);
+    // The setup timeout or socket close can fire while addModule() is pending.
+    // Do not create/connect fresh nodes after that teardown already ran.
+    if (this.detached || this.ws.readyState !== WebSocket.OPEN) {
+      throw new Error('WebSocket audio setup was cancelled');
+    }
     this.sourceNode = ctx.createMediaStreamSource(stream);
     this.workletNode = new AudioWorkletNode(ctx, 'pcm-worklet', {
       channelCount: 1,
@@ -353,15 +435,25 @@ export class OpenAIWsTransport {
       channelInterpretation: 'speakers',
       processorOptions: { chunkSize: PCM_CHUNK_SIZE },
     });
+    const captureHealth = (this.captureHealth = monitorCaptureHealth({
+      context: ctx,
+      stream,
+      onHealth: (event) => {
+        if (this.activated && !this.detached) this.handlers.onCaptureHealth?.(event);
+      },
+    }));
     this.workletNode.port.onmessage = (ev: MessageEvent<ArrayBuffer>) => {
+      if (this.detached || !this.activated) return;
+      captureHealth.frame(ev.data.byteLength / 4);
       if (this.detached || this.ws.readyState !== WebSocket.OPEN) return;
       if (this.ws.bufferedAmount > WS_BACKPRESSURE_THRESHOLD) {
         this.dropCount += 1;
         this.consecutiveDrops += 1;
-        if (this.dropCount % 50 === 0) {
+        if (this.consecutiveDrops === 1 || this.dropCount % 50 === 0) {
           this.handlers.onAudioTrouble(
             'degraded',
             `OpenAI link slow — ${this.dropCount} audio frames dropped`,
+            'transport',
           );
         }
         if (this.consecutiveDrops >= WS_FORCE_RECONNECT_DROPS) {
@@ -376,7 +468,7 @@ export class OpenAIWsTransport {
         }
         return;
       }
-      this.consecutiveDrops = 0;
+      const resumingDelivery = this.consecutiveDrops > 0;
       const at24k = resampleTo24kHz(
         new Float32Array(ev.data),
         this.inputSampleRate,
@@ -390,13 +482,42 @@ export class OpenAIWsTransport {
           audio: arrayBufferToBase64(floatTo16BitPCM(at24k)),
         }),
       );
+      this.consecutiveDrops = 0;
+      if (resumingDelivery)
+        this.handlers.onAudioTrouble(
+          'connected',
+          'Audio delivery resumed; waiting for new content',
+          'transport',
+        );
     };
     this.sourceNode.connect(this.workletNode);
     this.workletNode.connect(ctx.destination);
-    await resumeCaptureContext();
+    await resumeCaptureContext(this.capture.signal);
+    if (this.detached || this.ws.readyState !== WebSocket.OPEN) {
+      throw new Error('WebSocket audio setup was cancelled');
+    }
+  }
+
+  private queueForActivation(ev: OpenAIWsEvent, first = false): void {
+    if (this.detached) return;
+    if (first) this.pendingEvents.unshift(ev);
+    else this.pendingEvents.push(ev);
+  }
+
+  private deliverOrQueue(ev: OpenAIWsEvent): void {
+    if (this.drainSink) {
+      this.drainSink.onEvent(ev);
+      return;
+    }
+    if (this.detached) return;
+    if (this.activated) this.handlers.onEvent(ev);
+    else this.pendingEvents.push(ev);
   }
 
   private teardownAudio(): void {
+    this.captureHealth?.dispose();
+    this.captureHealth = null;
+    this.capture.abort(new DOMException('WebSocket audio capture stopped', 'AbortError'));
     try {
       this.workletNode?.disconnect();
       this.workletNode?.port.close();

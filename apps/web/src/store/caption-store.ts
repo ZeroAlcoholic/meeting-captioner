@@ -1,7 +1,8 @@
-import type { TranscriptEvent, TranslationEvent } from '@meeting-audio/contracts';
+import { CaptionTask, type TranscriptEvent, type TranslationEvent } from '@meeting-audio/contracts';
 import { createStore, type StoreApi } from 'zustand/vanilla';
 import {
   createCaptionPersistenceController,
+  captionTasksMatch,
   DEFAULT_PERSIST_KEY,
   type HydratedSnapshot,
 } from './caption-persistence.js';
@@ -34,6 +35,10 @@ export interface CaptionSegment {
   startMs: number;
   endMs?: number;
   confidence?: number;
+  continuationOf?: string;
+  rawText?: string;
+  textNormalization?: TranscriptEvent['textNormalization'];
+  timingBasis?: TranscriptEvent['timingBasis'];
 }
 
 export interface CaptionTranslation {
@@ -49,6 +54,11 @@ export interface CaptionTranslation {
 }
 
 export interface CaptionState {
+  /** Opt-in meeting ownership: at most microphone + remote, never arbitrary track IDs. */
+  separateTracks: boolean;
+  liveTracks: Partial<
+    Record<'mic' | 'remote', { partial: CaptionSegment; translation: CaptionTranslation | null }>
+  >;
   maxSegments: number;
   /**
    * Finalized segments only. Append-grade list that paragraph grouping
@@ -58,6 +68,8 @@ export interface CaptionState {
    */
   segments: CaptionSegment[];
   /**
+   * Compatibility view of the most recently selected live track. Dual-track
+   * rendering uses liveTracks; this field references the same segment object.
    * The currently-in-flight (partial/revised) segment, if any. Updated on
    * every partial delta — so only components that subscribe to this field
    * re-render on the live hot path.
@@ -105,6 +117,10 @@ export interface CaptionState {
    * cleanly stopped. Null when no session has started.
    */
   sessionPhase: SessionPhase | null;
+  /** Caption purpose belongs to the meeting, not the currently selected settings. */
+  captionTask: CaptionTask | null;
+  /** Archive identity captured at admission; legacy/offline snapshots have no generation. */
+  archiveGeneration?: string | null;
   /**
    * EPHEMERAL — never persisted. True only at construction when hydration
    * actually loaded data from storage, and stays true until the user
@@ -126,7 +142,7 @@ export interface CaptionState {
    * anchored to the old sessionStartMs. Pass the capture `mode` so a later
    * reload can offer to continue this exact backend.
    */
-  beginSession: (mode?: SessionMode) => void;
+  beginSession: (mode?: SessionMode, captionTask?: CaptionTask, separateTracks?: boolean) => void;
   /**
    * Update the lifecycle phase (running ⇄ paused, or → ended) without touching
    * the transcript. Persisted, so a reload can tell an interrupted/paused
@@ -178,6 +194,8 @@ export interface CreateCaptionStoreOptions {
   persistKey?: string | null;
   /** Defaults off unless a custom persistKey explicitly opts in. */
   persistenceEnabled?: boolean;
+  /** If specified, only matching-purpose/configuration snapshots may hydrate. */
+  captionTask?: CaptionTask;
 }
 
 // Buffer cap. IndexedDB is the primary durable store (async, multi-MB headroom),
@@ -192,6 +210,16 @@ const DEFAULT_MAX_SEGMENTS = 20000;
 // the same key — e.g. under Vite HMR or repeated construction in tests — which
 // would leak listeners and let a stale store's flush run on tab-hide.
 const lifecycleBoundKeys = new Set<string>();
+
+function liveState(liveTracks: CaptionState['liveTracks'], preferred?: string) {
+  const tracks = Object.values(liveTracks);
+  const selected = tracks.find((track) => track.partial.segmentId === preferred) ?? tracks.at(-1);
+  return {
+    liveTracks,
+    livePartial: selected?.partial ?? null,
+    liveTranslation: selected?.translation ?? null,
+  };
+}
 
 function makeSessionId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -215,6 +243,10 @@ function eventToSegment(event: TranscriptEvent): CaptionSegment {
   };
   if (event.endMs !== undefined) segment.endMs = event.endMs;
   if (event.confidence !== undefined) segment.confidence = event.confidence;
+  if (event.continuationOf !== undefined) segment.continuationOf = event.continuationOf;
+  if (event.rawText !== undefined) segment.rawText = event.rawText;
+  if (event.textNormalization !== undefined) segment.textNormalization = event.textNormalization;
+  if (event.timingBasis !== undefined) segment.timingBasis = event.timingBasis;
   return segment;
 }
 
@@ -246,6 +278,7 @@ function upsertSorted(
   next: CaptionSegment,
   supersedeId: string | undefined,
   maxSegments: number,
+  separateTracks: boolean,
 ): CaptionSegment[] {
   const filtered = segments.filter(
     (s) => s.segmentId !== next.segmentId && s.segmentId !== supersedeId,
@@ -253,7 +286,12 @@ function upsertSorted(
   let insertAt = filtered.length;
   for (let i = filtered.length - 1; i >= 0; i--) {
     const seg = filtered[i];
-    if (seg !== undefined && seg.startMs <= next.startMs) {
+    // Match archive ordering for simultaneous finals from independent sources.
+    if (
+      seg !== undefined &&
+      (seg.startMs < next.startMs ||
+        (seg.startMs === next.startMs && (!separateTracks || seg.segmentId <= next.segmentId)))
+    ) {
       insertAt = i + 1;
       break;
     }
@@ -265,9 +303,53 @@ function upsertSorted(
 
 export type CaptionStore = StoreApi<CaptionState>;
 
+/** Explicit resume cannot reinterpret old history as a different caption task. */
+export function resumeCaptionSession(
+  store: CaptionStore,
+  task: CaptionTask,
+  mode?: SessionMode,
+): boolean {
+  const requested = CaptionTask.parse(task);
+  const state = store.getState();
+  if (!state.sessionId || !captionTasksMatch(state.captionTask, requested)) return false;
+  state.setSessionPhase('running'); // marks the store touched before any late IDB hydration
+  if (mode) store.getState().setSessionMode(mode);
+  store.setState({ sessionEndedAt: null, restoredFromStorage: false });
+  return true;
+}
+
+/** Replace the bounded viewport with an archive page; SQLite retains full history. */
+export function restoreCaptionSession(
+  store: CaptionStore,
+  input: {
+    meetingId: string;
+    captionTask: CaptionTask;
+    segments: TranscriptEvent[];
+    sessionMode?: SessionMode;
+    sessionStartMs?: number | null;
+    phase?: SessionPhase;
+    separateTracks?: boolean;
+  },
+): void {
+  const task = CaptionTask.parse(input.captionTask);
+  store.getState().beginSession(input.sessionMode, task, input.separateTracks === true);
+  const segments = input.segments
+    .map(eventToSegment)
+    .sort((a, b) => a.startMs - b.startMs)
+    .slice(-store.getState().maxSegments);
+  store.setState({
+    sessionId: input.meetingId,
+    segments,
+    sessionStartMs: input.sessionStartMs ?? null,
+    sessionPhase: input.phase ?? 'paused',
+    restoredFromStorage: segments.length > 0,
+  });
+}
+
 /** Apply a hydrated snapshot (e.g. merged IDB+localStorage) onto the store. */
 function applyHydratedSnapshot(store: CaptionStore, snap: HydratedSnapshot): void {
   store.setState({
+    separateTracks: snap.separateTracks === true,
     segments: snap.segments,
     translations: snap.translations,
     sessionStartMs: snap.sessionStartMs,
@@ -275,6 +357,8 @@ function applyHydratedSnapshot(store: CaptionStore, snap: HydratedSnapshot): voi
     sessionEndedAt: snap.sessionEndedAt,
     sessionMode: snap.sessionMode,
     sessionPhase: snap.sessionPhase,
+    captionTask: snap.captionTask ?? null,
+    archiveGeneration: snap.archiveGeneration ?? null,
     restoredFromStorage: snap.segments.length > 0,
   });
 }
@@ -289,6 +373,7 @@ export function createCaptionStore(options: CreateCaptionStoreOptions = {}): Cap
     enabled: persistenceEnabled,
     key: persistenceKey,
     maxSegments,
+    ...(options.captionTask ? { captionTask: CaptionTask.parse(options.captionTask) } : {}),
   });
   const hydrated = persistence.loadSync();
 
@@ -308,12 +393,16 @@ export function createCaptionStore(options: CreateCaptionStoreOptions = {}): Cap
     segments: hydrated?.segments ?? [],
     livePartial: null,
     liveTranslation: null,
+    liveTracks: {},
+    separateTracks: hydrated?.separateTracks === true,
     translations: hydrated?.translations ?? {},
     sessionStartMs: hydrated?.sessionStartMs ?? null,
     sessionId: hydrated?.sessionId ?? null,
     sessionEndedAt: hydrated?.sessionEndedAt ?? null,
     sessionMode: hydrated?.sessionMode ?? null,
     sessionPhase: hydrated?.sessionPhase ?? null,
+    captionTask: hydrated?.captionTask ?? options.captionTask ?? null,
+    archiveGeneration: hydrated?.archiveGeneration ?? null,
     restoredFromStorage,
 
     applyTranscript: (event) =>
@@ -335,7 +424,9 @@ export function createCaptionStore(options: CreateCaptionStoreOptions = {}): Cap
           // promote it to liveTranslation and remove it from history so
           // LiveCaption picks it up. Without this the early-translation
           // would be stranded forever.
-          let liveTranslation = state.liveTranslation;
+          const track =
+            event.source === 'microphone' || event.source === 'fake_replay' ? 'mic' : 'remote';
+          let liveTranslation = state.liveTracks[track]?.translation ?? null;
           let translations = state.translations;
           if (liveTranslation && liveTranslation.sourceSegmentId !== nextLive.segmentId) {
             liveTranslation = null;
@@ -346,8 +437,13 @@ export function createCaptionStore(options: CreateCaptionStoreOptions = {}): Cap
             translations = rest;
           }
           const out: Partial<CaptionState> = {
-            livePartial: nextLive,
-            liveTranslation,
+            ...liveState(
+              {
+                ...(state.separateTracks ? state.liveTracks : {}),
+                [track]: { partial: nextLive, translation: liveTranslation },
+              },
+              nextLive.segmentId,
+            ),
             sessionStartMs,
           };
           if (translations !== state.translations) out.translations = translations;
@@ -362,27 +458,29 @@ export function createCaptionStore(options: CreateCaptionStoreOptions = {}): Cap
           eventToSegment(event),
           event.revisionOf,
           state.maxSegments,
+          state.separateTracks,
         );
 
-        const live = state.livePartial;
-        const liveClears =
-          live !== null &&
-          (live.segmentId === event.segmentId || live.segmentId === event.revisionOf);
-
+        const liveTracks = { ...state.liveTracks };
         let translations = state.translations;
-        let liveTranslation = state.liveTranslation;
-        if (
-          liveTranslation &&
-          (liveTranslation.sourceSegmentId === event.segmentId ||
-            liveTranslation.sourceSegmentId === event.revisionOf)
-        ) {
-          // Re-key under the final segment id (in case of revisionOf supersession).
-          const promoted: CaptionTranslation = {
-            ...liveTranslation,
-            sourceSegmentId: event.segmentId,
-          };
-          translations = { ...translations, [event.segmentId]: promoted };
-          liveTranslation = null;
+        for (const track of ['mic', 'remote'] as const) {
+          const live = liveTracks[track];
+          if (
+            !live ||
+            (live.partial.segmentId !== event.segmentId &&
+              live.partial.segmentId !== event.revisionOf)
+          )
+            continue;
+          delete liveTracks[track];
+          const liveTranslation = live.translation;
+          if (liveTranslation) {
+            // Re-key under the final segment id (in case of revisionOf supersession).
+            const promoted: CaptionTranslation = {
+              ...liveTranslation,
+              sourceSegmentId: event.segmentId,
+            };
+            translations = { ...translations, [event.segmentId]: promoted };
+          }
         }
 
         // Prune translations whose source segments dropped out of the buffer.
@@ -408,18 +506,23 @@ export function createCaptionStore(options: CreateCaptionStoreOptions = {}): Cap
         return {
           segments,
           translations,
-          livePartial: liveClears ? null : live,
-          liveTranslation,
+          ...liveState(liveTracks, state.livePartial?.segmentId),
           sessionStartMs,
         };
       }),
 
     applyTranslation: (event) =>
       set((state) => {
+        if (state.captionTask?.purpose === 'transcription') return state;
         // If this translation matches the live partial, keep it OFF the main
         // translations map so HistoryStream does not re-render at draft rate.
-        if (state.livePartial && state.livePartial.segmentId === event.sourceSegmentId) {
-          return { liveTranslation: eventToTranslation(event) };
+        for (const track of ['mic', 'remote'] as const) {
+          const live = state.liveTracks[track];
+          if (live?.partial.segmentId === event.sourceSegmentId)
+            return liveState(
+              { ...state.liveTracks, [track]: { ...live, translation: eventToTranslation(event) } },
+              state.livePartial?.segmentId,
+            );
         }
         return {
           translations: {
@@ -429,18 +532,25 @@ export function createCaptionStore(options: CreateCaptionStoreOptions = {}): Cap
         };
       }),
 
-    beginSession: (mode) => {
+    beginSession: (mode, task, separateTracks = false) => {
+      const captionTask = CaptionTask.parse(
+        task ?? options.captionTask ?? { purpose: 'translation', langPair: 'en→zh-TW' },
+      );
       sessionTouched = true;
       set({
         segments: [],
         livePartial: null,
         liveTranslation: null,
+        liveTracks: {},
+        separateTracks,
         translations: {},
         sessionStartMs: null,
         sessionId: makeSessionId(),
         sessionEndedAt: null,
         sessionMode: mode ?? null,
         sessionPhase: 'running',
+        captionTask,
+        archiveGeneration: null,
         restoredFromStorage: false,
       });
     },
@@ -485,12 +595,16 @@ export function createCaptionStore(options: CreateCaptionStoreOptions = {}): Cap
         segments: [],
         livePartial: null,
         liveTranslation: null,
+        liveTracks: {},
+        separateTracks: false,
         translations: {},
         sessionStartMs: null,
         sessionId: null,
         sessionEndedAt: null,
         sessionMode: null,
         sessionPhase: null,
+        captionTask: null,
+        archiveGeneration: null,
         restoredFromStorage: false,
       });
       // Storage cleanup is serialized after any older save, so cleared data

@@ -5,11 +5,12 @@ import {
   type TranscriptEvent,
   type TranslationEvent,
 } from '@meeting-audio/contracts';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AudioSource, CaptionProviderHandlers } from './types.js';
 import { OpenAIRealtimeProvider } from './openai-realtime-provider.js';
+import { loadTranscriptNormalizer } from './transcript-normalization.js';
 import { GeminiLiveProvider } from './gemini-live-provider.js';
-import { OfflineSTTProvider } from './offline-stt-provider.js';
+import { OfflineSTTProvider } from './offline/offline-stt-provider.js';
 import { FakeReplayProvider, type FakeReplayScript } from './fake-replay-provider.js';
 
 /**
@@ -68,6 +69,10 @@ function kinds(events: Collected['events']): Set<string> {
 }
 
 describe('provider conformance — every emitted event matches NormalizedEvent', () => {
+  // These drive providers past start(), which is where the Taiwanese dictionary
+  // is normally fetched.
+  beforeAll(() => loadTranscriptNormalizer());
+
   it('OpenAIRealtimeProvider (deltas, finalize, error) emits only normalized events', () => {
     const { handlers, events } = collector();
     const p = new OpenAIRealtimeProvider(
@@ -89,7 +94,12 @@ describe('provider conformance — every emitted event matches NormalizedEvent',
 
     pa.handleDCEvent({ type: 'session.created' });
     pa.handleDCEvent({ type: 'session.input_transcript.delta', delta: 'Quarterly revenue grew.' });
-    pa.handleDCEvent({ type: 'session.output_transcript.delta', delta: '本季營收成長。' });
+    // Simplified on the wire: the caption must arrive in Taiwanese wording, not
+    // merely Traditional glyphs (软件 → 軟體, never 軟件).
+    pa.handleDCEvent({
+      type: 'session.output_transcript.delta',
+      delta: '本季营收成长，软件的默认设置',
+    });
     pa.handleDCEvent({ type: 'response.done' }); // finalize → final transcript + translation
     pa.handleDCEvent({ type: 'error', error: { message: 'simulated upstream error' } });
     pa.cleanup(); // clear any pending segment timers
@@ -100,9 +110,14 @@ describe('provider conformance — every emitted event matches NormalizedEvent',
     expect(events.some((e) => e.kind === 'transcript' && e.status === 'final')).toBe(true);
     expect(events.some((e) => e.kind === 'translation' && e.status === 'final')).toBe(true);
     expect(events.some((e) => e.kind === 'health' && e.state === 'api_error')).toBe(true);
+    expect(
+      events.some(
+        (e) => e.kind === 'translation' && e.targetText === '本季營收成長，軟體的預設設定',
+      ),
+    ).toBe(true);
   });
 
-  it('GeminiLiveProvider (setup, transcription, sentence-finalize, goAway) emits only normalized events', () => {
+  it('GeminiLiveProvider emits normalized content and ignores GoAway without an active socket', () => {
     const { handlers, events } = collector();
     const g = new GeminiLiveProvider(
       'http://x/session/gemini',
@@ -121,14 +136,16 @@ describe('provider conformance — every emitted event matches NormalizedEvent',
     g.handleServerObject({ serverContent: { outputTranscription: { text: '大家好。' } } }); // sentence end → finalize
     g.handleServerObject({ serverContent: { turnComplete: true } });
     g.handleServerObject({ sessionResumptionUpdate: { newHandle: 'handle-1', resumable: true } });
-    g.handleServerObject({ goAway: { timeLeft: '5s' } }); // health: reconnecting + finalize
+    // This mapping-only harness has no socket. GoAway no longer invents an
+    // outage here; real rotation health is covered by the full provider tests.
+    g.handleServerObject({ goAway: { timeLeft: '5s' } });
 
     expectAllConform(events);
     expect(kinds(events)).toEqual(new Set(['transcript', 'translation', 'health']));
     expect(events.some((e) => e.kind === 'transcript' && e.status === 'final')).toBe(true);
     expect(events.some((e) => e.kind === 'translation' && e.status === 'final')).toBe(true);
     expect(events.some((e) => e.kind === 'health' && e.state === 'connected')).toBe(true);
-    expect(events.some((e) => e.kind === 'health' && e.state === 'reconnecting')).toBe(true);
+    expect(events.some((e) => e.kind === 'health' && e.state === 'reconnecting')).toBe(false);
   });
 
   it('OfflineSTTProvider (transcript/translation/health passthrough + rebase) emits only normalized events', () => {

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   AudioLevelEvent,
   HealthEvent,
@@ -56,6 +56,114 @@ beforeEach(() => {
 });
 
 describe('createStoreBoundHandlers — partial throttling', () => {
+  it('archives the capture gap interval and epoch once on its bound remote meeting', () => {
+    captionStore.getState().beginSession('real');
+    const meetingId = captionStore.getState().sessionId;
+    const archive = { recordTranscript: vi.fn(), recordTranslation: vi.fn(), recordGap: vi.fn() };
+    const handler = createStoreBoundHandlers({ archive, trackId: 'remote', onHealth: vi.fn() });
+    const connected: HealthEvent = {
+      kind: 'health',
+      component: 'audio',
+      state: 'connected',
+      timestamp: new Date().toISOString(),
+    };
+    handler.onHealth(connected);
+    captionStore.getState().beginSession('real');
+    const captureGap = {
+      captureEpoch: 'remote-capture-epoch',
+      wallClock: { startAt: '2026-10-16T00:00:00.000Z', endAt: '2026-10-16T00:00:10.000Z' },
+    };
+    handler.onHealth({ ...connected, state: 'degraded', reason: 'capture_stalled', captureGap });
+    handler.onHealth(connected);
+    handler.finish();
+    expect(archive.recordGap).toHaveBeenCalledTimes(1);
+    expect(archive.recordGap.mock.calls[0]![0]).toMatchObject({
+      meetingId,
+      trackId: 'remote',
+      ...captureGap,
+      alignment: 'estimated',
+      state: 'unrecoverable',
+    });
+  });
+  it('keeps each track interruption identity within the same meeting', () => {
+    captionStore.getState().beginSession('real');
+    const archive = { recordTranscript: vi.fn(), recordTranslation: vi.fn(), recordGap: vi.fn() };
+    const mic = createStoreBoundHandlers({ archive, trackId: 'mic' });
+    const remote = createStoreBoundHandlers({ archive, trackId: 'remote' });
+    const health = (state: 'connected' | 'failed'): HealthEvent => ({
+      kind: 'health',
+      component: 'audio',
+      state,
+      timestamp: new Date().toISOString(),
+    });
+    mic.onHealth(health('connected'));
+    remote.onHealth(health('connected'));
+    mic.onHealth(health('failed'));
+    const localGap = archive.recordGap.mock.calls.at(-1)![0];
+    expect(localGap.trackId).toBe('mic');
+    const before = archive.recordGap.mock.calls.length;
+    remote.onHealth(health('connected'));
+    expect(archive.recordGap).toHaveBeenCalledTimes(before);
+    remote.onHealth(health('failed'));
+    const remoteGap = archive.recordGap.mock.calls.at(-1)![0];
+    expect(remoteGap.trackId).toBe('remote');
+    expect(remoteGap.meetingId).toBe(localGap.meetingId);
+    expect(remoteGap.gapId).not.toBe(localGap.gapId);
+    expect(remoteGap.captureEpoch).not.toBe(localGap.captureEpoch);
+    mic.finish();
+    remote.finish();
+  });
+  it('independent track handlers retain both latest partials and archive every final', () => {
+    const queue: Array<() => void> = [];
+    const archive = { recordTranscript: vi.fn(), recordTranslation: vi.fn() };
+    const options = {
+      archive,
+      scheduler: (cb: () => void) => {
+        queue.push(cb);
+      },
+    };
+    const mic = createStoreBoundHandlers(options);
+    const remote = createStoreBoundHandlers(options);
+    const delivered: string[] = [];
+    const unsubscribe = captionStore.subscribe((state) => {
+      if (state.livePartial) delivered.push(state.livePartial.text);
+    });
+    try {
+      mic.onTranscript(partial('mic-1', 'local first'));
+      remote.onTranscript({ ...partial('remote-1', 'remote first'), source: 'browser_system' });
+      mic.onTranscript(partial('mic-1', 'local latest'));
+      remote.onTranscript({ ...partial('remote-1', 'remote latest'), source: 'browser_system' });
+      expect(queue).toHaveLength(2);
+      queue.splice(0).forEach((flush) => flush());
+      expect(delivered).toEqual(['local latest', 'remote latest']);
+      // This proves independent batching, not simultaneous rendering: the
+      // existing store still exposes only one livePartial, handled by W11.
+      const localFinal = final('mic-1', 'local final');
+      const remoteFinal = {
+        ...final('remote-1', 'remote final'),
+        source: 'browser_system' as const,
+      };
+      mic.onTranscript(localFinal);
+      remote.onTranscript(remoteFinal);
+      expect(captionStore.getState().segments.map((segment) => segment.segmentId)).toEqual([
+        'mic-1',
+        'remote-1',
+      ]);
+      expect(archive.recordTranscript.mock.calls.map(([event]) => event)).toEqual([
+        partial('mic-1', 'local first'),
+        { ...partial('remote-1', 'remote first'), source: 'browser_system' },
+        partial('mic-1', 'local latest'),
+        { ...partial('remote-1', 'remote latest'), source: 'browser_system' },
+        localFinal,
+        remoteFinal,
+      ]);
+    } finally {
+      unsubscribe();
+      mic.finish();
+      remote.finish();
+    }
+  });
+
   it('queues partials and flushes once per scheduler tick', () => {
     const queue: Array<() => void> = [];
     const handlers = createStoreBoundHandlers({
@@ -195,4 +303,131 @@ describe('createStoreBoundHandlers — partial throttling', () => {
     expect(settingsStore.getState().health.transport.state).toBe('connected');
     expect(settingsStore.getState().audioLevel?.rmsDb).toBe(-30);
   });
+});
+
+it('archives retiring tails without painting them into a newer meeting', () => {
+  const task = { purpose: 'translation' as const, langPair: 'en→zh-TW' as const };
+  captionStore.getState().beginSession('real', task);
+  const archive = { recordTranscript: vi.fn(), recordTranslation: vi.fn() };
+  const queue: Array<() => void> = [];
+  const handlers = createStoreBoundHandlers({ archive, scheduler: (flush) => queue.push(flush) });
+  handlers.onTranscript(partial('old-pending', 'old pending'));
+  handlers.onTranslation(draft('old-pending', '舊待定'));
+  captionStore.getState().beginSession('gemini', task);
+  handlers.onTranscript(final('old-final', 'old final'));
+  handlers.onTranslation({ ...draft('old-final', '舊定稿'), status: 'final' });
+  queue.forEach((flush) => flush());
+  expect(archive.recordTranscript).toHaveBeenCalledTimes(2);
+  expect(archive.recordTranslation).toHaveBeenCalledTimes(2);
+  expect(captionStore.getState().segments).toEqual([]);
+  expect(captionStore.getState().translations).toEqual({});
+  expect(captionStore.getState().livePartial).toBeNull();
+  expect(captionStore.getState().liveTranslation).toBeNull();
+});
+
+afterEach(() => vi.useRealTimers());
+it('archives an estimated interruption until both audio and content-ready transport recover', () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-10-16T00:00:00Z'));
+  captionStore.getState().beginSession('gemini', { purpose: 'translation', langPair: 'en→zh-TW' });
+  const meetingId = captionStore.getState().sessionId;
+  const archive = { recordTranscript: vi.fn(), recordTranslation: vi.fn(), recordGap: vi.fn() };
+  const h = createStoreBoundHandlers({ archive });
+  const health = (component: HealthEvent['component'], state: HealthEvent['state']) =>
+    h.onHealth({ kind: 'health', component, state, timestamp: new Date().toISOString() });
+  health('transport', 'failed'); // No capture or content yet: not an audio-loss claim.
+  expect(archive.recordGap).not.toHaveBeenCalled();
+  health('audio', 'connected');
+  health('transport', 'reconnecting');
+  expect(archive.recordGap).toHaveBeenCalledTimes(1);
+  vi.advanceTimersByTime(1000);
+  health('audio', 'failed');
+  health('transport', 'connected');
+  vi.advanceTimersByTime(2000);
+  health('audio', 'connected');
+  const gap = archive.recordGap.mock.calls.at(-1)![0];
+  expect(gap).toMatchObject({
+    meetingId,
+    alignment: 'estimated',
+    state: 'unrecoverable',
+    wallClock: { startAt: '2026-10-16T00:00:00.000Z', endAt: '2026-10-16T00:00:03.000Z' },
+  });
+  expect(gap).not.toHaveProperty('startSample');
+  expect(new Set(archive.recordGap.mock.calls.map(([g]) => g.gapId)).size).toBe(1);
+  const count = archive.recordGap.mock.calls.length;
+  vi.advanceTimersByTime(5000);
+  h.flushPending();
+  expect(archive.recordGap).toHaveBeenCalledTimes(count);
+});
+it('checkpoints an unresolved interruption on Stop into its original meeting', () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-10-16T00:00:00Z'));
+  captionStore.getState().beginSession('gemini', { purpose: 'translation', langPair: 'en→zh-TW' });
+  const meetingId = captionStore.getState().sessionId;
+  const archive = { recordTranscript: vi.fn(), recordTranslation: vi.fn(), recordGap: vi.fn() };
+  const h = createStoreBoundHandlers({ archive });
+  h.onTranscript(final('before', 'content'));
+  h.onHealth({
+    kind: 'health',
+    component: 'transport',
+    state: 'reconnecting',
+    timestamp: new Date().toISOString(),
+  });
+  captionStore.getState().beginSession('real', { purpose: 'translation', langPair: 'en→zh-TW' });
+  vi.advanceTimersByTime(3000);
+  h.flushPending();
+  expect(archive.recordGap.mock.calls.at(-1)?.[0]).toMatchObject({
+    meetingId,
+    wallClock: { endAt: '2026-10-16T00:00:03.000Z' },
+  });
+  expect(captionStore.getState().segments).toEqual([]);
+});
+
+it('finishes an outgoing owner once without extending its gap on later cleanup', () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-10-16T00:00:00Z'));
+  captionStore.getState().beginSession('gemini', { purpose: 'translation', langPair: 'en→zh-TW' });
+  const archive = { recordTranscript: vi.fn(), recordTranslation: vi.fn(), recordGap: vi.fn() };
+  const h = createStoreBoundHandlers({ archive });
+  h.onTranscript(final('before', 'before'));
+  const failure: HealthEvent = {
+    kind: 'health',
+    component: 'transport',
+    state: 'reconnecting',
+    timestamp: new Date().toISOString(),
+  };
+  h.onHealth(failure);
+  vi.advanceTimersByTime(3000);
+  h.finish();
+  const count = archive.recordGap.mock.calls.length;
+  vi.advanceTimersByTime(30000);
+  h.onTranscript(final('tail', 'retiring tail'));
+  h.onHealth(failure);
+  h.finish();
+  expect(archive.recordGap).toHaveBeenCalledTimes(count);
+  expect(archive.recordGap.mock.calls.at(-1)?.[0].wallClock.endAt).toBe('2026-10-16T00:00:03.000Z');
+  expect(archive.recordTranscript).toHaveBeenLastCalledWith(final('tail', 'retiring tail'));
+});
+
+it('records an audio failure after provider cleanup emits stopped, until the owner finishes', () => {
+  captionStore.getState().beginSession('gemini', { purpose: 'translation', langPair: 'en→zh-TW' });
+  const archive = { recordTranscript: vi.fn(), recordTranslation: vi.fn(), recordGap: vi.fn() };
+  const h = createStoreBoundHandlers({ archive });
+  h.onTranscript(final('before', 'before'));
+  // Online hooks stop the broken provider before publishing its original audio failure.
+  h.onHealth({
+    kind: 'health',
+    component: 'audio',
+    state: 'stopped',
+    timestamp: new Date().toISOString(),
+  });
+  h.onHealth({
+    kind: 'health',
+    component: 'audio',
+    state: 'failed',
+    reason: 'track_ended',
+    timestamp: new Date().toISOString(),
+  });
+  expect(archive.recordGap).toHaveBeenCalledTimes(1);
+  h.finish();
 });

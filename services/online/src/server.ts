@@ -9,6 +9,10 @@ import { registerHealthz } from './routes/healthz.js';
 import { registerSession } from './routes/session.js';
 import { registerTranslate } from './routes/translate.js';
 import { registerGemini } from './routes/gemini.js';
+import { registerTranscription } from './routes/transcription.js';
+import { registerGeminiTranscription } from './routes/gemini-transcription.js';
+import { registerMeetings } from './routes/meetings.js';
+import type { ArchiveServiceIdentity } from '@meeting-audio/contracts';
 
 // pino-pretty is great for dev console output but causes trouble in the
 // bundled slim release (pino loads it via a worker thread that resolves
@@ -30,7 +34,9 @@ function buildLoggerConfig() {
   };
 }
 
-export async function buildApp(): Promise<FastifyInstance> {
+export async function buildApp(
+  options: { sameOriginOnly?: boolean; serviceIdentity?: ArchiveServiceIdentity } = {},
+): Promise<FastifyInstance> {
   const app = Fastify({
     logger: buildLoggerConfig(),
   });
@@ -47,15 +53,22 @@ export async function buildApp(): Promise<FastifyInstance> {
   });
 
   await app.register(cors, {
-    origin: config.ONLINE_CORS_ORIGIN,
+    origin: options.sameOriginOnly ? false : config.ONLINE_CORS_ORIGIN,
+    exposedHeaders: ['Retry-After'],
     methods: ['GET', 'POST', 'OPTIONS'],
     credentials: false,
   });
 
   await registerHealthz(app);
   await registerSession(app);
+  await registerTranscription(app);
+  await registerGeminiTranscription(app);
   await registerTranslate(app);
   await registerGemini(app);
+  await registerMeetings(app, {
+    ...(options.serviceIdentity ? { serviceIdentity: options.serviceIdentity } : {}),
+    trustedOrigins: options.sameOriginOnly ? [] : [config.ONLINE_CORS_ORIGIN],
+  });
 
   // Slim-distribution mode: when WEB_DIST_PATH is set, serve apps/web/dist as
   // static files so the entire stack runs from one process on one port.
@@ -84,6 +97,8 @@ export async function buildApp(): Promise<FastifyInstance> {
         if (
           urlPath.startsWith('/session') ||
           urlPath.startsWith('/healthz') ||
+          urlPath.startsWith('/meetings') ||
+          urlPath.startsWith('/local') ||
           urlPath.startsWith('/translate')
         ) {
           return reply.code(404).send({ error: 'Not found' });

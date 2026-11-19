@@ -7,11 +7,19 @@
 
 ## Backend Selection
 
-**Primary candidate:** [WhisperLiveKit](https://github.com/QUENTINFUXA/WHISPERLIVEKIT)
-**Fallback:** [faster-whisper](https://github.com/SYSTRAN/faster-whisper) wrapped with our own VAD + streaming policy.
+**Current implementation, not usability acceptance (2026-10-22):**
+`run_whl.py` starts WhisperLive (`whisper_live.server`) with the
+`faster_whisper` backend and default `distil-large-v3`; it is not WhisperLiveKit.
+The user reports unusable speed/quality. The deve runtime lacks `whisper-live`
+and `pyaudiowpatch`; the launcher can select another project environment, which
+was not executed in this investigation. No current full audio-path acceptance
+is established. See [diagnosis and replacement criteria](evals/2026-10-22-offline-calibration.md).
+
+**Original architecture candidate:** [WhisperLiveKit](https://github.com/QUENTINFUXA/WHISPERLIVEKIT).
+**Underlying current ASR library:** [faster-whisper](https://github.com/SYSTRAN/faster-whisper).
 **Reference architecture:** [whisper_streaming](https://github.com/ufal/whisper_streaming) (paper: arXiv 2307.14743) — local agreement & self-adaptive latency.
 
-Decision criteria (to be evaluated during P3 spike):
+Decision criteria for any retained or replacement backend:
 
 1. Does the backend already produce stable streaming `partial → revised → final`
    transitions, or do we have to build them?
@@ -55,8 +63,11 @@ Required methods (sketch):
 
 ## Models
 
-- Initial benchmark target: Whisper **small** (~500 MB) for English.
-- Stretch: medium / large-v3 if laptop hardware allows.
+- Implemented default: `distil-large-v3`, an English ASR model; do not infer
+  Chinese or code-switching support from the multilingual Whisper family name.
+  See the [official model's intended use](https://huggingface.co/distil-whisper/distil-large-v3#intended-use).
+- Other launcher mappings are configuration options, not accepted capabilities.
+  Model changes still require real audio, hardware, quality and latency evidence.
 - Model files live under `models/` (gitignored). Bootstrap will _not_
   download them automatically — manual step in RUNBOOK.
 
@@ -64,8 +75,8 @@ Required methods (sketch):
 
 ## Open Questions
 
-- WhisperLiveKit GPU requirement on Windows — does it gracefully fall
-  back to CPU?
+- Actual selected runtime/model readiness and Windows device support have not
+  been accepted end to end; verify the launcher's environment, not just deve.
 - Is `int8` quantization on faster-whisper enough for real-time on a
   modest CPU?
 - Do we need per-language model selection at runtime, or is it fixed

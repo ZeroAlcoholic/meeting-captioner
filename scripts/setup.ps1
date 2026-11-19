@@ -133,5 +133,5 @@ Write-Step 'Next steps'
 Write-Host '  pnpm dev                     # web (5173) + online (8787)' -ForegroundColor White
 Write-Host '  cd services/offline; uv run uvicorn app.main:app --port 8000' -ForegroundColor White
 Write-Host '  pnpm test                    # run all unit tests' -ForegroundColor White
-Write-Host '  pnpm exec playwright install chromium && pnpm test:e2e' -ForegroundColor White
+Write-Host '  pnpm exec playwright install chrome && pnpm test:e2e' -ForegroundColor White
 Write-Host ''

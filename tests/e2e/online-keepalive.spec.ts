@@ -100,6 +100,7 @@ test.describe('KEEPALIVE — online reliability (mock backend)', () => {
     await page.getByTestId('settings-toggle').click();
     await expect(page.getByTestId('mode-full_offline')).toBeDisabled();
     await expect(page.getByTestId('scenario-hybrid')).toBeDisabled();
+    await expect(page.getByTestId('scenario-online_meeting_box')).toBeDisabled();
     await expect(page.getByTestId('online-provider-gemini')).toBeDisabled();
     await expect(page.getByTestId('lang-zh-TW→en')).toBeDisabled();
 
@@ -109,7 +110,8 @@ test.describe('KEEPALIVE — online reliability (mock backend)', () => {
 
     await page.getByTestId('settings-toggle').click();
     await expect(page.getByTestId('mode-full_offline')).toBeEnabled();
-    await expect(page.getByTestId('scenario-hybrid')).toBeEnabled();
+    await expect(page.getByTestId('scenario-hybrid')).toBeDisabled();
+    await expect(page.getByTestId('scenario-online_meeting_box')).toBeEnabled();
     await expect(page.getByTestId('online-provider-gemini')).toBeEnabled();
     await expect(page.getByTestId('lang-zh-TW→en')).toBeEnabled();
     await page.getByTestId('online-provider-gemini').click();
@@ -406,7 +408,9 @@ test.describe('KEEPALIVE — online reliability (mock backend)', () => {
     // No click. The app moves the meeting itself and says so — a switch the
     // operator cannot see is a switch they cannot account for.
     const notice = page.getByTestId('autoswitch-notice');
-    await expect(notice).toBeVisible({ timeout: 10_000 });
+    // Recovery now allows a complete attempt and a 20-second outage budget;
+    // the old 10-second expectation required interrupting the first handshake.
+    await expect(notice).toBeVisible({ timeout: 30_000 });
     await expect(notice).toContainText('Gemini');
 
     // Gemini socket comes up.
@@ -468,6 +472,29 @@ test.describe('KEEPALIVE — online reliability (mock backend)', () => {
     // The transcript is still there to export — losing the meeting on top of
     // losing both backends would be the worse failure.
     await expect(page.locator('body')).toContainText('兩邊都掛掉之前。');
+  });
+
+  test('Gemini fresh start during tail drain does not import the previous meeting', async ({
+    page,
+  }) => {
+    await page.goto('/');
+    await page.getByTestId('launch-gemini').click();
+    await expect.poll(() => mock.geminiOpenSockets()).toBeGreaterThan(0);
+    await mock.geminiServerContent({
+      inputTranscription: { text: 'Previous unfinished meeting', languageCode: 'en-US' },
+      outputTranscription: { text: '上一場尚未講完' },
+    });
+    await expect(page.getByTestId('caption-target')).toContainText('上一場尚未講完');
+    await page.getByTestId('stop-fake-replay').click();
+    await page.getByTestId('start-gemini').click();
+    await expect.poll(() => mock.geminiOpenSockets()).toBeGreaterThan(0);
+    await mock.geminiServerContent({
+      inputTranscription: { text: 'New meeting.', languageCode: 'en-US' },
+      outputTranscription: { text: '新會議字幕。' },
+      turnComplete: true,
+    });
+    await expect(page.getByTestId('caption-target')).toContainText('新會議字幕。');
+    await expect(page.locator('body')).not.toContainText('上一場尚未講完');
   });
 
   test('Gemini renders captions and auto-reconnects after a server-side drop', async ({ page }) => {

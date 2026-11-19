@@ -3,9 +3,9 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const OPENAI_URL = 'https://api.openai.com/v1/realtime/translations/client_secrets';
-const GEMINI_AUTH_URL = 'https://generativelanguage.googleapis.com/v1alpha/auth_tokens';
+const GEMINI_AUTH_URL = 'https://generativelanguage.googleapis.com/v1beta/auth_tokens';
 const GEMINI_WS_URL =
-  'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained';
+  'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContentConstrained';
 const OPENAI_MODEL = 'gpt-realtime-translate';
 const GEMINI_MODEL = 'models/gemini-3.5-live-translate-preview';
 const REQUEST_TIMEOUT_MS = 15_000;

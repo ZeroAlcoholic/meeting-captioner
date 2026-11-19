@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # Quick guard against accidental re-introduction of offline-only modules into
 # the online-slim bundle. Builds the web app with VITE_DEPLOYMENT_MODE=online
-# and grep-checks the output for symbols that should have been tree-shaken.
+# checks the actual module boundary and the existing output-size budgets.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WEB_DIR="$(cd "$SCRIPT_DIR/../apps/web" && pwd)"
 
 cd "$WEB_DIR"
+pnpm --dir "$SCRIPT_DIR/.." test:boundaries
 rm -rf dist
-VITE_DEPLOYMENT_MODE=online pnpm run build > /tmp/online-build.log 2>&1
+pnpm run build:online > /tmp/online-build.log 2>&1
 echo "Built online-slim bundle:"
 ls -la dist/assets/*.js | awk '{print "  " $5 " bytes  " $9}'
 
@@ -37,19 +38,9 @@ if [ "$GZIP_SIZE" -gt "$GZIP_MAX" ]; then
   FAIL=1
 fi
 
-# Check for offline-only symbols that should not appear in the slim bundle.
-FORBIDDEN_PATTERNS=(
-  "OfflineSTTProvider"
-  "wasapi"
-  "pcm-worklet"
-  "audioWorklet.addModule"
-)
-for pat in "${FORBIDDEN_PATTERNS[@]}"; do
-  if grep -q "$pat" "$BUNDLE_PATH"; then
-    echo "  ❌ found forbidden symbol in slim bundle: $pat"
-    FAIL=1
-  fi
-done
+# The Vite boundary guard rejects local implementation imports. The architecture
+# tests also poison local compiler/loader inputs. Shared PCM/VAD is required by
+# cloud providers, so symbol names such as pcm-worklet are not a local boundary.
 
 if [ $FAIL -eq 0 ]; then
   echo "  ✅ slim-bundle audit passed"

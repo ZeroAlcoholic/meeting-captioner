@@ -52,12 +52,72 @@ body {
 }
 
 /* ─── App shell ──────────────────────────────────────────────────────────────── */
+.meeting-frame {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.meeting-preflight {
+  flex: 0 0 auto;
+  max-height: 45vh;
+  overflow: auto;
+}
+
+.meeting-workspace {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  overflow: auto;
+}
+
+.meeting-backup {
+  flex: 0 0 auto;
+  max-height: 40vh;
+  overflow: auto;
+  margin: 0.5rem 1.25rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--border-mid);
+  border-radius: 0.4rem;
+  background: var(--bg-1);
+  font-size: 0.875rem;
+  line-height: 1.6;
+}
+
+.meeting-backup summary {
+  cursor: pointer;
+}
+
+.meeting-backup button {
+  margin: 0.25rem 0.5rem 0.25rem 0;
+  padding: 0.4rem 0.7rem;
+  border: 1px solid var(--border-bright);
+  border-radius: 0.3rem;
+  background: var(--bg-2);
+  color: var(--text-0);
+  font: inherit;
+}
+
+.meeting-backup button:disabled {
+  opacity: 0.5;
+}
+
+.meeting-backup [role='alert'] {
+  color: #ffb4ab;
+}
+
 .app-shell {
   display: flex;
   flex-direction: column;
   /* Viewport-bounded: page never scrolls. CaptionBoard fills the remaining
      vertical space and handles its own internal history scroll. */
-  height: 100vh;
+  flex: 1;
+  min-height: 0;
   padding: 1.25rem 1.75rem 1.75rem;
   gap: 1rem;
 }
@@ -95,6 +155,8 @@ body {
   display: flex;
   align-items: center;
   gap: 0.5rem;
+  flex-wrap: wrap;
+  max-width: 100%;
 }
 
 .app-status {
@@ -436,11 +498,19 @@ body {
 .mic-level {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  max-width: 100%;
   gap: 0.45rem;
   padding: 0.35rem 0.6rem;
   border: 1px solid var(--border-subtle);
   border-radius: 0.3rem;
   background: var(--bg-1);
+}
+
+.mic-level [role='status'] {
+  flex-basis: 100%;
+  max-width: 28rem;
+  font-size: 0.8125rem;
 }
 
 .mic-icon {

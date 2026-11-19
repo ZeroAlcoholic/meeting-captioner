@@ -6,8 +6,15 @@ import type {
   TranslationEvent,
 } from '@meeting-audio/contracts';
 import type { CaptionProviderHandlers } from './types.js';
+import { leaseCapture, __resetCaptureLeaseForTests } from './capture-lease.js';
+import { OpenAIWsOpenError } from './openai-ws-transport.js';
+import { __resetRecoveryFailuresForTests, recoveryHttpError } from './recovery-attempt.js';
+afterEach(() => __resetRecoveryFailuresForTests());
 import {
   OpenAIRealtimeProvider,
+  prewarmOpenAISession,
+  sessionRequestBody,
+  __resetWarmSessionForTests,
   __resetOpenAITransportBlocksForTests,
   __setOpenAIWsOpenerForTests,
 } from './openai-realtime-provider.js';
@@ -21,6 +28,20 @@ let fakeRestartIce: ReturnType<typeof vi.fn>;
 let fakePCClose: ReturnType<typeof vi.fn>;
 let addedTrackKinds: string[] = [];
 let lastPC: { fireIce: () => void; fireConn: () => void } | null = null;
+let nextPeerState: string | undefined;
+let nextDataChannelState: RTCDataChannelState | undefined;
+let nextSessionCreated: boolean | undefined;
+let peerControls: Array<{
+  close: ReturnType<typeof vi.fn>;
+  setState: (state: string) => void;
+  setDataChannelState: (state: RTCDataChannelState) => void;
+  emit: (event: unknown) => void;
+  sent: string[];
+  replaceTrack: ReturnType<typeof vi.fn>;
+  tracks: MediaStreamTrack[];
+  transceivers: string[];
+  setRemoteDescription: ReturnType<typeof vi.fn>;
+}> = [];
 
 // ── Mock factories ─────────────────────────────────────────────────────────────
 
@@ -28,8 +49,46 @@ function makeFakeRTCPeerConnectionClass() {
   return class FakePeerConnection {
     oniceconnectionstatechange: (() => void) | null = null;
     onconnectionstatechange: (() => void) | null = null;
+    private stateOverride = nextPeerState;
+    private autoSessionCreated = nextSessionCreated ?? true;
+    private dc: {
+      onmessage: ((event: MessageEvent<string>) => void) | null;
+      readyState: RTCDataChannelState;
+      onopen: (() => void) | null;
+      onclose: (() => void) | null;
+    } | null = null;
+    private sent: string[] = [];
+    private replaceTrack = vi.fn().mockResolvedValue(undefined);
+    private tracks: MediaStreamTrack[] = [];
+    private transceivers: string[] = [];
 
     constructor() {
+      nextPeerState = undefined;
+      nextSessionCreated = undefined;
+      peerControls.push({
+        close: this.close,
+        sent: this.sent,
+        replaceTrack: this.replaceTrack,
+        tracks: this.tracks,
+        transceivers: this.transceivers,
+        setRemoteDescription: this.setRemoteDescription,
+        setState: (state) => {
+          this.stateOverride = state;
+          this.onconnectionstatechange?.();
+        },
+        setDataChannelState: (state) => {
+          if (!this.dc) return;
+          this.dc.readyState = state;
+          if (state === 'open') this.dc.onopen?.();
+          if (state === 'open' && this.autoSessionCreated)
+            this.dc.onmessage?.({
+              data: JSON.stringify({ type: 'session.created' }),
+            } as MessageEvent<string>);
+          if (state === 'closed') this.dc.onclose?.();
+        },
+        emit: (event) =>
+          this.dc?.onmessage?.({ data: JSON.stringify(event) } as MessageEvent<string>),
+      });
       lastPC = {
         fireIce: () => this.oniceconnectionstatechange?.(),
         fireConn: () => this.onconnectionstatechange?.(),
@@ -40,30 +99,51 @@ function makeFakeRTCPeerConnectionClass() {
       return fakeIceState;
     }
     get connectionState() {
-      return fakeConnectionState;
+      return this.stateOverride ?? fakeConnectionState;
     }
 
     createDataChannel() {
-      const dc = { onmessage: null as ((e: MessageEvent<string>) => void) | null };
+      const dc = {
+        onmessage: null as ((e: MessageEvent<string>) => void) | null,
+        readyState: nextDataChannelState ?? ('open' as RTCDataChannelState),
+        onopen: null as (() => void) | null,
+        onclose: null as (() => void) | null,
+        send: (data: string) => this.sent.push(data),
+      };
+      this.dc = dc;
+      nextDataChannelState = undefined;
       fireDCMessage = (data: string) => dc.onmessage?.({ data } as MessageEvent<string>);
       return dc;
     }
 
     addTrack(track: MediaStreamTrack) {
       addedTrackKinds.push(track.kind);
+      this.tracks.push(track);
+    }
+    addTransceiver(kind: string) {
+      this.transceivers.push(kind);
+      return { sender: { replaceTrack: this.replaceTrack } };
+    }
+    getSenders() {
+      return [{ replaceTrack: this.replaceTrack }];
     }
     async createOffer() {
       return { type: 'offer', sdp: 'mock-offer-sdp' };
     }
     async setLocalDescription() {}
-    async setRemoteDescription() {}
+    setRemoteDescription = vi.fn(async () => {
+      if (this.autoSessionCreated && this.dc?.readyState === 'open')
+        this.dc.onmessage?.({
+          data: JSON.stringify({ type: 'session.created' }),
+        } as MessageEvent<string>);
+    });
     restartIce = fakeRestartIce;
-    close = fakePCClose;
+    close = vi.fn(() => fakePCClose());
   };
 }
 
 function makeFakeStream() {
-  const audioTrack = { kind: 'audio', stop: vi.fn() } as unknown as MediaStreamTrack;
+  const audioTrack = { kind: 'audio', enabled: true, stop: vi.fn() } as unknown as MediaStreamTrack;
   const videoTrack = { kind: 'video', stop: vi.fn() } as unknown as MediaStreamTrack;
   return {
     getTracks: () => [audioTrack, videoTrack],
@@ -82,8 +162,12 @@ function makeFakeAnalyser() {
 
 function makeFakeAudioContext(analyser: AnalyserNode) {
   return class {
+    state: AudioContextState = 'running';
+    sampleRate = 16000;
+    destination = {};
+    audioWorklet = { addModule: vi.fn().mockResolvedValue(undefined) };
     createMediaStreamSource() {
-      return { connect() {} };
+      return { connect() {}, disconnect() {} };
     }
     createAnalyser() {
       return analyser;
@@ -130,6 +214,7 @@ beforeEach(() => {
   // ladder still behaves as it did before the transport existed); the
   // transport-specific tests below install their own opener.
   __resetOpenAITransportBlocksForTests();
+  __resetWarmSessionForTests();
   __setOpenAIWsOpenerForTests(() =>
     Promise.reject(new Error('WebSocket transport unavailable in this test')),
   );
@@ -140,12 +225,24 @@ beforeEach(() => {
   fakePCClose = vi.fn();
   addedTrackKinds = [];
   lastPC = null;
+  nextPeerState = undefined;
+  nextDataChannelState = undefined;
+  nextSessionCreated = undefined;
+  peerControls = [];
 
   const analyser = makeFakeAnalyser();
   vi.stubGlobal('navigator', {
     mediaDevices: { getUserMedia: vi.fn().mockResolvedValue(makeFakeStream()) },
   });
   vi.stubGlobal('AudioContext', makeFakeAudioContext(analyser));
+  vi.stubGlobal(
+    'AudioWorkletNode',
+    class {
+      port = { onmessage: null, close() {} };
+      connect() {}
+      disconnect() {}
+    },
+  );
   vi.stubGlobal('RTCPeerConnection', makeFakeRTCPeerConnectionClass());
   // MicrophoneAudioProvider attaches a visibilitychange listener on `document`
   // to resume the AudioContext after tab refocus. Stub a minimal document so
@@ -165,6 +262,54 @@ afterEach(() => {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe('OpenAIRealtimeProvider', () => {
+  it('does not let a previously warm token bypass a later permanent refusal', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(() =>
+        Promise.resolve(
+          Response.json({ client_secret: { value: 'warm', expires_at: Date.now() / 1000 + 3600 } }),
+        ),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    prewarmOpenAISession('/session', sessionRequestBody('en→zh-TW', true, 'meeting'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    recoveryHttpError(new Response(null, { status: 401 }), 'openai', 'translation');
+    const { handlers } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('/session', handlers);
+    await provider.start();
+    expect(provider.status).toBe('stopped');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    provider.stop();
+  });
+  it.each([
+    [401, 'auth'],
+    [429, 'rate-limit'],
+    [404, 'unsupported'],
+  ] as const)(
+    'preserves translation HTTP %s classification across adapter replacement',
+    async (status, kind) => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(new Response(null, { status, headers: { 'Retry-After': '60' } }));
+      vi.stubGlobal('fetch', fetchMock);
+      const { handlers, healthEvents } = makeHandlers();
+      const first = new OpenAIRealtimeProvider('/session', handlers);
+      await first.start();
+      expect(healthEvents).toContainEqual(
+        expect.objectContaining({
+          recoveryFailure: expect.objectContaining({
+            kind,
+            provider: 'openai',
+            purpose: 'translation',
+          }),
+        }),
+      );
+      const next = new OpenAIRealtimeProvider('/session', handlers);
+      await next.start();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      next.stop();
+    },
+  );
   it('start() emits health: audio requesting_permission→connected, transport connecting→connected', async () => {
     mockFetch();
     const { handlers, healthEvents } = makeHandlers();
@@ -192,6 +337,70 @@ describe('OpenAIRealtimeProvider', () => {
     expect(healthEvents.some((e) => e.state === 'stopped')).toBe(true);
   });
 
+  it.each(['closed', 'cap', 'second Stop'] as const)(
+    'preserves the Stop translation tail and settles at %s without restarting capture',
+    async (ending) => {
+      vi.useFakeTimers();
+      mockFetch();
+      const { handlers, transcripts, translations, healthEvents } = makeHandlers();
+      const provider = new OpenAIRealtimeProvider('/session', handlers);
+      await provider.start();
+      const peer = peerControls[0]!;
+      peer.emit({ type: 'session.input_transcript.delta', delta: 'Do not' });
+      peer.emit({ type: 'session.output_transcript.delta', delta: '不要' });
+      const segmentId = transcripts.at(-1)!.segmentId;
+      provider.stop({ drain: true });
+      expect(provider.status).toBe('stopped');
+      expect(peer.tracks[0]!.stop).toHaveBeenCalled();
+      expect(peer.close).not.toHaveBeenCalled();
+      let settled = false;
+      const stopped = provider.waitForStop().then(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(false);
+      expect(peer.sent.map((frame) => JSON.parse(frame))).toContainEqual({ type: 'session.close' });
+      const stoppedHealth = [...healthEvents];
+      peer.emit({ type: 'session.input_transcript.delta', delta: ' approve.' });
+      peer.emit({ type: 'session.output_transcript.delta', delta: '核准。' });
+      if (ending === 'closed') {
+        peer.emit({ type: 'session.closed' });
+        await vi.advanceTimersByTimeAsync(251);
+      } else if (ending === 'cap') await vi.advanceTimersByTimeAsync(10_001);
+      else provider.stop();
+      await stopped;
+      expect(transcripts.at(-1)).toMatchObject({
+        segmentId,
+        text: 'Do not approve.',
+        status: 'final',
+      });
+      expect(translations.at(-1)).toMatchObject({
+        sourceSegmentId: segmentId,
+        targetText: '不要核准。',
+        status: 'final',
+      });
+      expect(peer.close).toHaveBeenCalledOnce();
+      expect(healthEvents).toEqual(stoppedHealth);
+      const count = transcripts.length;
+      peer.emit({ type: 'session.input_transcript.delta', delta: ' stale' });
+      expect(transcripts).toHaveLength(count);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it('reports an active protocol auth refusal with normalized recovery evidence', async () => {
+    mockFetch();
+    const { handlers, healthEvents } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+    await provider.start();
+    fireDCMessage(JSON.stringify({ type: 'error', error: { code: 'invalid_api_key' } }));
+    expect(healthEvents.at(-1)).toMatchObject({
+      state: 'failed',
+      recoveryFailure: { kind: 'auth', provider: 'openai' },
+    });
+    provider.stop();
+  });
+
   it('session.input_transcript.delta → onTranscript with accumulated text and status:partial', async () => {
     mockFetch();
     const { handlers, transcripts } = makeHandlers();
@@ -208,6 +417,18 @@ describe('OpenAIRealtimeProvider', () => {
     // same segmentId for both deltas within one segment
     expect(transcripts[0]!.segmentId).toBe(transcripts[1]!.segmentId);
     provider.stop();
+  });
+
+  it('does not publish whitespace-only input or output when stopped', async () => {
+    mockFetch();
+    const { handlers, transcripts, translations } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+    await provider.start();
+    fireDCMessage(JSON.stringify({ type: 'session.input_transcript.delta', delta: ' ' }));
+    fireDCMessage(JSON.stringify({ type: 'session.output_transcript.delta', delta: ' ' }));
+    provider.stop();
+    expect(transcripts).toEqual([]);
+    expect(translations).toEqual([]);
   });
 
   it('translation-only mode synthesizes a zero-text partial transcript on each output delta', async () => {
@@ -418,6 +639,305 @@ describe('OpenAIRealtimeProvider', () => {
     provider.stop();
   });
 
+  it('links a deadline-split date through partial and final, then breaks at idle', async () => {
+    vi.useFakeTimers();
+    mockFetch();
+    const { handlers, transcripts } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+    await provider.start();
+    for (let i = 0; i < 16; i += 1) {
+      fireDCMessage(
+        JSON.stringify({
+          type: 'session.output_transcript.delta',
+          delta: i === 15 ? '九月十五' : '背景',
+        }),
+      );
+      vi.advanceTimersByTime(750);
+    }
+    const preceding = transcripts.filter((event) => event.status === 'final').at(-1)!;
+    expect(preceding).toBeDefined();
+    fireDCMessage(JSON.stringify({ type: 'session.output_transcript.delta', delta: '日' }));
+    expect(transcripts.at(-1)).toHaveProperty('continuationOf', preceding.segmentId);
+    vi.advanceTimersByTime(1_001);
+    expect(transcripts.at(-1)).toMatchObject({
+      status: 'final',
+      continuationOf: preceding.segmentId,
+    });
+    fireDCMessage(JSON.stringify({ type: 'session.output_transcript.delta', delta: '新的句子' }));
+    expect(transcripts.at(-1)).not.toHaveProperty('continuationOf');
+    provider.stop();
+  });
+
+  it.each(['idle', 'completed', 'restart', 'renewal'] as const)(
+    'clears a pending deadline continuation at %s',
+    async (boundary) => {
+      vi.useFakeTimers();
+      mockFetch();
+      const { handlers, transcripts } = makeHandlers();
+      const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+      await provider.start();
+      for (let i = 0; i < 16; i += 1) {
+        fireDCMessage(JSON.stringify({ type: 'session.output_transcript.delta', delta: '文字' }));
+        vi.advanceTimersByTime(750);
+      }
+      if (boundary === 'idle') vi.advanceTimersByTime(1_001);
+      else if (boundary === 'completed')
+        fireDCMessage(JSON.stringify({ type: 'session.output_transcript.completed' }));
+      else if (boundary === 'restart') {
+        provider.stop();
+        mockFetch();
+        await provider.start();
+      } else {
+        mockFetch();
+        fireDCMessage(JSON.stringify({ type: 'session.closed' }));
+        await vi.advanceTimersByTimeAsync(1);
+      }
+      fireDCMessage(JSON.stringify({ type: 'session.output_transcript.delta', delta: '另一句' }));
+      expect(transcripts.at(-1)).not.toHaveProperty('continuationOf');
+      provider.stop();
+    },
+  );
+
+  it('keeps transport connecting after SDP until the peer connection is ready', async () => {
+    fakeConnectionState = 'connecting';
+    fakeIceState = 'checking';
+    mockFetch();
+    const { handlers, healthEvents } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+    let ready = false;
+    const starting = provider.start().then(() => {
+      ready = true;
+    });
+    await vi.waitFor(() => expect(peerControls).toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(ready).toBe(false);
+    const transport = healthEvents.filter((event) => event.component === 'transport');
+    expect(transport.some((event) => event.state === 'connected')).toBe(false);
+    expect(transport.at(-1)?.state).toBe('connecting');
+    fakeConnectionState = 'connected';
+    lastPC!.fireConn();
+    await starting;
+    expect(healthEvents.filter((event) => event.component === 'transport').at(-1)?.state).toBe(
+      'connected',
+    );
+    provider.stop();
+  });
+
+  it('restores connected health when an established peer recovers from disconnection', async () => {
+    mockFetch();
+    const { handlers, healthEvents } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+    await provider.start();
+    fakeConnectionState = 'disconnected';
+    lastPC!.fireConn();
+    const beforeRecovery = healthEvents.length;
+    fakeConnectionState = 'connected';
+    lastPC!.fireConn();
+    expect(healthEvents.slice(beforeRecovery)).toContainEqual(
+      expect.objectContaining({ component: 'transport', state: 'connected' }),
+    );
+    provider.stop();
+  });
+
+  it('keeps the old peer captioning until the renewal candidate actually connects', async () => {
+    vi.useFakeTimers();
+    mockFetch();
+    const { handlers, translations } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+    await provider.start();
+    const old = peerControls[0]!;
+    nextPeerState = 'connecting';
+    mockFetch();
+    old.emit({ type: 'session.closed' });
+    await vi.advanceTimersByTimeAsync(1);
+    const candidate = peerControls[1]!;
+    expect(old.close).not.toHaveBeenCalled();
+    old.emit({ type: 'session.output_transcript.delta', delta: 'still on the old peer' });
+    expect(translations.at(-1)?.targetText).toBe('still on the old peer');
+    candidate.setState('connected');
+    await vi.advanceTimersByTimeAsync(1);
+    expect(old.close).not.toHaveBeenCalled();
+    old.emit({ type: 'session.closed' });
+    await vi.advanceTimersByTimeAsync(251);
+    expect(old.close).toHaveBeenCalledOnce();
+    candidate.emit({ type: 'session.output_transcript.delta', delta: 'new peer' });
+    expect(translations.at(-1)?.targetText).toBe('new peer');
+    provider.stop();
+  });
+
+  it.each(['failed', 'closed', 'timeout', 'failed-after-connected'] as const)(
+    'retains a healthy old peer when renewal readiness ends in %s',
+    async (failure) => {
+      vi.useFakeTimers();
+      mockFetch();
+      const { handlers, translations, healthEvents } = makeHandlers();
+      const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+      await provider.start();
+      const old = peerControls[0]!;
+      nextPeerState = 'connecting';
+      mockFetch();
+      const renewal = (provider as unknown as { renewSession(): Promise<void> }).renewSession();
+      await vi.advanceTimersByTimeAsync(1);
+      const candidate = peerControls[1]!;
+      if (failure === 'timeout') await vi.advanceTimersByTimeAsync(10_001);
+      else {
+        if (failure === 'failed-after-connected') candidate.setState('connected');
+        candidate.setState(failure === 'failed-after-connected' ? 'failed' : failure);
+        await vi.advanceTimersByTimeAsync(1);
+      }
+      await renewal;
+      expect(old.close).not.toHaveBeenCalled();
+      expect(candidate.close).toHaveBeenCalledOnce();
+      expect(
+        healthEvents.some((event) => event.component === 'transport' && event.state === 'failed'),
+      ).toBe(false);
+      old.emit({ type: 'session.output_transcript.delta', delta: 'old peer survives' });
+      expect(translations.at(-1)?.targetText).toBe('old peer survives');
+      expect(healthEvents.at(-1)?.message).toMatch(/retry|renewal/i);
+      provider.stop();
+    },
+  );
+
+  it('Stop cancels a pending renewal candidate and its late readiness cannot revive it', async () => {
+    vi.useFakeTimers();
+    mockFetch();
+    const { handlers, healthEvents } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+    await provider.start();
+    const old = peerControls[0]!;
+    nextPeerState = 'connecting';
+    mockFetch();
+    old.emit({ type: 'session.closed' });
+    await vi.advanceTimersByTimeAsync(1);
+    const candidate = peerControls[1]!;
+    provider.stop();
+    expect(old.close).toHaveBeenCalledOnce();
+    expect(candidate.close).toHaveBeenCalledOnce();
+    const healthAfterStop = healthEvents.length;
+    candidate.setState('connected');
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(peerControls).toHaveLength(2);
+    expect(healthEvents.slice(healthAfterStop)).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('cancels retired sender detachment without a late session.close after Stop', async () => {
+    vi.useFakeTimers();
+    mockFetch();
+    const { handlers } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+    await provider.start();
+    const old = peerControls[0]!;
+    let detach: (() => void) | undefined;
+    old.replaceTrack.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          detach = resolve;
+        }),
+    );
+    mockFetch();
+    old.emit({ type: 'session.closed' });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(old.replaceTrack).toHaveBeenCalledWith(null);
+    expect(old.sent).toEqual([]);
+    provider.stop();
+    expect(old.close).toHaveBeenCalledOnce();
+    detach!();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(old.sent).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('gives an empty retired segment its own id and retains at most one retired peer', async () => {
+    vi.useFakeTimers();
+    mockFetch();
+    const { handlers, translations } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+    await provider.start();
+    const first = peerControls[0]!;
+    mockFetch();
+    first.emit({ type: 'session.closed' });
+    await vi.advanceTimersByTimeAsync(1);
+    const second = peerControls[1]!;
+    second.emit({ type: 'session.output_transcript.delta', delta: 'new live' });
+    const liveId = translations.at(-1)!.sourceSegmentId;
+    first.emit({ type: 'session.output_transcript.delta', delta: 'late old' });
+    expect(translations.at(-1)?.targetText).toBe('new live');
+    mockFetch();
+    second.emit({ type: 'session.closed' });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(first.close).toHaveBeenCalledOnce();
+    expect(second.close).not.toHaveBeenCalled();
+    const oldFinal = translations.find((event) => event.targetText === 'late old');
+    expect(oldFinal?.status).toBe('final');
+    expect(oldFinal?.sourceSegmentId).not.toBe(liveId);
+    provider.stop();
+    expect(second.close).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(['closed', 'cap', 'stop', 'error'] as const)(
+    'keeps retired translation tails isolated and flushes once at %s',
+    async (ending) => {
+      vi.useFakeTimers();
+      mockFetch();
+      const { handlers, translations, transcripts, healthEvents } = makeHandlers();
+      const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+      await provider.start();
+      const old = peerControls[0]!;
+      old.emit({ type: 'session.input_transcript.delta', delta: 'September fifteenth' });
+      old.emit({ type: 'session.output_transcript.delta', delta: '九月十五' });
+      const oldId = transcripts.at(-1)!.segmentId;
+      mockFetch();
+      old.emit({ type: 'session.closed' });
+      await vi.advanceTimersByTimeAsync(1);
+      const current = peerControls[1]!;
+      expect(old.close).not.toHaveBeenCalled();
+      expect(old.replaceTrack).toHaveBeenCalledWith(null);
+      expect(old.sent.map((frame) => JSON.parse(frame))).toContainEqual({ type: 'session.close' });
+      current.emit({ type: 'session.output_transcript.delta', delta: '新會議字幕' });
+      old.emit({ type: 'session.output_transcript.delta', delta: '日' });
+      expect(translations.at(-1)?.targetText).toBe('新會議字幕');
+      const finalCount = translations.filter(
+        (event) => event.sourceSegmentId === oldId && event.status === 'final',
+      ).length;
+      if (ending === 'closed') {
+        old.emit({ type: 'session.closed' });
+        await vi.advanceTimersByTimeAsync(200);
+        old.emit({ type: 'session.input_transcript.delta', delta: '.' });
+        await vi.advanceTimersByTimeAsync(200);
+        expect(old.close).not.toHaveBeenCalled();
+        expect(
+          translations.filter(
+            (event) => event.sourceSegmentId === oldId && event.status === 'final',
+          ),
+        ).toHaveLength(finalCount);
+        await vi.advanceTimersByTimeAsync(51);
+      } else if (ending === 'cap') await vi.advanceTimersByTimeAsync(10_001);
+      else if (ending === 'error') old.emit({ type: 'error', error: { message: 'retired error' } });
+      else provider.stop();
+      expect(old.close).toHaveBeenCalledOnce();
+      expect(
+        translations.filter((event) => event.sourceSegmentId === oldId && event.status === 'final'),
+      ).toHaveLength(finalCount + 1);
+      expect(
+        translations.filter((event) => event.sourceSegmentId === oldId).at(-1)?.targetText,
+      ).toBe('九月十五日');
+      if (ending === 'closed')
+        expect(transcripts.filter((event) => event.segmentId === oldId).at(-1)?.text).toBe(
+          'September fifteenth.',
+        );
+      const countAfterClose = translations.length;
+      const healthAfterClose = healthEvents.length;
+      old.emit({ type: 'session.output_transcript.delta', delta: '過期事件' });
+      old.emit({ type: 'session.closed' });
+      expect(translations).toHaveLength(countAfterClose);
+      expect(healthEvents).toHaveLength(healthAfterClose);
+      provider.stop();
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
   it('adds only audio tracks to the peer connection', async () => {
     mockFetch();
     const { handlers } = makeHandlers();
@@ -587,6 +1107,9 @@ describe('OpenAIRealtimeProvider', () => {
     await provider.start();
     expect(provider.status).toBe('running');
 
+    // This ladder is for a genuinely unavailable primary; candidate-only
+    // failures on a healthy primary must not publish failed (covered below).
+    fakeConnectionState = 'failed';
     // Extract retry-delay (seconds or minutes) from the latest 'failed' health message.
     const lastRetrySec = (): number | null => {
       const last = healthEvents
@@ -636,7 +1159,7 @@ describe('OpenAIRealtimeProvider', () => {
     // re-acquire the mic (no OS-indicator blink / re-prompt), and must NOT drop
     // the provider to 'idle' between tearing down and rebuilding — it builds the
     // new peer over the SAME mic stream, then swaps. The old peer is closed only
-    // after the new one is ready (zero caption gap).
+    // after the replacement media connection is ready.
     vi.useFakeTimers();
     const getUserMedia = vi.fn().mockResolvedValue(makeFakeStream());
     vi.stubGlobal('navigator', { mediaDevices: { getUserMedia } });
@@ -682,9 +1205,12 @@ describe('OpenAIRealtimeProvider', () => {
 
     // Mic was reused — NOT re-acquired.
     expect(getUserMedia).toHaveBeenCalledTimes(1);
-    // The old peer was closed during the make-before-break swap.
-    expect(fakePCClose).toHaveBeenCalled();
-    // Status never dipped to idle/stopped through the renewal (zero-gap).
+    // The retired peer closes after its bounded tail drain, while new media is live.
+    expect(peerControls[0]!.close).not.toHaveBeenCalled();
+    peerControls[0]!.emit({ type: 'session.closed' });
+    await vi.advanceTimersByTimeAsync(251);
+    expect(peerControls[0]!.close).toHaveBeenCalledOnce();
+    // Status never dipped to idle/stopped through the renewal.
     expect(statuses).not.toContain('idle');
     expect(provider.status).toBe('running');
     // The NEW datachannel is live (post-swap wiring works) — a delta routes.
@@ -777,77 +1303,8 @@ describe('OpenAIRealtimeProvider', () => {
     provider.stop();
   });
 
-  it('ICE disconnected → backoff schedules restartIce with 3s/6s/12s, then triggers session renewal', async () => {
-    vi.useFakeTimers();
-    mockFetch();
-    const { handlers, healthEvents } = makeHandlers();
-    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
-    await provider.start();
-
-    fakeIceState = 'disconnected';
-
-    // Attempt 1 — fires after 3 s
-    lastPC?.fireIce();
-    expect(fakeRestartIce).not.toHaveBeenCalled();
-    vi.advanceTimersByTime(3000);
-    expect(fakeRestartIce).toHaveBeenCalledTimes(1);
-
-    // Attempt 2 — fires after 6 s
-    lastPC?.fireIce();
-    vi.advanceTimersByTime(6000);
-    expect(fakeRestartIce).toHaveBeenCalledTimes(2);
-
-    // Attempt 3 — fires after 12 s
-    lastPC?.fireIce();
-    vi.advanceTimersByTime(12_000);
-    expect(fakeRestartIce).toHaveBeenCalledTimes(3);
-
-    // Attempt 4 — exhausted, escalates to full session renewal (not stop).
-    lastPC?.fireIce();
-    await Promise.resolve();
-    expect(
-      healthEvents.some(
-        (e) =>
-          e.component === 'transport' &&
-          e.state === 'reconnecting' &&
-          e.message?.includes('rebuilding session'),
-      ),
-    ).toBe(true);
-    // No terminal 'failed' for ICE exhaustion — renewal is in flight.
-    expect(
-      healthEvents.filter(
-        (e) =>
-          e.component === 'transport' &&
-          e.state === 'failed' &&
-          e.message?.includes('ICE restart attempts exhausted'),
-      ),
-    ).toHaveLength(0);
-    provider.stop();
-  });
-
-  it('ICE returning to connected resets the backoff counter', async () => {
-    vi.useFakeTimers();
-    mockFetch();
-    const { handlers } = makeHandlers();
-    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
-    await provider.start();
-
-    fakeIceState = 'disconnected';
-    lastPC?.fireIce();
-    vi.advanceTimersByTime(3000);
-    fakeIceState = 'connected';
-    lastPC?.fireIce();
-
-    // After recovery a new disconnect should restart from 3 s, not 6 s.
-    fakeIceState = 'disconnected';
-    lastPC?.fireIce();
-    vi.advanceTimersByTime(2999);
-    expect(fakeRestartIce).toHaveBeenCalledTimes(1);
-    vi.advanceTimersByTime(2);
-    expect(fakeRestartIce).toHaveBeenCalledTimes(2);
-
-    provider.stop();
-  });
+  // ICE recovery is covered below with one real state transition and a
+  // grace-period cancellation; repeated synthetic events cannot drive a fake ladder.
 
   it('getRenewalEtaMs() returns null before start, positive after start, null after stop', async () => {
     mockFetch();
@@ -1057,8 +1514,9 @@ describe('OpenAIRealtimeProvider', () => {
     const { handlers, healthEvents } = makeHandlers();
     const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
 
-    // start() should not throw; it silently escalates to renewSession
-    await provider.start().catch(() => undefined);
+    // A refresh that fails must not resolve as a running/ready startup.
+    await provider.start();
+    expect(provider.status).toBe('stopped');
 
     // Must emit 'reconnecting' for the expiry-triggered renewal.
     // transport:connected must NOT appear (SDP was never attempted).
@@ -1161,6 +1619,53 @@ describe('OpenAIRealtimeProvider', () => {
 // key/env, which measured healthy, so the real cause stayed hidden.
 
 describe('OpenAIRealtimeProvider — SDP rejection', () => {
+  it('does not poison the alternate key with the original key auth refusal', async () => {
+    const open = vi
+      .fn()
+      .mockRejectedValueOnce(new OpenAIWsOpenError('Primary refused', true))
+      .mockRejectedValueOnce(new OpenAIWsOpenError('Alternate network unavailable', false));
+    __setOpenAIWsOpenerForTests(open);
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(sessionResponse('primary-token', 'primary'))
+        .mockResolvedValueOnce(new Response('{}', { status: 401 }))
+        .mockResolvedValueOnce(sessionResponse('alternate-token', 'audio'))
+        .mockResolvedValueOnce(new Response('{}', { status: 401 })),
+    );
+    const { handlers, healthEvents } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+    await provider.start();
+    expect(open).toHaveBeenCalledTimes(2);
+    expect(healthEvents.find((e) => e.state === 'api_error')?.recoveryFailure?.kind).toBe(
+      'network',
+    );
+    provider.stop();
+  });
+  it.each([401, 429])(
+    'classifies final SDP %s after eligible transport fallback',
+    async (status) => {
+      __setOpenAIWsOpenerForTests(() =>
+        Promise.reject(new OpenAIWsOpenError('Credential rejected', true)),
+      );
+      vi.stubGlobal(
+        'fetch',
+        vi
+          .fn()
+          .mockResolvedValueOnce(sessionResponse('tok'))
+          .mockResolvedValueOnce(new Response('{}', { status, headers: { 'Retry-After': '60' } })),
+      );
+      const { handlers, healthEvents } = makeHandlers();
+      const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+      await provider.start();
+      const failure = healthEvents.find((e) => e.state === 'api_error')?.recoveryFailure;
+      expect(failure?.kind).toBe(status === 401 ? 'auth' : 'rate-limit');
+      if (status === 429)
+        expect(failure?.retryNotBeforeMs).toBeGreaterThan(performance.now() + 59000);
+      provider.stop();
+    },
+  );
   const IP_NOT_AUTHORIZED = JSON.stringify({
     error: {
       message: 'Your IP is not authorized to make this request.',
@@ -1199,6 +1704,12 @@ describe('OpenAIRealtimeProvider — SDP rejection', () => {
   });
 
   it('retries with the alternate server key when the rejected slot is known', async () => {
+    // Key failover is valid only after the same credential is rejected on both
+    // transports. A generic WebSocket/network failure must not move meeting
+    // audio to the alternate account.
+    __setOpenAIWsOpenerForTests(() =>
+      Promise.reject(new OpenAIWsOpenError('WebSocket credential rejected', true)),
+    );
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(sessionResponse('tok-primary', 'primary'))
@@ -1296,12 +1807,30 @@ describe('OpenAIRealtimeProvider — WebSocket transport failover', () => {
     const opened: Array<{ token: string }> = [];
     let handlers: Parameters<Parameters<typeof __setOpenAIWsOpenerForTests>[0] & object>[2] | null =
       null;
+    const handlerSets: Array<
+      Parameters<Parameters<typeof __setOpenAIWsOpenerForTests>[0] & object>[2]
+    > = [];
     const closed = { count: 0, detached: 0 };
+    const activation = { count: 0 };
+    const activateQueue: unknown[] = [];
+    const nextOpenStates: boolean[] = [];
     __setOpenAIWsOpenerForTests((token, _stream, h) => {
       opened.push({ token });
       handlers = h;
+      handlerSets.push(h);
+      const isOpen = nextOpenStates.shift() ?? true;
       return Promise.resolve({
-        isOpen: true,
+        isOpen,
+        activate: () => {
+          if (!isOpen) {
+            throw new OpenAIWsOpenError('WebSocket closed before activation', false);
+          }
+          activation.count += 1;
+          for (const ev of activateQueue.splice(0)) h.onEvent(ev as never);
+        },
+        beginDrain: (_onEvent: unknown, onClosed: () => void) => {
+          onClosed();
+        },
         detach: () => {
           closed.detached += 1;
         },
@@ -1315,8 +1844,14 @@ describe('OpenAIRealtimeProvider — WebSocket transport failover', () => {
     return {
       opened,
       closed,
+      activation,
+      queueOnActivate: (ev: unknown) => activateQueue.push(ev),
+      closeNextBeforeActivation: () => nextOpenStates.push(false),
       fire: (ev: unknown) => handlers?.onEvent(ev as never),
+      fireAt: (index: number, ev: unknown) => handlerSets[index]?.onEvent(ev as never),
       drop: (r: string) => handlers?.onClosed(r),
+      backpressure: (state: 'connected' | 'degraded') =>
+        handlers?.onAudioTrouble(state, 'controlled backpressure', 'transport'),
     };
   }
 
@@ -1335,6 +1870,7 @@ describe('OpenAIRealtimeProvider — WebSocket transport failover', () => {
     expect(provider.status).toBe('running');
     // Same token — no re-mint, so the session stays in the same organisation.
     expect(ws.opened).toEqual([{ token: 'tok-primary' }]);
+    expect(ws.activation.count).toBe(1);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(
       healthEvents.some(
@@ -1344,9 +1880,107 @@ describe('OpenAIRealtimeProvider — WebSocket transport failover', () => {
     expect(healthEvents.some((e) => e.component === 'transport' && e.state === 'connected')).toBe(
       true,
     );
+    ws.backpressure('degraded');
+    expect(healthEvents.at(-1)).toMatchObject({ component: 'transport', state: 'degraded' });
+    ws.backpressure('connected');
+    expect(healthEvents.at(-1)).toMatchObject({ component: 'transport', state: 'connected' });
     // The surplus WebRTC peer is released.
     expect(fakePCClose).toHaveBeenCalledTimes(1);
 
+    provider.stop();
+  });
+
+  it('does not switch key when same-key WebSocket setup fails for a non-auth reason', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(sessionResponse('tok-primary', 'primary'))
+      .mockResolvedValueOnce(new Response(IP_NOT_AUTHORIZED, { status: 401 }));
+    vi.stubGlobal('fetch', fetchMock);
+    __setOpenAIWsOpenerForTests(() =>
+      Promise.reject(new OpenAIWsOpenError('WebSocket network unavailable', false)),
+    );
+    const { handlers, healthEvents } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+
+    await provider.start();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(
+      fetchMock.mock.calls.some((call) => {
+        const init = call[1] as RequestInit | undefined;
+        return typeof init?.body === 'string' && init.body.includes('rejectedSlot');
+      }),
+    ).toBe(false);
+    expect(provider.status).toBe('stopped');
+    expect(healthEvents.find((e) => e.state === 'api_error')?.message).toContain(
+      'WebSocket network unavailable',
+    );
+    expect(healthEvents.find((e) => e.state === 'api_error')?.message).toContain(
+      'ip_not_authorized',
+    );
+  });
+
+  it('activates a replacement WebSocket only after finalizing the old segment', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(sessionResponse('tok-primary', 'primary'))
+      .mockResolvedValueOnce(new Response(IP_NOT_AUTHORIZED, { status: 401 }))
+      // Renewal stays on the same key and skips WebRTC because the slot is blocked.
+      .mockResolvedValueOnce(sessionResponse('tok-primary-renewed', 'primary'));
+    vi.stubGlobal('fetch', fetchMock);
+    const ws = installFakeWs();
+    const { handlers, translations } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+    await provider.start();
+
+    ws.fire({ type: 'session.output_transcript.delta', delta: 'old segment' });
+    const oldSegmentId = translations.at(-1)?.sourceSegmentId;
+    ws.queueOnActivate({ type: 'session.output_transcript.delta', delta: 'new segment' });
+    ws.drop('WebSocket closed (1006)');
+    await vi.waitFor(() => expect(ws.opened).toHaveLength(2));
+    await vi.waitFor(() =>
+      expect(translations.some((event) => event.targetText.includes('new segment'))).toBe(true),
+    );
+
+    const oldFinal = translations.find(
+      (event) => event.sourceSegmentId === oldSegmentId && event.status === 'final',
+    );
+    const newDraft = translations.find((event) => event.targetText.includes('new segment'));
+    expect(oldFinal?.targetText).toBe('old segment');
+    expect(newDraft?.sourceSegmentId).not.toBe(oldSegmentId);
+    expect(ws.activation.count).toBe(2);
+    provider.stop();
+  });
+
+  it('keeps the healthy old WebSocket live when a renewal candidate closes before activation', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(sessionResponse('tok-primary', 'primary'))
+      .mockResolvedValueOnce(new Response(IP_NOT_AUTHORIZED, { status: 401 }))
+      // Scheduled make-before-break renewal; the primary slot remains WebRTC-blocked.
+      .mockResolvedValueOnce(sessionResponse('tok-primary-renewed', 'primary'));
+    vi.stubGlobal('fetch', fetchMock);
+    const ws = installFakeWs();
+    const { handlers, translations } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('http://localhost:8787/session', handlers);
+    await provider.start();
+
+    ws.fireAt(0, { type: 'session.output_transcript.delta', delta: 'old segment' });
+    const oldSegmentId = translations.at(-1)?.sourceSegmentId;
+    ws.closeNextBeforeActivation();
+    await (
+      provider as unknown as {
+        renewSession(): Promise<void>;
+      }
+    ).renewSession();
+
+    // Candidate cleanup is allowed; the old transport must remain attached and
+    // continue the same in-flight caption segment after the failed hand-off.
+    expect(ws.closed.count).toBe(1);
+    expect(ws.closed.detached).toBe(0);
+    ws.fireAt(0, { type: 'session.output_transcript.delta', delta: ' continues' });
+    expect(translations.at(-1)?.targetText).toBe('old segment continues');
+    expect(translations.at(-1)?.sourceSegmentId).toBe(oldSegmentId);
     provider.stop();
   });
 
@@ -1426,6 +2060,877 @@ describe('OpenAIRealtimeProvider — WebSocket transport failover', () => {
         (e) => e.state === 'reconnecting' && (e.message ?? '').includes('WebSocket dropped'),
       ),
     ).toBe(true);
+    provider.stop();
+  });
+});
+
+describe('OpenAI bounded recovery', () => {
+  it('a caption channel closing on an otherwise connected peer starts recovery immediately', async () => {
+    vi.useFakeTimers();
+    mockFetch();
+    const { handlers } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('/session', handlers);
+    await provider.start();
+    const old = peerControls[0]!;
+    mockFetch();
+    old.setDataChannelState('closed');
+    await vi.advanceTimersByTimeAsync(1);
+    expect(peerControls).toHaveLength(2);
+    expect(peerControls[1]!.replaceTrack).toHaveBeenCalled();
+    // A late close on the retired peer cannot renew the replacement again.
+    old.setDataChannelState('closed');
+    await vi.advanceTimersByTimeAsync(1);
+    expect(peerControls).toHaveLength(2);
+    provider.stop();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(['ack', 'timeout', 'closed'] as const)(
+    'requires candidate session.created before activation: %s',
+    async (outcome) => {
+      vi.useFakeTimers();
+      mockFetch();
+      const { handlers, translations } = makeHandlers();
+      const provider = new OpenAIRealtimeProvider('/session', handlers);
+      await provider.start();
+      const old = peerControls[0]!;
+      nextSessionCreated = false;
+      mockFetch();
+      const renewal = (provider as unknown as { renewSession(): Promise<void> }).renewSession();
+      await vi.advanceTimersByTimeAsync(1);
+      const candidate = peerControls[1]!;
+      expect(candidate.replaceTrack).not.toHaveBeenCalled();
+      expect(old.sent).not.toContain(JSON.stringify({ type: 'session.close' }));
+      if (outcome === 'ack') candidate.emit({ type: 'session.created' });
+      else if (outcome === 'closed') candidate.setDataChannelState('closed');
+      else await vi.advanceTimersByTimeAsync(10_001);
+      await renewal;
+      if (outcome === 'ack') expect(candidate.replaceTrack).toHaveBeenCalled();
+      else {
+        expect(candidate.close).toHaveBeenCalled();
+        expect(old.sent).not.toContain(JSON.stringify({ type: 'session.close' }));
+        old.emit({ type: 'session.output_transcript.delta', delta: 'primary remains usable' });
+        expect(translations.at(-1)?.targetText).toBe('primary remains usable');
+      }
+      provider.stop();
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it('keeps a healthy primary until the candidate data channel opens', async () => {
+    vi.useFakeTimers();
+    mockFetch();
+    const { handlers, translations } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('/session', handlers);
+    await provider.start();
+    const old = peerControls[0]!;
+    nextDataChannelState = 'connecting';
+    mockFetch();
+    const renewal = (provider as unknown as { renewSession(): Promise<void> }).renewSession();
+    await vi.advanceTimersByTimeAsync(1);
+    const candidate = peerControls[1]!;
+    expect(candidate.replaceTrack).not.toHaveBeenCalled();
+    expect(old.sent).not.toContain(JSON.stringify({ type: 'session.close' }));
+    old.emit({ type: 'session.output_transcript.delta', delta: 'healthy primary' });
+    expect(translations.at(-1)?.targetText).toBe('healthy primary');
+    candidate.setDataChannelState('open');
+    await renewal;
+    expect(candidate.replaceTrack).toHaveBeenCalled();
+    provider.stop();
+  });
+
+  it('rejects a connected candidate whose data channel closes without a server error', async () => {
+    vi.useFakeTimers();
+    mockFetch();
+    const { handlers, translations, healthEvents } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('/session', handlers);
+    await provider.start();
+    const old = peerControls[0]!;
+    nextDataChannelState = 'connecting';
+    mockFetch();
+    const renewal = (provider as unknown as { renewSession(): Promise<void> }).renewSession();
+    await vi.advanceTimersByTimeAsync(1);
+    const candidate = peerControls[1]!;
+    candidate.setDataChannelState('closed');
+    await renewal;
+    expect(candidate.close).toHaveBeenCalled();
+    expect(old.sent).not.toContain(JSON.stringify({ type: 'session.close' }));
+    old.emit({ type: 'session.output_transcript.delta', delta: 'primary survives closed channel' });
+    expect(translations.at(-1)?.targetText).toBe('primary survives closed channel');
+    expect(healthEvents.filter((event) => event.component === 'transport').at(-1)?.state).toBe(
+      'connected',
+    );
+    provider.stop();
+  });
+
+  it('a failed scheduled candidate never marks the healthy primary failed', async () => {
+    vi.useFakeTimers();
+    mockFetch();
+    const { handlers, healthEvents, translations } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('/session', handlers);
+    await provider.start();
+    const old = peerControls[0]!;
+    healthEvents.length = 0;
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('unavailable', { status: 503 })));
+    await (provider as unknown as { renewSession(): Promise<void> }).renewSession();
+    expect(
+      healthEvents.some((event) => event.component === 'transport' && event.state === 'failed'),
+    ).toBe(false);
+    expect(healthEvents.filter((event) => event.component === 'transport').at(-1)?.state).toBe(
+      'connected',
+    );
+    old.emit({ type: 'session.output_transcript.delta', delta: 'primary continues' });
+    expect(translations.at(-1)?.targetText).toBe('primary continues');
+    expect(old.close).not.toHaveBeenCalled();
+    provider.stop();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('initial media readiness has a deadline and does not report success early', async () => {
+    vi.useFakeTimers();
+    nextPeerState = 'connecting';
+    mockFetch();
+    const { handlers, healthEvents } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('/session', handlers);
+    let settled = false;
+    const starting = provider.start().then(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(12_000);
+    await starting;
+    expect(provider.status).toBe('stopped');
+    expect(
+      healthEvents.some(
+        (event) => event.state === 'api_error' && /readiness.*timed out/i.test(event.message ?? ''),
+      ),
+    ).toBe(true);
+    expect(peerControls[0]!.close).toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(['mint', 'sdp'] as const)(
+    'Stop aborts pending %s and settles startup without a false error',
+    async (stage) => {
+      vi.useFakeTimers();
+      let signal: AbortSignal | undefined;
+      const fetchMock = vi.fn((_url: string, init: RequestInit) => {
+        signal = init.signal ?? undefined;
+        return new Promise<Response>(() => {});
+      });
+      if (stage === 'sdp')
+        fetchMock.mockResolvedValueOnce(
+          new Response(JSON.stringify({ client_secret: { value: 'token' } })),
+        );
+      vi.stubGlobal('fetch', fetchMock);
+      const { handlers, healthEvents } = makeHandlers();
+      const provider = new OpenAIRealtimeProvider('/session', handlers);
+      let settled = false;
+      const starting = provider.start().then(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(1);
+      expect(fetchMock).toHaveBeenCalledTimes(stage === 'mint' ? 1 : 2);
+      provider.stop();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(signal?.aborted).toBe(true);
+      expect(settled).toBe(true);
+      await starting;
+      expect(healthEvents.some((event) => event.state === 'api_error')).toBe(false);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it.each(['mint', 'sdp'] as const)(
+    'a hung %s expires without a network response',
+    async (stage) => {
+      vi.useFakeTimers();
+      let signal: AbortSignal | undefined;
+      const fetchMock = vi.fn((_url: string, init: RequestInit) => {
+        signal = init.signal ?? undefined;
+        return new Promise<Response>(() => {});
+      });
+      if (stage === 'sdp')
+        fetchMock.mockResolvedValueOnce(
+          new Response(JSON.stringify({ client_secret: { value: 'token' } })),
+        );
+      vi.stubGlobal('fetch', fetchMock);
+      const { handlers, healthEvents } = makeHandlers();
+      const provider = new OpenAIRealtimeProvider('/session', handlers);
+      let settled = false;
+      const starting = provider.start().then(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(12_001);
+      expect(signal?.aborted).toBe(true);
+      expect(settled).toBe(true);
+      await starting;
+      expect(provider.status).toBe('stopped');
+      expect(
+        healthEvents.some(
+          (event) => event.state === 'api_error' && /timed out/i.test(event.message ?? ''),
+        ),
+      ).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it('one persistent ICE disconnection triggers a complete negotiated replacement', async () => {
+    vi.useFakeTimers();
+    mockFetch();
+    const { handlers } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('/session', handlers);
+    await provider.start();
+    mockFetch();
+    fakeIceState = 'disconnected';
+    lastPC!.fireIce();
+    await vi.advanceTimersByTimeAsync(3_001);
+    expect(peerControls).toHaveLength(2);
+    expect(fakeRestartIce).not.toHaveBeenCalled();
+    provider.stop();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('ICE recovery before the grace deadline cancels replacement', async () => {
+    vi.useFakeTimers();
+    mockFetch();
+    const { handlers, healthEvents } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('/session', handlers);
+    await provider.start();
+    fakeIceState = 'disconnected';
+    lastPC!.fireIce();
+    await vi.advanceTimersByTimeAsync(2_000);
+    fakeIceState = 'connected';
+    lastPC!.fireIce();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(peerControls).toHaveLength(1);
+    expect(healthEvents.filter((event) => event.component === 'transport').at(-1)?.state).toBe(
+      'connected',
+    );
+    expect(fakeRestartIce).not.toHaveBeenCalled();
+    provider.stop();
+  });
+});
+
+describe('OpenAI candidate audio ownership', () => {
+  it('a renewal candidate sends no live track until readiness and leaves the original track enabled', async () => {
+    vi.useFakeTimers();
+    mockFetch();
+    const { handlers } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('/session', handlers);
+    await provider.start();
+    const originalTrack = peerControls[0]!.tracks[0]!;
+    nextPeerState = 'connecting';
+    mockFetch();
+    const renewal = (provider as unknown as { renewSession(): Promise<void> }).renewSession();
+    await vi.advanceTimersByTimeAsync(1);
+    const candidate = peerControls[1]!;
+    expect(candidate.tracks).toEqual([]);
+    expect(candidate.transceivers).toEqual(['audio']);
+    expect(candidate.replaceTrack).not.toHaveBeenCalled();
+    expect(originalTrack.enabled).toBe(true);
+    expect(originalTrack.stop).not.toHaveBeenCalled();
+    candidate.setState('connected');
+    await renewal;
+    expect(candidate.replaceTrack).toHaveBeenCalledWith(originalTrack);
+    expect(originalTrack.stop).not.toHaveBeenCalled();
+    provider.stop();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe('OpenAI cancellation across startup and renewal', () => {
+  it('WebRTC capture probe starvation blocks receive-wedge renewal and stops with its owner', async () => {
+    vi.useFakeTimers({
+      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date', 'performance'],
+    });
+    const { handlers, healthEvents } = makeHandlers();
+    mockFetch();
+    const provider = new OpenAIRealtimeProvider('/session', handlers);
+    await provider.start();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(healthEvents.some((event) => event.reason === 'capture_stalled')).toBe(true);
+    await vi.advanceTimersByTimeAsync(40000);
+    expect(peerControls).toHaveLength(1);
+    provider.stop();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it.each([false, true])(
+    'late capture respects lease ownership after Stop (same instance restart: %s)',
+    async (sameInstance) => {
+      __resetCaptureLeaseForTests();
+      const stream = makeFakeStream();
+      const abandonedStream = makeFakeStream();
+      let grant!: (stream: MediaStream) => void;
+      let grantNext!: (stream: MediaStream) => void;
+      const acquisition = new Promise<MediaStream>((resolve) => {
+        grant = resolve;
+      });
+      const nextAcquisition = new Promise<MediaStream>((resolve) => {
+        grantNext = resolve;
+      });
+      vi.mocked(navigator.mediaDevices.getUserMedia)
+        .mockReturnValueOnce(acquisition)
+        .mockReturnValueOnce(nextAcquisition);
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url: string) =>
+          url === '/session'
+            ? new Response(JSON.stringify({ client_secret: { value: 'token' } }))
+            : new Response('answer'),
+        ),
+      );
+      const first = new OpenAIRealtimeProvider(
+        '/session',
+        makeHandlers().handlers,
+        'en→zh-TW',
+        leaseCapture({ kind: 'mic', micDistance: 'meeting' }),
+      );
+      const oldStart = first.start();
+      first.stop();
+      const next = sameInstance
+        ? first
+        : new OpenAIRealtimeProvider(
+            '/session',
+            makeHandlers().handlers,
+            'en→zh-TW',
+            leaseCapture({ kind: 'mic', micDistance: 'meeting' }),
+          );
+      const nextStart = next.start();
+      grant(abandonedStream);
+      grantNext(stream);
+      await Promise.all([oldStart, nextStart]);
+      expect(next.status).toBe('running');
+      expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledTimes(2);
+      for (const track of abandonedStream.getTracks()) expect(track.stop).toHaveBeenCalledTimes(1);
+      for (const track of stream.getTracks()) expect(track.stop).not.toHaveBeenCalled();
+      next.stop();
+      for (const track of stream.getTracks()) expect(track.stop).toHaveBeenCalledTimes(1);
+      __resetCaptureLeaseForTests();
+    },
+  );
+
+  it('releases a lease granted after Stop when there is no replacement start', async () => {
+    __resetCaptureLeaseForTests();
+    const stream = makeFakeStream();
+    let grant!: (stream: MediaStream) => void;
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockReturnValue(
+      new Promise<MediaStream>((resolve) => {
+        grant = resolve;
+      }),
+    );
+    mockFetch();
+    const provider = new OpenAIRealtimeProvider(
+      '/session',
+      makeHandlers().handlers,
+      'en→zh-TW',
+      leaseCapture({ kind: 'mic', micDistance: 'meeting' }),
+    );
+    const start = provider.start();
+    provider.stop();
+    grant(stream);
+    await start;
+    for (const track of stream.getTracks()) expect(track.stop).toHaveBeenCalledTimes(1);
+    provider.stop();
+    for (const track of stream.getTracks()) expect(track.stop).toHaveBeenCalledTimes(1);
+    __resetCaptureLeaseForTests();
+  });
+
+  it('Stop aborts a warm-token startup during SDP without another mint', async () => {
+    vi.useFakeTimers();
+    let signal: AbortSignal | undefined;
+    const fetchMock = vi
+      .fn((_url: string, init: RequestInit) => {
+        signal = init.signal ?? undefined;
+        return new Promise<Response>(() => {});
+      })
+      .mockResolvedValueOnce(new Response(JSON.stringify({ client_secret: { value: 'warm' } })));
+    vi.stubGlobal('fetch', fetchMock);
+    prewarmOpenAISession('/session', sessionRequestBody('en→zh-TW', true, 'meeting'));
+    await vi.advanceTimersByTimeAsync(1);
+    const { handlers, healthEvents } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('/session', handlers);
+    const starting = provider.start();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1]?.[0]).toContain('/translations/calls');
+    provider.stop();
+    await starting;
+    expect(signal?.aborted).toBe(true);
+    expect(healthEvents.some((event) => event.state === 'api_error')).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(['mint', 'sdp'] as const)(
+    'Stop aborts a renewal candidate during %s and preserves stopped state',
+    async (stage) => {
+      vi.useFakeTimers();
+      mockFetch();
+      const { handlers, healthEvents } = makeHandlers();
+      const provider = new OpenAIRealtimeProvider('/session', handlers);
+      await provider.start();
+      let signal: AbortSignal | undefined;
+      const fetchMock = vi.fn((_url: string, init: RequestInit) => {
+        signal = init.signal ?? undefined;
+        return new Promise<Response>(() => {});
+      });
+      if (stage === 'sdp')
+        fetchMock.mockResolvedValueOnce(
+          new Response(JSON.stringify({ client_secret: { value: 'candidate' } })),
+        );
+      vi.stubGlobal('fetch', fetchMock);
+      const renewal = (provider as unknown as { renewSession(): Promise<void> }).renewSession();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(fetchMock).toHaveBeenCalledTimes(stage === 'mint' ? 1 : 2);
+      provider.stop();
+      const healthCount = healthEvents.length;
+      await renewal;
+      expect(signal?.aborted).toBe(true);
+      expect(provider.status).toBe('stopped');
+      expect(healthEvents).toHaveLength(healthCount);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it('an already closed primary is failed when its replacement fails, even with connected ICE', async () => {
+    vi.useFakeTimers();
+    mockFetch();
+    const { handlers, healthEvents } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('/session', handlers);
+    await provider.start();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('unavailable', { status: 503 })));
+    fireDCMessage(JSON.stringify({ type: 'session.closed' }));
+    await vi.advanceTimersByTimeAsync(1);
+    expect(healthEvents.filter((event) => event.component === 'transport').at(-1)?.state).toBe(
+      'failed',
+    );
+    provider.stop();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe('OpenAI late SDP response isolation', () => {
+  it('a candidate SDP body arriving after timeout cannot touch the discarded peer', async () => {
+    vi.useFakeTimers();
+    mockFetch();
+    const { handlers } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('/session', handlers);
+    await provider.start();
+    let releaseBody!: (body: string) => void;
+    const body = new Promise<string>((resolve) => {
+      releaseBody = resolve;
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ client_secret: { value: 'candidate' } })),
+        )
+        .mockResolvedValueOnce({ ok: true, text: () => body }),
+    );
+    const renewal = (provider as unknown as { renewSession(): Promise<void> }).renewSession();
+    await vi.advanceTimersByTimeAsync(12_000);
+    await renewal;
+    const candidate = peerControls[1]!;
+    expect(candidate.close).toHaveBeenCalled();
+    releaseBody('late-answer');
+    await vi.advanceTimersByTimeAsync(1);
+    expect(candidate.setRemoteDescription).not.toHaveBeenCalled();
+    expect(peerControls[0]!.close).not.toHaveBeenCalled();
+    provider.stop();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe('OpenAI primary recovers during replacement', () => {
+  it.each(['ICE', 'caption'] as const)(
+    '%s recovery during a pending replacement prevents candidate failure from killing healthy primary',
+    async (recovery) => {
+      vi.useFakeTimers();
+      mockFetch();
+      const { handlers, healthEvents, translations } = makeHandlers();
+      const provider = new OpenAIRealtimeProvider('/session', handlers);
+      await provider.start();
+      const primary = peerControls[0]!;
+      let rejectMint!: (error: Error) => void;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          () =>
+            new Promise<Response>((_resolve, reject) => {
+              rejectMint = reject;
+            }),
+        ),
+      );
+      if (recovery === 'ICE') {
+        fakeIceState = 'disconnected';
+        lastPC!.fireIce();
+        await vi.advanceTimersByTimeAsync(3_001);
+        fakeIceState = 'connected';
+        lastPC!.fireIce();
+      } else {
+        await vi.advanceTimersByTimeAsync(30_101);
+        primary.emit({ type: 'session.input_transcript.delta', delta: 'Recovered source' });
+      }
+      rejectMint(new Error('candidate network failure'));
+      await vi.advanceTimersByTimeAsync(1);
+      expect(healthEvents.filter((event) => event.component === 'transport').at(-1)?.state).toBe(
+        'connected',
+      );
+      expect(
+        healthEvents.some((event) => event.component === 'transport' && event.state === 'failed'),
+      ).toBe(false);
+      primary.emit({ type: 'session.output_transcript.delta', delta: 'recovered original' });
+      expect(translations.at(-1)?.targetText).toBe('recovered original');
+      expect(primary.close).not.toHaveBeenCalled();
+      provider.stop();
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+});
+
+describe('OpenAI caption progress watchdog', () => {
+  it.each(['session.updated', 'session.input_transcript.delta', 'session.output_transcript.delta'])(
+    '%s without visible text cannot mask active audio with no caption progress',
+    async (type) => {
+      vi.useFakeTimers();
+      const fetchMock = vi.fn((url: string) =>
+        Promise.resolve(
+          url === '/session'
+            ? new Response(JSON.stringify({ client_secret: { value: 'token' } }))
+            : new Response('answer'),
+        ),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+      const { handlers, healthEvents } = makeHandlers();
+      const provider = new OpenAIRealtimeProvider('/session', handlers);
+      await provider.start();
+      for (let i = 0; i < 7; i += 1) {
+        await vi.advanceTimersByTimeAsync(5_000);
+        fireDCMessage(JSON.stringify({ type, delta: ' \n\t' }));
+      }
+      expect(fetchMock.mock.calls.filter(([url]) => url === '/session')).toHaveLength(2);
+      expect(
+        healthEvents.some(
+          (event) => event.state === 'degraded' && event.message?.includes('Wedged'),
+        ),
+      ).toBe(true);
+      provider.stop();
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it('source-only progress keeps the session healthy even when repeated target-language speech has no translation', async () => {
+    vi.useFakeTimers();
+    mockFetch();
+    const fetchMock = vi.mocked(fetch);
+    const { handlers, transcripts } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('/session', handlers);
+    await provider.start();
+    for (let i = 0; i < 7; i += 1) {
+      await vi.advanceTimersByTimeAsync(5_000);
+      fireDCMessage(
+        JSON.stringify({ type: 'session.input_transcript.delta', delta: '已在目標語言' }),
+      );
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    provider.stop();
+    expect(
+      transcripts.filter((event) => event.status === 'final').map((event) => event.text),
+    ).toEqual(Array(7).fill('已在目標語言'));
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe('OpenAI attempt ownership and total budget', () => {
+  it('does not deliver old final translation after its transcript handler restarts', async () => {
+    vi.useFakeTimers();
+    mockFetch();
+    const { handlers, translations } = makeHandlers();
+    let restarted: Promise<void> | undefined;
+    const provider = new OpenAIRealtimeProvider('/session', {
+      ...handlers,
+      onTranscript: (event) => {
+        if (event.status === 'final' && !restarted) {
+          mockFetch('new-generation');
+          restarted = provider.start();
+        }
+      },
+    });
+    await provider.start();
+    peerControls[0]!.emit({ type: 'session.output_transcript.delta', delta: 'old meeting' });
+    const oldSegment = translations.at(-1)!.sourceSegmentId;
+    provider.stop();
+    await restarted;
+    expect(peerControls).toHaveLength(2);
+    expect(
+      translations.filter(
+        (event) => event.sourceSegmentId === oldSegment && event.status === 'final',
+      ),
+    ).toEqual([]);
+    provider.stop();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('finishes old cleanup before a stopped status listener starts again', async () => {
+    vi.useFakeTimers();
+    mockFetch();
+    const provider = new OpenAIRealtimeProvider('/session', makeHandlers().handlers);
+    await provider.start();
+    let restarted: Promise<void> | undefined;
+    const unsubscribe = provider.onStatus((status) => {
+      if (status === 'stopped' && !restarted) {
+        mockFetch('replacement');
+        restarted = provider.start();
+      }
+    });
+    provider.stop();
+    await restarted;
+    expect(peerControls).toHaveLength(2);
+    expect(provider.status).toBe('running');
+    unsubscribe();
+    provider.stop();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(['input', 'output-anchor', 'translation'])(
+    'does not schedule caption timers after %s handler stops',
+    async (kind) => {
+      vi.useFakeTimers();
+      mockFetch();
+      const { handlers } = makeHandlers();
+      const provider = new OpenAIRealtimeProvider('/session', {
+        ...handlers,
+        onTranscript: (event) => {
+          if (kind !== 'translation' && event.status === 'partial') provider.stop();
+        },
+        onTranslation: (event) => {
+          if (kind === 'translation' && event.status === 'draft') provider.stop();
+        },
+      });
+      await provider.start();
+      peerControls[0]!.emit({
+        type:
+          kind === 'input' ? 'session.input_transcript.delta' : 'session.output_transcript.delta',
+        delta: 'words',
+      });
+      expect(provider.status).toBe('stopped');
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it('does not schedule ICE recovery after its health handler stops', async () => {
+    vi.useFakeTimers();
+    mockFetch();
+    const { handlers } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('/session', {
+      ...handlers,
+      onHealth: (event) => {
+        if (event.component === 'transport' && event.state === 'reconnecting') provider.stop();
+      },
+    });
+    await provider.start();
+    fakeIceState = 'disconnected';
+    lastPC!.fireIce();
+    expect(provider.status).toBe('stopped');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('does not recreate startup timers after a connected handler stops the provider', async () => {
+    vi.useFakeTimers();
+    mockFetch();
+    const { handlers } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('/session', {
+      ...handlers,
+      onHealth: (event) => {
+        if (event.component === 'transport' && event.state === 'connected') provider.stop();
+      },
+    });
+    await provider.start();
+    expect(provider.status).toBe('stopped');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('does not clean up a new start requested by the old failure handler', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(new Response('Unavailable', { status: 503 }))
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ client_secret: { value: 'new-token' } })),
+        )
+        .mockResolvedValueOnce(new Response('answer')),
+    );
+    let restarted: Promise<void> | undefined;
+    const { handlers } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('/session', {
+      ...handlers,
+      onHealth: (event) => {
+        if (event.component === 'transport' && event.state === 'api_error' && !restarted) {
+          provider.stop();
+          restarted = provider.start();
+        }
+      },
+    });
+    await provider.start();
+    await restarted;
+    expect(provider.status).toBe('running');
+    provider.stop();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('does not schedule a retry after a failed handler stops the provider', async () => {
+    vi.useFakeTimers();
+    mockFetch();
+    const { handlers } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('/session', {
+      ...handlers,
+      onHealth: (event) => {
+        if (event.component === 'transport' && event.state === 'failed') provider.stop();
+      },
+    });
+    await provider.start();
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('Outage')));
+    peerControls[0]!.emit({ type: 'session.closed' });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(provider.status).toBe('stopped');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('starts the network budget after a long permission wait', async () => {
+    vi.useFakeTimers();
+    let grant!: (stream: MediaStream) => void;
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockReturnValue(
+      new Promise<MediaStream>((resolve) => {
+        grant = resolve;
+      }),
+    );
+    const fetchMock = vi.fn(async (url: string) =>
+      url === '/session'
+        ? new Response(JSON.stringify({ client_secret: { value: 'token' } }))
+        : new Response('answer'),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const provider = new OpenAIRealtimeProvider('/session', makeHandlers().handlers);
+    const starting = provider.start();
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(fetchMock).not.toHaveBeenCalled();
+    grant(makeFakeStream());
+    await starting;
+    expect(provider.status).toBe('running');
+    provider.stop();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('bounds the whole renewal, not each network stage independently', async () => {
+    vi.useFakeTimers();
+    mockFetch();
+    const { handlers, healthEvents } = makeHandlers();
+    const provider = new OpenAIRealtimeProvider('/session', handlers);
+    await provider.start();
+    const primary = peerControls[0]!;
+    let resolveMint!: (response: Response) => void;
+    let sdpSignal: AbortSignal | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string, init?: RequestInit) => {
+        if (url === '/session')
+          return new Promise<Response>((resolve) => {
+            resolveMint = resolve;
+          });
+        sdpSignal = init?.signal as AbortSignal;
+        return new Promise<Response>(() => {});
+      }),
+    );
+    let finished = false;
+    const renewal = (provider as unknown as { renewSession(): Promise<void> })
+      .renewSession()
+      .then(() => {
+        finished = true;
+      });
+    await vi.advanceTimersByTimeAsync(8_000);
+    resolveMint(new Response(JSON.stringify({ client_secret: { value: 'next' } })));
+    await vi.advanceTimersByTimeAsync(4_001);
+    expect(finished).toBe(true);
+    expect(sdpSignal?.aborted).toBe(true);
+    expect(primary.close).not.toHaveBeenCalled();
+    expect(healthEvents.at(-1)?.message).toMatch(/timed out/);
+    provider.stop();
+    await renewal;
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(['session.closed', 'error'])(
+    'rejects a WebRTC candidate receiving %s before ready',
+    async (type) => {
+      vi.useFakeTimers();
+      mockFetch();
+      const { handlers, translations } = makeHandlers();
+      const provider = new OpenAIRealtimeProvider('/session', handlers);
+      await provider.start();
+      const primary = peerControls[0]!;
+      primary.emit({ type: 'session.output_transcript.delta', delta: 'old' });
+      mockFetch('replacement');
+      nextPeerState = 'connecting';
+      const renewal = (provider as unknown as { renewSession(): Promise<void> }).renewSession();
+      await vi.advanceTimersByTimeAsync(1);
+      const candidate = peerControls[1]!;
+      candidate.emit({ type, error: { message: 'Session ended' } });
+      candidate.setState('connected');
+      await renewal;
+      expect(candidate.close).toHaveBeenCalled();
+      expect(primary.close).not.toHaveBeenCalled();
+      primary.emit({ type: 'session.output_transcript.delta', delta: ' continues' });
+      expect(translations.at(-1)?.targetText).toBe('old continues');
+      provider.stop();
+    },
+  );
+
+  it('never demotes a key from an old auth rejection after Stop and Start', async () => {
+    vi.useFakeTimers();
+    const requests: Array<Record<string, unknown>> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === '/session') {
+          requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+          return new Response(
+            JSON.stringify({ client_secret: { value: 'token' }, key_slot: 'primary' }),
+          );
+        }
+        return new Response(JSON.stringify({ error: { code: 'ip_not_authorized' } }), {
+          status: 401,
+        });
+      }),
+    );
+    let rejectOld!: (error: Error) => void;
+    let opens = 0;
+    __setOpenAIWsOpenerForTests(() => {
+      opens += 1;
+      if (opens === 1)
+        return new Promise((_resolve, reject) => {
+          rejectOld = reject;
+        });
+      return Promise.resolve({
+        isOpen: true,
+        activate: () => {},
+        close: () => {},
+        detach: () => {},
+      } as unknown as import('./openai-ws-transport.js').OpenAIWsTransport);
+    });
+    const provider = new OpenAIRealtimeProvider('/session', makeHandlers().handlers);
+    const oldStart = provider.start();
+    await vi.advanceTimersByTimeAsync(1);
+    rejectOld(new OpenAIWsOpenError('invalid_api_key', true));
+    provider.stop();
+    const newStart = provider.start();
+    await Promise.all([oldStart, newStart]);
+    expect(requests.filter((request) => 'rejectedSlot' in request)).toEqual([]);
+    expect(provider.status).toBe('running');
     provider.stop();
   });
 });

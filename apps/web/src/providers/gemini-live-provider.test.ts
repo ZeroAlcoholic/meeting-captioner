@@ -7,9 +7,23 @@ import type {
 } from '@meeting-audio/contracts';
 import geminiGolden from '../../../../tests/fixtures/upstream-contracts/gemini-live-translate.json' with { type: 'json' };
 import type { AudioSource } from './types.js';
-import { __resetAudioEngineForTests } from './audio-engine.js';
+import {
+  __resetRecoveryFailuresForTests,
+  recoveryHttpError,
+  recoveryFailureFor,
+} from './recovery-attempt.js';
+afterEach(() => __resetRecoveryFailuresForTests());
+import {
+  __resetAudioEngineForTests,
+  ensureCaptureWorklet,
+  getCaptureContext,
+  resumeCaptureContext,
+} from './audio-engine.js';
 import {
   GeminiLiveProvider,
+  prewarmGeminiSession,
+  cancelGeminiPrewarm,
+  __resetWarmGeminiForTests,
   floatTo16BitPCM,
   arrayBufferToBase64,
 } from './gemini-live-provider.js';
@@ -44,6 +58,20 @@ function makeProvider(langPair = 'en→zh-TW') {
 }
 
 describe('GeminiLiveProvider — message mapping', () => {
+  it('does not publish whitespace-only turns but preserves spaces inside real content', () => {
+    const { provider, transcripts, translations } = makeProvider();
+    provider.handleServerObject({
+      serverContent: { inputTranscription: { text: ' ' }, outputTranscription: { text: ' ' } },
+    });
+    expect(transcripts).toEqual([]);
+    expect(translations).toEqual([]);
+    provider.handleServerObject({ serverContent: { turnComplete: true } });
+    expect(transcripts).toEqual([]);
+    expect(translations).toEqual([]);
+    for (const text of ['Hello', ' ', 'world'])
+      provider.handleServerObject({ serverContent: { inputTranscription: { text } } });
+    expect(transcripts.at(-1)?.text).toBe('Hello world');
+  });
   it('setupComplete → transport connected health', () => {
     const { provider, health } = makeProvider();
     provider.handleServerObject({ setupComplete: {} });
@@ -222,26 +250,12 @@ describe('GeminiLiveProvider — message mapping', () => {
     expect(finals[0]!.targetText).toBe('Revenue grew by 3.5 percent.');
   });
 
-  it('goAway emits reconnecting health', () => {
-    const { provider, health } = makeProvider();
-    provider.handleServerObject({ goAway: { timeLeft: '5s' } });
-    expect(health.at(-1)).toMatchObject({ component: 'transport', state: 'reconnecting' });
-  });
-
-  it('goAway finalizes the in-flight turn so it is not orphaned across the rotation', () => {
-    // Regression: a GoAway (and the wedge-driven forceReconnect, which shares
-    // finalizeTurn) must commit the half-spoken utterance before closing —
-    // otherwise the resumed session keeps appending into the stale curId.
-    const { provider, transcripts, translations } = makeProvider('en→zh-TW');
+  it('GoAway outside a running session does not create a phantom outage or finalize text', () => {
+    const { provider, health, transcripts } = makeProvider();
     provider.handleServerObject({ serverContent: { inputTranscription: { text: 'Half spoken' } } });
-    provider.handleServerObject({ serverContent: { outputTranscription: { text: '說一半' } } });
-    expect(transcripts.filter((t) => t.status === 'final')).toHaveLength(0);
-
     provider.handleServerObject({ goAway: { timeLeft: '5s' } });
-
-    expect(transcripts.filter((t) => t.status === 'final')).toHaveLength(1);
-    expect(transcripts.at(-1)).toMatchObject({ status: 'final', text: 'Half spoken' });
-    expect(translations.some((t) => t.status === 'final' && t.targetText === '說一半')).toBe(true);
+    expect(health).toEqual([]);
+    expect(transcripts.filter((event) => event.status === 'final')).toHaveLength(0);
   });
 
   it('zh-TW→en sets reversed language tags', () => {
@@ -299,7 +313,7 @@ class FakeWebSocket {
   onopen: (() => void) | null = null;
   onmessage: ((e: { data: unknown }) => void) | null = null;
   onerror: (() => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((event?: Partial<CloseEvent>) => void) | null = null;
   closeCount = 0;
   sent: string[] = [];
 
@@ -351,6 +365,8 @@ class FakeAudioWorkletNode {
 
 function makeFakeAudioContextClass() {
   return class {
+    readonly sampleRate = 16_000;
+    readonly state = 'running';
     audioWorklet = { addModule: vi.fn().mockResolvedValue(undefined) };
     destination = {};
     createMediaStreamSource() {
@@ -376,7 +392,10 @@ function makeActiveMic(): AudioSource {
     analyser,
     acquire: vi.fn().mockImplementation(async (onHealth: (e: HealthEvent) => void) => {
       onHealth({ kind: 'health', component: 'audio', state: 'connected', timestamp: '' });
-      return { getTracks: () => [{ stop: vi.fn() }] } as unknown as MediaStream;
+      return {
+        getAudioTracks: () => [],
+        getTracks: () => [{ stop: vi.fn() }],
+      } as unknown as MediaStream;
     }),
     release: vi.fn(),
   } as unknown as AudioSource;
@@ -388,6 +407,7 @@ function tokenResponse(model = 'models/gemini-3.5-live-translate-preview'): Resp
 
 describe('GeminiLiveProvider — reconnect + wedge detection (#16)', () => {
   beforeEach(() => {
+    __resetWarmGeminiForTests();
     wsAutoOpen = true;
     wsEmitSetup = true;
     wsAutoCloseAfterOpen = false;
@@ -399,6 +419,7 @@ describe('GeminiLiveProvider — reconnect + wedge detection (#16)', () => {
   });
 
   afterEach(() => {
+    __resetWarmGeminiForTests();
     vi.unstubAllGlobals();
     vi.useRealTimers();
     vi.restoreAllMocks();
@@ -424,6 +445,982 @@ describe('GeminiLiveProvider — reconnect + wedge detection (#16)', () => {
     );
     return { provider, transcripts, translations, health, audioLevels };
   }
+
+  it('reports even one dropped frame and transport recovery without claiming content recovery', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => tokenResponse()),
+    );
+    const { provider, health } = makeHarness();
+    await provider.start();
+    const socket = FakeWebSocket.instances[0]!;
+    const node = FakeAudioWorkletNode.instances.at(-1)!;
+    const push = () =>
+      node.port.onmessage?.({ data: new Float32Array(512).fill(0.1).buffer } as MessageEvent);
+    health.length = 0;
+    socket.bufferedAmount = 2_000_000;
+    push();
+    expect(health).toContainEqual(
+      expect.objectContaining({
+        component: 'transport',
+        state: 'degraded',
+        message: expect.stringContaining('audio frames dropped'),
+      }),
+    );
+    for (let i = 0; i < 8; i++) push();
+    expect(health.filter((e) => e.component === 'transport')).toHaveLength(1);
+    expect(socket.sent).toHaveLength(1); // setup only
+    socket.bufferedAmount = 0;
+    push();
+    expect(socket.sent).toHaveLength(2);
+    expect(health.at(-1)).toMatchObject({ component: 'transport', state: 'connected' });
+    socket.bufferedAmount = 2_000_000;
+    push();
+    expect(
+      health.filter((e) => e.component === 'transport' && e.state === 'degraded'),
+    ).toHaveLength(2);
+    provider.stop();
+  });
+
+  it('settles Stop only after the final drain event has been delivered', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(() => Promise.resolve(tokenResponse())),
+    );
+    const { provider, transcripts, translations, health } = makeHarness();
+    await provider.start();
+    const socket = FakeWebSocket.instances[0]!;
+    socket.emit({ serverContent: { inputTranscription: { text: 'tail' } } });
+    provider.stop();
+    let settled = false;
+    const stopped = provider.waitForStop().then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    const stoppedHealth = [...health];
+    socket.emit({ setupComplete: {} });
+    socket.emit({ goAway: { timeLeft: '0s' } });
+    socket.emit({
+      serverContent: {
+        inputTranscription: { text: ' end' },
+        outputTranscription: { text: '完整尾文' },
+        turnComplete: true,
+      },
+    });
+    // No drain-cap time advances: the completion frame must settle Stop now.
+    await Promise.resolve();
+    expect(settled).toBe(true);
+    await stopped;
+    expect(transcripts.at(-1)).toMatchObject({ text: 'tail end', status: 'final' });
+    expect(translations.at(-1)).toMatchObject({ targetText: '完整尾文', status: 'final' });
+    expect(health).toEqual(stoppedHealth);
+    expect(socket.readyState).toBe(FakeWebSocket.CLOSED);
+    socket.emit({ serverContent: { inputTranscription: { text: ' late' } } });
+    expect(transcripts.at(-1)?.text).toBe('tail end');
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('does not let a previously warm token bypass a later permanent refusal', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(() => Promise.resolve(tokenResponse())),
+    );
+    prewarmGeminiSession('http://localhost/session/gemini');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    recoveryHttpError(new Response(null, { status: 401 }), 'gemini', 'translation');
+    const { provider } = makeHarness();
+    await provider.start();
+    expect(provider.status).toBe('stopped');
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    provider.stop();
+  });
+
+  it('reports an active protocol auth refusal with normalized recovery evidence', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(() => Promise.resolve(tokenResponse())),
+    );
+    const { provider, health } = makeHarness();
+    await provider.start();
+    FakeWebSocket.instances[0]!.emit({ error: { code: 401, status: 'UNAUTHENTICATED' } });
+    expect(health.at(-1)).toMatchObject({
+      state: 'failed',
+      recoveryFailure: { kind: 'auth', provider: 'gemini' },
+    });
+    provider.stop();
+  });
+
+  it.each([
+    [401, 'auth'],
+    [429, 'rate-limit'],
+    [404, 'unsupported'],
+  ] as const)(
+    'preserves translation HTTP %s classification across adapter replacement',
+    async (status, kind) => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(new Response(null, { status, headers: { 'Retry-After': '60' } }));
+      vi.stubGlobal('fetch', fetchMock);
+      const first = makeHarness();
+      await first.provider.start();
+      expect(first.health).toContainEqual(
+        expect.objectContaining({
+          recoveryFailure: expect.objectContaining({
+            kind,
+            provider: 'gemini',
+            purpose: 'translation',
+          }),
+        }),
+      );
+      const next = makeHarness();
+      await next.provider.start();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      next.provider.stop();
+    },
+  );
+
+  it('PCM delivery freeze reports capture failure without the receive watchdog reconnecting', async () => {
+    vi.useFakeTimers({
+      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date', 'performance'],
+    });
+    const fetchMock = vi.fn(() => Promise.resolve(tokenResponse()));
+    vi.stubGlobal('fetch', fetchMock);
+    const { provider, health } = makeHarness();
+    await provider.start();
+    const callback = FakeAudioWorkletNode.instances[0]!.port.onmessage!;
+    callback({ data: new Float32Array(512).buffer } as MessageEvent);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(health.some((event) => event.reason === 'capture_stalled')).toBe(true);
+    await vi.advanceTimersByTimeAsync(40000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    provider.stop();
+    provider.stop();
+    const count = health.length;
+    callback({ data: new Float32Array(512).buffer } as MessageEvent);
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(health).toHaveLength(count);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(['connecting', 'reconnecting', 'rotation'] as const)(
+    'Stop from a synchronous %s health subscriber cannot create later work',
+    async (stage) => {
+      vi.useFakeTimers();
+      const fetchMock = vi.fn(() => Promise.resolve(tokenResponse()));
+      vi.stubGlobal('fetch', fetchMock);
+      const mic = makeActiveMic();
+      const h = makeHandlers();
+      const provider = new GeminiLiveProvider(
+        'http://localhost/session/gemini',
+        {
+          ...h.handlers,
+          onHealth: (event) => {
+            h.handlers.onHealth(event);
+            if (
+              event.component === 'transport' &&
+              ((stage === 'connecting' && event.state === 'connecting') ||
+                (stage !== 'connecting' && event.state === 'reconnecting'))
+            )
+              provider.stop();
+          },
+        },
+        mic,
+      );
+      await provider.start();
+      if (stage === 'reconnecting') FakeWebSocket.instances[0]!.close();
+      if (stage === 'rotation') {
+        FakeWebSocket.instances[0]!.emit({ goAway: { timeLeft: '5s' } });
+        await vi.advanceTimersByTimeAsync(1);
+      }
+      expect(provider.status).toBe('stopped');
+      expect(vi.getTimerCount()).toBe(0);
+      expect(FakeWebSocket.instances).toHaveLength(stage === 'connecting' ? 0 : 1);
+      if (stage === 'connecting') {
+        expect(fetchMock).not.toHaveBeenCalled();
+        expect(mic.acquire).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it('one recovery budget covers mint and setup rather than resetting at each stage', async () => {
+    vi.useFakeTimers();
+    let resolveToken!: (response: Response) => void;
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(tokenResponse())
+        .mockReturnValueOnce(
+          new Promise<Response>((resolve) => {
+            resolveToken = resolve;
+          }),
+        ),
+    );
+    const { provider, health } = makeHarness();
+    await provider.start();
+    FakeWebSocket.instances[0]!.close();
+    await vi.advanceTimersByTimeAsync(1_000);
+    wsEmitSetup = false;
+    await vi.advanceTimersByTimeAsync(8_000);
+    resolveToken(tokenResponse());
+    await vi.advanceTimersByTimeAsync(4_001);
+    expect(
+      health.some((event) => event.component === 'transport' && event.state === 'failed'),
+    ).toBe(true);
+    expect(FakeWebSocket.instances[1]!.readyState).toBe(3);
+    provider.stop();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(['seconds', 'date'])(
+    'respects token Retry-After %s before the next Gemini attempt',
+    async (retryAfter) => {
+      vi.useFakeTimers({
+        toFake: [
+          'setTimeout',
+          'clearTimeout',
+          'setInterval',
+          'clearInterval',
+          'Date',
+          'performance',
+        ],
+      });
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(tokenResponse())
+        .mockImplementationOnce(() =>
+          Promise.resolve(
+            new Response('quota', {
+              status: 429,
+              headers: {
+                'Retry-After':
+                  retryAfter === 'seconds' ? '8' : new Date(Date.now() + 8_000).toUTCString(),
+              },
+            }),
+          ),
+        )
+        .mockImplementation(() => Promise.resolve(tokenResponse()));
+      vi.stubGlobal('fetch', fetchMock);
+      const { provider, health } = makeHarness();
+      await provider.start();
+      FakeWebSocket.instances[0]!.close();
+      await vi.advanceTimersByTimeAsync(1_001);
+      expect(health.at(-1)?.message).toMatch(/quota|429/i);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      provider.stop();
+      provider.stop();
+    },
+  );
+
+  it('Stop and a new provider or prewarm cannot bypass endpoint quota cooldown', async () => {
+    vi.useFakeTimers({
+      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date', 'performance'],
+    });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response('quota', {
+          status: 429,
+          headers: { 'Retry-After': '8' },
+        }),
+      )
+      .mockImplementation(() => Promise.resolve(tokenResponse()));
+    vi.stubGlobal('fetch', fetchMock);
+    const first = makeHarness();
+    await first.provider.start();
+    first.provider.stop();
+    const second = makeHarness();
+    await second.provider.start();
+    prewarmGeminiSession('http://localhost/session/gemini');
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(second.provider.status).toBe('stopped');
+    expect(second.health.some((event) => event.message?.includes('429'))).toBe(true);
+    await vi.advanceTimersByTimeAsync(8_000);
+    await second.provider.start();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    second.provider.stop();
+    second.provider.stop();
+  });
+
+  it('cancelGeminiPrewarm aborts the speculative request without a timer leak', async () => {
+    vi.useFakeTimers();
+    let signal!: AbortSignal;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((_url, init: RequestInit) => {
+        signal = init.signal as AbortSignal;
+        return new Promise(() => {});
+      }),
+    );
+    prewarmGeminiSession('http://localhost/session/gemini');
+    await vi.advanceTimersByTimeAsync(1);
+    cancelGeminiPrewarm();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(signal.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('reports safe close code without raw reason and does not infer resume rejection from 1008', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(tokenResponse())),
+    );
+    const { provider, health } = makeHarness();
+    await provider.start();
+    const old = FakeWebSocket.instances[0]!;
+    old.emit({ sessionResumptionUpdate: { resumable: true, newHandle: 'resume-secret' } });
+    old.emit({ sessionResumptionUpdate: { resumable: false } });
+    old.readyState = 3;
+    old.onclose?.({ code: 1008, reason: 'token-sensitive-raw-error' });
+    expect(health.at(-1)?.message).toContain('1008');
+    expect(JSON.stringify(health)).not.toContain('token-sensitive');
+    expect(JSON.stringify(health)).not.toContain('resume-secret');
+    await vi.advanceTimersByTimeAsync(1_001);
+    const setup = JSON.parse(FakeWebSocket.instances[1]!.sent[0]!).setup;
+    expect(setup.sessionResumption.handle).toBe('resume-secret');
+    provider.stop();
+    provider.stop();
+  });
+
+  it('after two failed resumed setups tries a fresh session once and never reuses the suspect handle', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(tokenResponse())),
+    );
+    const { provider, health, transcripts } = makeHarness();
+    await provider.start();
+    const old = FakeWebSocket.instances[0]!;
+    old.emit({ sessionResumptionUpdate: { resumable: true, newHandle: 'old-handle' } });
+    old.emit({ serverContent: { inputTranscription: { text: 'Earlier meeting text.' } } });
+    wsEmitSetup = false;
+    wsAutoCloseAfterOpen = true;
+    old.close();
+    await vi.advanceTimersByTimeAsync(15_001);
+    const attempts = FakeWebSocket.instances
+      .slice(1)
+      .map((socket) => JSON.parse(socket.sent[0]!).setup.sessionResumption);
+    expect(attempts.slice(0, 2)).toEqual([{ handle: 'old-handle' }, { handle: 'old-handle' }]);
+    expect(attempts.slice(2)).toEqual([{}, {}]);
+    expect(health.some((event) => event.message?.includes('context may be interrupted'))).toBe(
+      true,
+    );
+    expect(transcripts.some((event) => event.text === 'Earlier meeting text.')).toBe(true);
+    provider.stop();
+  });
+
+  it('token failures do not count as resumed setup rejections', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(tokenResponse())
+        .mockImplementationOnce(() => Promise.resolve(new Response('', { status: 503 })))
+        .mockImplementationOnce(() => Promise.resolve(new Response('', { status: 503 })))
+        .mockImplementation(() => Promise.resolve(tokenResponse())),
+    );
+    const { provider } = makeHarness();
+    await provider.start();
+    FakeWebSocket.instances[0]!.emit({
+      sessionResumptionUpdate: { resumable: true, newHandle: 'still-valid' },
+    });
+    FakeWebSocket.instances[0]!.close();
+    await vi.advanceTimersByTimeAsync(7_001);
+    const setup = JSON.parse(FakeWebSocket.instances[1]!.sent[0]!).setup;
+    expect(setup.sessionResumption.handle).toBe('still-valid');
+    provider.stop();
+    provider.stop();
+  });
+
+  it('a successful resumed setup resets the consecutive failure counter', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(tokenResponse())),
+    );
+    const { provider } = makeHarness();
+    await provider.start();
+    FakeWebSocket.instances[0]!.emit({
+      sessionResumptionUpdate: { resumable: true, newHandle: 'valid-handle' },
+    });
+    for (let cycle = 0; cycle < 2; cycle++) {
+      wsEmitSetup = false;
+      wsAutoCloseAfterOpen = true;
+      FakeWebSocket.instances.at(-1)!.close();
+      await vi.advanceTimersByTimeAsync(1_001);
+      wsEmitSetup = true;
+      wsAutoCloseAfterOpen = false;
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(
+        JSON.parse(FakeWebSocket.instances.at(-1)!.sent[0]!).setup.sessionResumption.handle,
+      ).toBe('valid-handle');
+    }
+    provider.stop();
+    provider.stop();
+  });
+
+  it('Stop clears old resumption state before a new start on the same provider', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(tokenResponse())),
+    );
+    const { provider } = makeHarness();
+    await provider.start();
+    FakeWebSocket.instances[0]!.emit({
+      sessionResumptionUpdate: { resumable: true, newHandle: 'old-meeting' },
+    });
+    provider.stop();
+    provider.stop();
+    await provider.start();
+    expect(JSON.parse(FakeWebSocket.instances[1]!.sent[0]!).setup.sessionResumption).toEqual({});
+    provider.stop();
+    provider.stop();
+  });
+
+  it('a new start from the old final transcript callback keeps its newly acquired capture alive', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(tokenResponse())),
+    );
+    const tracks: Array<{ readyState: string; stop: () => void }> = [];
+    let current: { readyState: string; stop: () => void } | null = null;
+    const mic: AudioSource = {
+      analyser: null,
+      acquire: async () => {
+        const track = {
+          readyState: 'live',
+          stop: () => {
+            track.readyState = 'ended';
+          },
+        };
+        current = track;
+        tracks.push(track);
+        return { getAudioTracks: () => [], getTracks: () => [track] } as unknown as MediaStream;
+      },
+      release: () => {
+        current?.stop();
+        current = null;
+      },
+    };
+    const h = makeHandlers();
+    let restarting: Promise<void> | undefined;
+    const provider = new GeminiLiveProvider(
+      'http://localhost/session/gemini',
+      {
+        ...h.handlers,
+        onTranscript: (event) => {
+          h.handlers.onTranscript(event);
+          if (event.status === 'final' && !restarting) restarting = provider.start();
+        },
+      },
+      mic,
+    );
+    await provider.start();
+    FakeWebSocket.instances[0]!.emit({
+      serverContent: { inputTranscription: { text: 'Old meeting tail' } },
+    });
+    provider.stop();
+    provider.stop();
+    await restarting;
+    expect(tracks).toHaveLength(2);
+    expect(tracks[0]!.readyState).toBe('ended');
+    expect(tracks[1]!.readyState).toBe('live');
+    expect(FakeWebSocket.instances[0]!.readyState).toBe(3);
+    expect(provider.status).toBe('running');
+    provider.stop();
+    provider.stop();
+  });
+
+  it('final transcript callbacks cannot erase a newly arriving turn', () => {
+    const h = makeHandlers();
+    let nested = false;
+    const provider = new GeminiLiveProvider('http://localhost/session/gemini', {
+      ...h.handlers,
+      onTranscript: (event) => {
+        h.handlers.onTranscript(event);
+        if (event.status === 'final' && !nested) {
+          nested = true;
+          provider.handleServerObject({
+            serverContent: { inputTranscription: { text: 'New words' } },
+          });
+        }
+      },
+    });
+    provider.handleServerObject({ serverContent: { inputTranscription: { text: 'Old words' } } });
+    provider.handleServerObject({ serverContent: { turnComplete: true } });
+    provider.handleServerObject({ serverContent: { inputTranscription: { text: ' continue' } } });
+    expect(h.transcripts.at(-1)?.text).toBe('New words continue');
+    const previous = h.transcripts.find((event) => event.status === 'final')!;
+    expect(h.transcripts.at(-1)?.segmentId).not.toBe(previous.segmentId);
+  });
+
+  it('Stop cannot drain a replacement started by its stopped health subscriber', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(tokenResponse())),
+    );
+    const h = makeHandlers();
+    let restarted = false;
+    let restarting: Promise<void> | undefined;
+    const provider = new GeminiLiveProvider(
+      'http://localhost/session/gemini',
+      {
+        ...h.handlers,
+        onHealth: (event) => {
+          h.handlers.onHealth(event);
+          if (event.component === 'audio' && event.state === 'stopped' && !restarted) {
+            restarted = true;
+            restarting = provider.start();
+          }
+        },
+      },
+      makeActiveMic(),
+    );
+    await provider.start();
+    provider.stop();
+    await restarting;
+    await vi.advanceTimersByTimeAsync(3_001);
+    expect(provider.status).toBe('running');
+    expect(FakeWebSocket.instances.at(-1)!.readyState).toBe(1);
+    expect(h.health.filter((event) => event.component === 'transport').at(-1)?.state).toBe(
+      'connected',
+    );
+    provider.stop();
+    provider.stop();
+  });
+
+  it('does not carry the remainder of a drained frame into a synchronously restarted session', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(tokenResponse())),
+    );
+    const h = makeHandlers();
+    let restarting: Promise<void> | undefined;
+    const provider = new GeminiLiveProvider(
+      'http://localhost/session/gemini',
+      {
+        ...h.handlers,
+        onTranscript: (event) => {
+          h.handlers.onTranscript(event);
+          if (event.status === 'final' && !restarting) restarting = provider.start();
+        },
+      },
+      makeActiveMic(),
+    );
+    await provider.start();
+    const old = FakeWebSocket.instances[0]!;
+    old.emit({ serverContent: { outputTranscription: { text: '不要。' } } });
+    provider.stop();
+    old.emit({
+      serverContent: {
+        inputTranscription: { text: 'Do not.' },
+        outputTranscription: { text: '舊場尾文' },
+        turnComplete: true,
+      },
+    });
+    await restarting;
+    expect(provider.status).toBe('running');
+    expect(h.transcripts.some((event) => event.text.includes('舊場尾文'))).toBe(false);
+    expect(h.translations.some((event) => event.targetText.includes('舊場尾文'))).toBe(false);
+    FakeWebSocket.instances
+      .at(-1)!
+      .emit({ serverContent: { inputTranscription: { text: 'New meeting' } } });
+    expect(h.transcripts.at(-1)?.text).toBe('New meeting');
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    provider.stop();
+    provider.stop();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('a start during drain adopts the start already triggered by the final callback', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(() => Promise.resolve(tokenResponse()));
+    vi.stubGlobal('fetch', fetchMock);
+    const h = makeHandlers();
+    let restarting: Promise<void> | undefined;
+    const provider = new GeminiLiveProvider(
+      'http://localhost/session/gemini',
+      {
+        ...h.handlers,
+        onTranscript: (event) => {
+          h.handlers.onTranscript(event);
+          if (event.status === 'final' && !restarting) restarting = provider.start();
+        },
+      },
+      makeActiveMic(),
+    );
+    await provider.start();
+    FakeWebSocket.instances[0]!.emit({ serverContent: { inputTranscription: { text: 'Tail' } } });
+    provider.stop();
+    await provider.start();
+    await restarting;
+    expect(
+      h.health.filter((event) => event.component === 'transport' && event.state === 'connecting'),
+    ).toHaveLength(2);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    provider.stop();
+    provider.stop();
+  });
+
+  it('advertises the actual 48kHz capture rate when the engine rejects an explicit 16kHz context', async () => {
+    __resetAudioEngineForTests();
+    const requestedRates: Array<number | undefined> = [];
+    vi.stubGlobal(
+      'AudioContext',
+      class {
+        readonly sampleRate = 48_000;
+        readonly state = 'running';
+        audioWorklet = { addModule: vi.fn().mockResolvedValue(undefined) };
+        destination = {};
+        constructor(options?: AudioContextOptions) {
+          requestedRates.push(options?.sampleRate);
+          if (options?.sampleRate) throw new Error('Explicit capture rate unsupported');
+        }
+        createMediaStreamSource() {
+          return { connect() {} };
+        }
+        resume() {
+          return Promise.resolve();
+        }
+      },
+    );
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(tokenResponse())),
+    );
+    const { provider } = makeHarness();
+    try {
+      await provider.start();
+      FakeAudioWorkletNode.instances.at(-1)!.port.onmessage?.({
+        data: new Float32Array(512).fill(0.25).buffer,
+      } as MessageEvent);
+      const audio = JSON.parse(FakeWebSocket.instances.at(-1)!.sent.at(-1)!).realtimeInput.audio;
+      expect(requestedRates).toEqual([16_000, undefined]);
+      expect(audio.mimeType).toBe('audio/pcm;rate=48000');
+      expect(atob(audio.data)).toHaveLength(512 * 2);
+    } finally {
+      provider.stop();
+      provider.stop();
+      __resetAudioEngineForTests();
+    }
+  });
+
+  it('a queued old worklet callback cannot send PCM into a replacement meeting', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(tokenResponse())),
+    );
+    const { provider } = makeHarness();
+    await provider.start();
+    const oldCallback = FakeAudioWorkletNode.instances.at(-1)!.port.onmessage!;
+    provider.stop();
+    provider.stop();
+    await provider.start();
+    const current = FakeWebSocket.instances.at(-1)!;
+    const before = current.sent.length;
+    oldCallback({ data: new Float32Array(512).buffer } as MessageEvent);
+    expect(current.sent).toHaveLength(before);
+    FakeAudioWorkletNode.instances.at(-1)!.port.onmessage?.({
+      data: new Float32Array(512).buffer,
+    } as MessageEvent);
+    expect(current.sent).toHaveLength(before + 1);
+    provider.stop();
+    provider.stop();
+  });
+
+  it.each(['worklet', 'resume'] as const)(
+    'Stop cancels pending capture %s immediately without cancelling another shared caller',
+    async (stage) => {
+      vi.useFakeTimers();
+      __resetAudioEngineForTests();
+      let resolveNative!: () => void;
+      const native = new Promise<void>((resolve) => {
+        resolveNative = resolve;
+      });
+      const addModule = vi.fn(() => (stage === 'worklet' ? native : Promise.resolve()));
+      vi.stubGlobal(
+        'AudioContext',
+        class {
+          sampleRate = 16_000;
+          state: AudioContextState = stage === 'resume' ? 'suspended' : 'running';
+          audioWorklet = { addModule };
+          destination = {};
+          createMediaStreamSource() {
+            return { connect() {} };
+          }
+          async resume() {
+            await native;
+            this.state = 'running';
+          }
+        },
+      );
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(() => Promise.resolve(tokenResponse())),
+      );
+      const { provider } = makeHarness();
+      let finished = false;
+      const starting = provider.start().then(() => {
+        finished = true;
+      });
+      await vi.advanceTimersByTimeAsync(1);
+      let otherFinished = false;
+      const shared = (
+        stage === 'worklet' ? ensureCaptureWorklet(getCaptureContext()!) : resumeCaptureContext()
+      ).then(() => {
+        otherFinished = true;
+      });
+      provider.stop();
+      await vi.advanceTimersByTimeAsync(0);
+      try {
+        expect(finished).toBe(true);
+        expect(otherFinished).toBe(false);
+        const nodesAfterStop = FakeAudioWorkletNode.instances.length;
+        resolveNative();
+        await Promise.all([starting, shared]);
+        expect(FakeAudioWorkletNode.instances).toHaveLength(nodesAfterStop);
+        expect(otherFinished).toBe(true);
+        expect(addModule).toHaveBeenCalledOnce();
+        provider.stop();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        resolveNative();
+        await Promise.all([starting, shared]);
+        provider.stop();
+        __resetAudioEngineForTests();
+      }
+    },
+  );
+
+  it('does not send PCM or fail over while the replacement setup is pending', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(tokenResponse())),
+    );
+    const { provider, health } = makeHarness();
+    await provider.start();
+    wsEmitSetup = false;
+    FakeWebSocket.instances[0]!.close();
+    await vi.advanceTimersByTimeAsync(3_000);
+    const replacement = FakeWebSocket.instances[1]!;
+    const capture = FakeAudioWorkletNode.instances.at(-1)!;
+    capture.port.onmessage?.({ data: new Float32Array(512).buffer } as MessageEvent);
+    expect(replacement.sent.map((frame) => Object.keys(JSON.parse(frame))[0])).toEqual(['setup']);
+    expect(health.some((event) => event.state === 'failed')).toBe(false);
+    replacement.emit({ setupComplete: {} });
+    capture.port.onmessage?.({ data: new Float32Array(512).buffer } as MessageEvent);
+    expect(replacement.sent).toHaveLength(2);
+    provider.stop();
+    provider.stop();
+  });
+
+  it('GoAway retains audio and captions during token preparation and rotates without waiting for close', async () => {
+    vi.useFakeTimers();
+    let resolveToken!: (response: Response) => void;
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(tokenResponse())
+        .mockReturnValueOnce(
+          new Promise<Response>((resolve) => {
+            resolveToken = resolve;
+          }),
+        ),
+    );
+    const { provider, transcripts } = makeHarness();
+    await provider.start();
+    const old = FakeWebSocket.instances[0]!;
+    old.close = () => {
+      old.readyState = 2;
+      old.closeCount += 1;
+    };
+    old.emit({ goAway: { timeLeft: '50s' } });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(old.readyState).toBe(1);
+    old.emit({ serverContent: { inputTranscription: { text: 'Still listening' } } });
+    expect(transcripts.at(-1)?.text).toBe('Still listening');
+    FakeAudioWorkletNode.instances.at(-1)!.port.onmessage?.({
+      data: new Float32Array(512).buffer,
+    } as MessageEvent);
+    expect(old.sent).toHaveLength(2);
+    resolveToken(tokenResponse());
+    await vi.advanceTimersByTimeAsync(25_000);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    old.emit({ serverContent: { inputTranscription: { text: ' before cutover' } } });
+    await vi.advanceTimersByTimeAsync(7_500);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    expect(old.closeCount).toBe(1);
+    expect(
+      transcripts.some(
+        (event) => event.status === 'final' && event.text === 'Still listening before cutover',
+      ),
+    ).toBe(true);
+    provider.stop();
+    provider.stop();
+  });
+
+  it.each(['malformed', 'unsupported'] as const)(
+    'rotation credential %s follows its failure policy',
+    async (kind) => {
+      vi.useFakeTimers();
+      vi.stubGlobal(
+        'fetch',
+        vi
+          .fn()
+          .mockResolvedValueOnce(tokenResponse())
+          .mockResolvedValueOnce(
+            kind === 'unsupported'
+              ? tokenResponse('models/not-a-translation-model')
+              : new Response('{}'),
+          )
+          .mockImplementation(() => Promise.resolve(tokenResponse())),
+      );
+      const { provider, health } = makeHarness();
+      await provider.start();
+      FakeWebSocket.instances[0]!.emit({ goAway: { timeLeft: '18s' } });
+      await vi.advanceTimersByTimeAsync(5_001);
+      if (kind === 'unsupported') {
+        expect(FakeWebSocket.instances).toHaveLength(1);
+        expect(recoveryFailureFor('gemini', 'translation')?.kind).toBe('unsupported');
+        expect(fetch).toHaveBeenCalledTimes(2);
+      } else {
+        expect(FakeWebSocket.instances).toHaveLength(2);
+        expect(health.filter((event) => event.component === 'transport').at(-1)?.state).toBe(
+          'connected',
+        );
+      }
+      provider.stop();
+      provider.stop();
+    },
+  );
+
+  it('short GoAway grace keeps the old session until its prepared token is ready', async () => {
+    vi.useFakeTimers();
+    let resolveToken!: (response: Response) => void;
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(tokenResponse())
+      .mockReturnValueOnce(
+        new Promise<Response>((resolve) => {
+          resolveToken = resolve;
+        }),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    const { provider } = makeHarness();
+    await provider.start();
+    const old = FakeWebSocket.instances[0]!;
+    old.emit({ goAway: { timeLeft: '5s' } });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(old.readyState).toBe(1);
+    resolveToken(tokenResponse());
+    await vi.advanceTimersByTimeAsync(1);
+    expect(old.readyState).toBe(3);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    provider.stop();
+    provider.stop();
+  });
+
+  it('GoAway with a hung token still rotates by the announced deadline', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(tokenResponse())
+        .mockReturnValueOnce(new Promise(() => {}))
+        .mockResolvedValue(tokenResponse()),
+    );
+    const { provider } = makeHarness();
+    await provider.start();
+    const old = FakeWebSocket.instances[0]!;
+    old.close = () => {
+      old.readyState = 2;
+      old.closeCount += 1;
+    };
+    old.emit({ goAway: { timeLeft: '5s' } });
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(old.closeCount).toBe(1);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    provider.stop();
+    provider.stop();
+  });
+
+  it.each(['control', 'input', 'output'])(
+    '%s traffic without visible text cannot conceal a caption wedge',
+    async (kind) => {
+      vi.useFakeTimers();
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(() => Promise.resolve(tokenResponse())),
+      );
+      const { provider, health } = makeHarness();
+      await provider.start();
+      const old = FakeWebSocket.instances[0]!;
+      for (let i = 0; i < 7; i++) {
+        old.emit(
+          kind === 'control'
+            ? { sessionResumptionUpdate: { newHandle: 'handle', resumable: true } }
+            : {
+                serverContent: {
+                  [kind === 'input' ? 'inputTranscription' : 'outputTranscription']: {
+                    text: ' \n\t',
+                  },
+                },
+              },
+        );
+        await vi.advanceTimersByTimeAsync(5_000);
+      }
+      expect(
+        health.some((event) => event.state === 'degraded' && event.message?.includes('Wedged')),
+      ).toBe(true);
+      expect(FakeWebSocket.instances).toHaveLength(2);
+      provider.stop();
+      provider.stop();
+    },
+  );
+
+  it('bounds a hung token request and Stop aborts it immediately', async () => {
+    vi.useFakeTimers();
+    let requestSignal: AbortSignal | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((_url: string, init: RequestInit) => {
+        requestSignal = init.signal as AbortSignal;
+        return new Promise(() => {});
+      }),
+    );
+    const first = makeHarness();
+    const starting = first.provider.start();
+    await vi.advanceTimersByTimeAsync(13_000);
+    await starting;
+    expect(first.provider.status).toBe('stopped');
+    expect(requestSignal?.aborted).toBe(true);
+    const second = makeHarness();
+    const restarting = second.provider.start();
+    await vi.advanceTimersByTimeAsync(1);
+    second.provider.stop();
+    await restarting;
+    expect(requestSignal?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
 
   it('translate model setup uses the official AUDIO + transcription side-channel path', async () => {
     const fetchMock = vi.fn(() => Promise.resolve(tokenResponse()));
@@ -568,6 +1565,249 @@ describe('GeminiLiveProvider — reconnect + wedge detection (#16)', () => {
     expect(after.filter((e) => e.state === 'failed')).toHaveLength(0);
   });
 
+  it.each(['resolve', 'reject'] as const)(
+    'an initial token settling after restart cannot replace or stop the current session (%s)',
+    async (outcome) => {
+      vi.useFakeTimers();
+      let resolveToken!: (value: Response) => void;
+      let rejectToken!: (reason: Error) => void;
+      const pendingToken = new Promise<Response>((resolve, reject) => {
+        resolveToken = resolve;
+        rejectToken = reject;
+      });
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockReturnValueOnce(pendingToken).mockResolvedValue(tokenResponse()),
+      );
+      const { provider, health } = makeHarness();
+      const abandonedStart = provider.start();
+      await vi.advanceTimersByTimeAsync(1);
+      provider.stop();
+      await provider.start();
+      const currentSocket = FakeWebSocket.instances[0]!;
+      const healthBeforeOldToken = health.length;
+      if (outcome === 'resolve') resolveToken(tokenResponse());
+      else rejectToken(new Error('old token failed'));
+      await abandonedStart;
+
+      expect(FakeWebSocket.instances).toHaveLength(1);
+      expect(currentSocket.readyState).toBe(FakeWebSocket.OPEN);
+      expect(provider.status).toBe('running');
+      expect(health.slice(healthBeforeOldToken)).toEqual([]);
+      provider.stop();
+      provider.stop();
+    },
+  );
+
+  it.each(['resolve', 'reject'] as const)(
+    'Stop while reconnect token is pending ignores its late %s',
+    async (outcome) => {
+      vi.useFakeTimers();
+      let resolveToken!: (value: Response) => void;
+      let rejectToken!: (reason: Error) => void;
+      const pendingToken = new Promise<Response>((resolve, reject) => {
+        resolveToken = resolve;
+        rejectToken = reject;
+      });
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(tokenResponse())
+        .mockReturnValueOnce(pendingToken);
+      vi.stubGlobal('fetch', fetchMock);
+      const { provider, health } = makeHarness();
+      await provider.start();
+      FakeWebSocket.instances[0]!.close();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+
+      provider.stop();
+      const healthAfterStop = health.length;
+      if (outcome === 'resolve') resolveToken(tokenResponse());
+      else rejectToken(new Error('token request failed after Stop'));
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(FakeWebSocket.instances).toHaveLength(1);
+      expect(health.slice(healthAfterStop)).toEqual([]);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it('a late reconnect token cannot replace the socket of a restarted session', async () => {
+    vi.useFakeTimers();
+    let resolveToken!: (value: Response) => void;
+    const pendingToken = new Promise<Response>((resolve) => {
+      resolveToken = resolve;
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(tokenResponse())
+        .mockReturnValueOnce(pendingToken)
+        .mockResolvedValue(tokenResponse()),
+    );
+    const { provider, transcripts } = makeHarness();
+    await provider.start();
+    FakeWebSocket.instances[0]!.close();
+    await vi.advanceTimersByTimeAsync(1_000);
+    provider.stop();
+    await provider.start();
+    const currentSocket = FakeWebSocket.instances[1]!;
+    resolveToken(tokenResponse());
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    currentSocket.emit({ serverContent: { inputTranscription: { text: 'Current meeting' } } });
+    expect(transcripts.at(-1)?.text).toBe('Current meeting');
+    provider.stop();
+    provider.stop();
+  });
+
+  it('a mic grant after Stop is released without opening a socket', async () => {
+    vi.useFakeTimers();
+    let resolveMic!: (stream: MediaStream) => void;
+    const pendingMic = new Promise<MediaStream>((resolve) => {
+      resolveMic = resolve;
+    });
+    const stopTrack = vi.fn();
+    let granted = false;
+    const source = {
+      acquire: vi.fn(() => pendingMic),
+      release: vi.fn(() => {
+        if (granted) stopTrack();
+      }),
+      analyser: null,
+    } as unknown as AudioSource;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(tokenResponse())),
+    );
+    const h = makeHandlers();
+    const provider = new GeminiLiveProvider('http://localhost/session/gemini', h.handlers, source);
+    const starting = provider.start();
+    await vi.advanceTimersByTimeAsync(1);
+    provider.stop();
+    granted = true;
+    resolveMic({
+      getAudioTracks: () => [],
+      getTracks: () => [{ stop: stopTrack }],
+    } as unknown as MediaStream);
+    await starting;
+    expect(stopTrack).toHaveBeenCalledOnce();
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    expect(provider.status).toBe('stopped');
+  });
+
+  it('restart during a pending mic grant adopts one acquisition without leaking or replacing capture', async () => {
+    vi.useFakeTimers();
+    __resetAudioEngineForTests();
+    let resolveMic!: (stream: MediaStream) => void;
+    const pendingMic = new Promise<MediaStream>((resolve) => {
+      resolveMic = resolve;
+    });
+    const stopTrack = vi.fn();
+    const grantedStream = {
+      getAudioTracks: () => [],
+      getTracks: () => [{ stop: stopTrack }],
+    } as unknown as MediaStream;
+    const unexpectedStream = {
+      getAudioTracks: () => [],
+      getTracks: () => [{ stop: vi.fn() }],
+    } as unknown as MediaStream;
+    const acquire = vi
+      .fn()
+      .mockImplementationOnce(async (onHealth: (event: HealthEvent) => void) => {
+        const stream = await pendingMic;
+        onHealth({ kind: 'health', component: 'audio', state: 'connected', timestamp: '' });
+        return stream;
+      })
+      .mockResolvedValue(unexpectedStream);
+    let granted = false;
+    const release = vi.fn(() => {
+      if (granted) stopTrack();
+    });
+    const source = { acquire, release, analyser: null } as unknown as AudioSource;
+    const createMediaStreamSource = vi.fn(() => ({ connect() {} }));
+    vi.stubGlobal(
+      'AudioContext',
+      class {
+        readonly state = 'running';
+        audioWorklet = { addModule: vi.fn().mockResolvedValue(undefined) };
+        destination = {};
+        createMediaStreamSource = createMediaStreamSource;
+      },
+    );
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(tokenResponse())),
+    );
+    const h = makeHandlers();
+    const provider = new GeminiLiveProvider('http://localhost/session/gemini', h.handlers, source);
+    const oldStart = provider.start();
+    await vi.advanceTimersByTimeAsync(1);
+    provider.stop();
+    const newStart = provider.start();
+    await vi.advanceTimersByTimeAsync(1);
+    granted = true;
+    resolveMic(grantedStream);
+    await Promise.all([oldStart, newStart]);
+
+    expect(acquire).toHaveBeenCalledOnce();
+    expect(createMediaStreamSource).toHaveBeenCalledOnce();
+    expect(createMediaStreamSource).toHaveBeenCalledWith(grantedStream);
+    expect(stopTrack).not.toHaveBeenCalled();
+    expect(provider.status).toBe('running');
+    expect(h.health).toContainEqual(
+      expect.objectContaining({ component: 'audio', state: 'connected' }),
+    );
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    provider.stop();
+    expect(stopTrack).toHaveBeenCalledOnce();
+    provider.stop();
+    __resetAudioEngineForTests();
+  });
+
+  it('Stop during worklet loading does not recreate capture nodes or polling later', async () => {
+    vi.useFakeTimers();
+    __resetAudioEngineForTests();
+    let resolveModule!: () => void;
+    const addModule = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveModule = resolve;
+        }),
+    );
+    const createMediaStreamSource = vi.fn(() => ({ connect() {} }));
+    vi.stubGlobal(
+      'AudioContext',
+      class {
+        readonly state = 'running';
+        audioWorklet = { addModule };
+        destination = {};
+        createMediaStreamSource = createMediaStreamSource;
+      },
+    );
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(tokenResponse())),
+    );
+    const { provider, health } = makeHarness();
+    const starting = provider.start();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(addModule).toHaveBeenCalledOnce();
+    provider.stop();
+    const healthAfterStop = health.length;
+    resolveModule();
+    await starting;
+    await vi.advanceTimersByTimeAsync(3_000);
+
+    expect(createMediaStreamSource).not.toHaveBeenCalled();
+    expect(FakeAudioWorkletNode.instances).toHaveLength(0);
+    expect(health.slice(healthAfterStop)).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+    __resetAudioEngineForTests();
+  });
+
   it('rejects a non-translate Gemini model before opening a socket or audio worklet', async () => {
     vi.stubGlobal(
       'fetch',
@@ -580,6 +1820,7 @@ describe('GeminiLiveProvider — reconnect + wedge detection (#16)', () => {
     expect(provider.status).toBe('stopped');
     expect(FakeWebSocket.instances).toHaveLength(0);
     expect(FakeAudioWorkletNode.instances).toHaveLength(0);
+    expect(recoveryFailureFor('gemini', 'translation')?.kind).toBe('unsupported');
     expect(health).toContainEqual(
       expect.objectContaining({
         component: 'transport',
@@ -587,6 +1828,17 @@ describe('GeminiLiveProvider — reconnect + wedge detection (#16)', () => {
         message: expect.stringMatching(/unsupported Gemini model/i),
       }),
     );
+  });
+
+  it('does not classify capture permission refusal as a cloud failure', async () => {
+    const { handlers, health } = makeHandlers();
+    const mic = makeActiveMic();
+    vi.mocked(mic.acquire).mockRejectedValueOnce(new DOMException('Denied', 'NotAllowedError'));
+    const provider = new GeminiLiveProvider('http://localhost/session/gemini', handlers, mic);
+    await provider.start();
+    expect(recoveryFailureFor('gemini', 'translation')).toBeUndefined();
+    expect(health).toContainEqual(expect.objectContaining({ component: 'audio', state: 'failed' }));
+    expect(provider.status).toBe('stopped');
   });
 
   it('events report the capture that actually ran, not always the microphone', async () => {
@@ -611,6 +1863,78 @@ describe('GeminiLiveProvider — reconnect + wedge detection (#16)', () => {
     expect(h.transcripts.at(-1)!.source).toBe('browser_system');
   });
 
+  it.each(['timeout', 'rejection'] as const)(
+    'a recoverable worklet %s preserves automatic retry eligibility',
+    async (failure) => {
+      vi.useFakeTimers();
+      __resetAudioEngineForTests();
+      let resolveModule!: () => void;
+      const addModule = vi
+        .fn()
+        .mockImplementationOnce(() =>
+          failure === 'timeout'
+            ? new Promise<void>((resolve) => {
+                resolveModule = resolve;
+              })
+            : Promise.reject(new Error('worklet module temporarily unavailable')),
+        )
+        .mockImplementationOnce(() =>
+          failure === 'rejection'
+            ? Promise.reject(new Error('worklet retry unavailable'))
+            : Promise.resolve(),
+        )
+        .mockResolvedValue(undefined);
+      vi.stubGlobal(
+        'AudioContext',
+        class {
+          readonly state = 'running';
+          readonly sampleRate = 16000;
+          audioWorklet = { addModule };
+          destination = {};
+          createMediaStreamSource() {
+            return { connect() {}, disconnect() {} };
+          }
+        },
+      );
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(() => Promise.resolve(tokenResponse())),
+      );
+      const { provider, health } = makeHarness();
+      const starting = provider.start();
+      await vi.advanceTimersByTimeAsync(5_001);
+      await starting;
+      expect(provider.status).toBe('stopped');
+      expect(health.filter((event) => event.component === 'audio').at(-1)?.state).toBe('degraded');
+      expect(recoveryFailureFor('gemini', 'translation')).toBeUndefined();
+      expect(health).not.toContainEqual(
+        expect.objectContaining({ component: 'audio', state: 'failed' }),
+      );
+      expect(health.filter((event) => event.component === 'transport').at(-1)?.state).toBe(
+        'api_error',
+      );
+      if (failure === 'timeout') {
+        resolveModule();
+        await vi.advanceTimersByTimeAsync(1_500);
+      }
+      expect(health.filter((event) => event.component === 'transport').at(-1)).toMatchObject({
+        recoveryFailure: { layer: 'audio', provider: 'gemini', purpose: 'translation' },
+      });
+      // The meeting controller can retry; no new native module load is needed after a late success.
+      await provider.start();
+      expect(provider.status).toBe('running');
+      const ws = FakeWebSocket.instances.at(-1)!;
+      FakeAudioWorkletNode.instances.at(-1)!.port.onmessage?.({
+        data: new Float32Array(512).buffer,
+      } as MessageEvent);
+      expect(ws.sent.some((frame) => JSON.parse(frame).realtimeInput?.audio)).toBe(true);
+      expect(addModule).toHaveBeenCalledTimes(failure === 'timeout' ? 1 : 3);
+      provider.stop();
+      provider.stop();
+      __resetAudioEngineForTests();
+    },
+  );
+
   it('a capture graph that cannot start reports failed, not degraded', async () => {
     // C3. 'degraded' means worse; this is off. With no AudioContext no audio is
     // ever sent, so the session sat there looking connected and captioning
@@ -629,6 +1953,7 @@ describe('GeminiLiveProvider — reconnect + wedge detection (#16)', () => {
     const audio = health.filter((e) => e.component === 'audio');
     expect(audio.at(-1)!.state).toBe('failed');
     expect(audio.at(-1)!.message).toMatch(/cannot capture audio/i);
+    expect(provider.status).toBe('stopped');
 
     provider.stop();
   });
@@ -711,38 +2036,87 @@ describe('GeminiLiveProvider — reconnect + wedge detection (#16)', () => {
     expect(FakeWebSocket.instances).toHaveLength(1);
   });
 
-  it('outage surfaces the failover affordance on a clock, not on the backoff ladder', async () => {
-    // A1. The affordance used to be tied to the attempt counter, whose rungs
-    // fall at 1, 3, 7, 15 and 31 s — so the operator waited 31 s to learn they
-    // could switch. It is now driven by an independent 2 s outage clock.
+  it('a replacement that closes immediately after setup still schedules another attempt', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(tokenResponse())),
+    );
+    const { provider } = makeHarness();
+    await provider.start();
+    wsAutoCloseAfterOpen = true;
+    FakeWebSocket.instances[0]!.close();
+    await vi.advanceTimersByTimeAsync(1_001);
+    wsAutoCloseAfterOpen = false;
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(FakeWebSocket.instances).toHaveLength(3);
+    provider.stop();
+    provider.stop();
+  });
+
+  it('late setup from a timed-out socket cannot restore connected health', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(tokenResponse())),
+    );
+    const { provider, health } = makeHarness();
+    await provider.start();
+    wsEmitSetup = false;
+    FakeWebSocket.instances[0]!.close();
+    await vi.advanceTimersByTimeAsync(1_001);
+    const candidate = FakeWebSocket.instances[1]!;
+    candidate.close = () => {
+      candidate.readyState = 2;
+    };
+    await vi.advanceTimersByTimeAsync(15_000);
+    const count = health.length;
+    candidate.emit({ setupComplete: {} });
+    expect(health.slice(count)).toEqual([]);
+    provider.stop();
+  });
+
+  it('clears failed health when the next retry starts its handshake', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(tokenResponse())
+        .mockResolvedValueOnce(new Response('unavailable', { status: 503 }))
+        .mockReturnValueOnce(new Promise(() => {})),
+    );
+    const { provider, health } = makeHarness();
+    await provider.start();
+    FakeWebSocket.instances[0]!.close();
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(health.filter((event) => event.component === 'transport').at(-1)?.state).toBe('failed');
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(health.filter((event) => event.component === 'transport').at(-1)?.state).toBe(
+      'reconnecting',
+    );
+    provider.stop();
+  });
+
+  it('reports a completed failed attempt, then keeps retrying automatically', async () => {
+    // The previous 2s clock interrupted a still-pending setup handshake.
+    // Failed now means an actual attempt failed, not simply that time elapsed.
     vi.useFakeTimers();
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(tokenResponse())
-      .mockResolvedValue(new Response('upstream gone', { status: 503 }));
+      .mockImplementation(() => Promise.resolve(new Response('upstream gone', { status: 503 })));
     vi.stubGlobal('fetch', fetchMock);
-
     const { provider, health } = makeHarness();
     await provider.start();
-    FakeWebSocket.instances.at(-1)!.close();
-
-    // Just under the budget nothing is offered yet — a brief blip must not
-    // nag the operator to abandon a working backend.
-    await vi.advanceTimersByTimeAsync(1_900);
-    expect(health.some((e) => e.state === 'failed')).toBe(false);
-
-    await vi.advanceTimersByTimeAsync(200);
-    const failed = health.filter((e) => e.component === 'transport' && e.state === 'failed');
-    expect(failed.length).toBeGreaterThan(0);
-    expect(failed.at(-1)!.message).toMatch(/switch backend/);
-
-    // Later rungs must not retract the offer. They still emit health, and if
-    // they reported 'reconnecting' again the banner would blink out from under
-    // the operator's cursor mid-click.
+    FakeWebSocket.instances[0]!.close();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(health.some((event) => event.state === 'failed')).toBe(false);
+    await vi.advanceTimersByTimeAsync(2);
+    expect(health.filter((event) => event.component === 'transport').at(-1)?.state).toBe('failed');
     await vi.advanceTimersByTimeAsync(30_000);
-    expect(health.filter((e) => e.component === 'transport').at(-1)!.state).toBe('failed');
-    expect(provider.status).toBe('running'); // retrying underneath the whole time
-
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(4);
+    expect(provider.status).toBe('running');
     provider.stop();
   });
 
@@ -878,6 +2252,49 @@ describe('GeminiLiveProvider — reconnect + wedge detection (#16)', () => {
 
     provider.stop();
   });
+
+  it('two hours of simulated meeting time rotate repeatedly without extra capture or leftover timers', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(tokenResponse())),
+    );
+    const { provider, health, translations } = makeHarness();
+    await provider.start();
+    let sequence = 0;
+    const speech = setInterval(() => {
+      sequence += 1;
+      FakeWebSocket.instances.at(-1)!.emit({
+        serverContent: {
+          inputTranscription: { text: `Meeting item ${sequence}.` },
+          outputTranscription: { text: `會議項目 ${sequence}。` },
+          turnComplete: true,
+        },
+      });
+      FakeAudioWorkletNode.instances[0]!.port.onmessage?.({
+        data: new Float32Array(512).buffer,
+      } as MessageEvent);
+    }, 10_000);
+    try {
+      for (let rotation = 0; rotation < 24; rotation += 1) {
+        await vi.advanceTimersByTimeAsync(5 * 60_000);
+        FakeWebSocket.instances.at(-1)!.emit({ goAway: { timeLeft: '50s' } });
+      }
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(FakeWebSocket.instances).toHaveLength(25);
+      expect(FakeWebSocket.instances.filter((socket) => socket.readyState === 1)).toHaveLength(1);
+      expect(FakeAudioWorkletNode.instances).toHaveLength(1);
+      expect(translations.filter((event) => event.status === 'final')).toHaveLength(sequence);
+      expect(health.some((event) => event.state === 'failed')).toBe(false);
+      expect(provider.status).toBe('running');
+    } finally {
+      clearInterval(speech);
+      provider.stop();
+      provider.stop();
+    }
+    expect(FakeWebSocket.instances.filter((socket) => socket.readyState === 1)).toHaveLength(0);
+    expect(vi.getTimerCount()).toBe(0);
+  }, 30_000);
 
   it('stop() halts the reconnect ladder (no further sockets / no leaked timers)', async () => {
     vi.useFakeTimers();

@@ -10,7 +10,11 @@ export default [
       '**/node_modules/**',
       'dist/**',
       '**/dist/**',
+      '**/dist-mobile/**',
       'build/**',
+      // Local service snapshots and Python caches are generated artifacts.
+      '.cache/**',
+      '**/.pytest_cache/**',
       // Packaged distribution output (scripts/package-online.*). A gitignored
       // build artifact containing a minified single-file bundle — never source
       // to lint, same as dist/build above.
@@ -25,6 +29,10 @@ export default [
     ],
   },
   js.configs.recommended,
+  {
+    files: ['scripts/*.mjs', 'services/online/build-bundle.mjs', 'tests/architecture/*.mjs'],
+    languageOptions: { globals: globals.node },
+  },
   {
     files: ['**/*.{ts,tsx,mts,cts}'],
     languageOptions: {

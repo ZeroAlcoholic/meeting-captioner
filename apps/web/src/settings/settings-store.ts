@@ -5,6 +5,7 @@ import type {
   HealthEvent,
   HealthState,
 } from '@meeting-audio/contracts';
+import { CaptionTask } from '@meeting-audio/contracts';
 import { createStore, type StoreApi } from 'zustand/vanilla';
 import { IS_ONLINE_ONLY } from '../deployment.js';
 
@@ -99,9 +100,10 @@ const ALL_SCENARIO_OPTIONS: ScenarioOption[] = [
     id: 'hybrid',
     label: 'Hybrid Meeting',
     labelZh: '混合會議',
-    description: 'Remote audio + local mic, kept as separate tracks.',
-    descriptionZh: '遠端音訊 + 本地麥克風，分軌處理。',
-    enabled: true,
+    description: 'Planned: remote audio + local mic as separate tracks. Currently unavailable.',
+    descriptionZh: '規劃支援遠端音訊 + 本地麥克風分軌；目前尚不可用。',
+    enabled: false,
+    hint: '雙軌尚待帳號併發與場域驗收；目前公開使用僅支援單一音源。',
   },
   {
     id: 'advanced',
@@ -141,18 +143,9 @@ const ALL_MODE_OPTIONS: ModeOption[] = [
   },
 ];
 
-// In the online-slim build, offline-dependent modes/scenarios stay in the
-// list but are marked `enabled: false`. The UI greys them out so users see
-// the feature exists ("you'd get this in the full build") but can't select
-// it. Previous behaviour was to filter them out entirely, which made the
-// online-slim UI feel like a stripped-down product instead of a deliberate
-// distribution choice.
-export const SCENARIO_OPTIONS: ScenarioOption[] = ALL_SCENARIO_OPTIONS.map((s) => {
-  if (IS_ONLINE_ONLY && s.id === 'hybrid') {
-    return { ...s, enabled: false, hint: 'Requires offline STT — full build only.' };
-  }
-  return s;
-});
+// Scenario availability follows implemented capture, independently of deployment.
+// Offline-dependent processing modes below additionally require the full build.
+export const SCENARIO_OPTIONS: ScenarioOption[] = ALL_SCENARIO_OPTIONS;
 
 export const MODE_OPTIONS: ModeOption[] = ALL_MODE_OPTIONS.map((m) => {
   if (IS_ONLINE_ONLY && (m.id === 'hybrid_privacy' || m.id === 'full_offline')) {
@@ -163,8 +156,10 @@ export const MODE_OPTIONS: ModeOption[] = ALL_MODE_OPTIONS.map((m) => {
 
 export interface HealthSnapshot {
   state: HealthState;
+  reason?: HealthEvent['reason'];
   message?: string;
   timestamp: string;
+  recoveryFailure?: HealthEvent['recoveryFailure'];
 }
 
 export interface AudioLevelSnapshot {
@@ -193,8 +188,12 @@ function defaultHealth(timestamp: string): Record<HealthComponent, HealthSnapsho
 
 export interface SettingsState {
   scenarioId: ScenarioId;
+  scenarioNotice: string | null;
   modeId: ModeId;
   langPair: LangPair;
+  captionTask: CaptionTask;
+  /** Show invalid/migrated settings or rejected task changes in the launcher. */
+  captionTaskNotice: string | null;
   audioSource: OfflineAudioSource;
   /**
    * When true (default), the server-side /session route adds
@@ -211,10 +210,13 @@ export interface SettingsState {
   transcriptRetentionEnabled: boolean;
   /** See MicDistance docstring. Default 'meeting' (multi-speaker room). */
   micDistance: MicDistance;
+  micDeviceId: string;
   /** Online realtime backend (mode 'online_full'). Default 'openai'. */
   onlineProvider: OnlineProvider;
   health: Record<HealthComponent, HealthSnapshot>;
   audioLevel: AudioLevelSnapshot | null;
+  captureGap: HealthEvent['captureGap'] | null;
+  retentionGap: HealthEvent['retentionGap'] | null;
   /** epoch ms when the current realtime session started; null when not running */
   sessionStartAt: number | null;
   /**
@@ -242,10 +244,12 @@ export interface SettingsState {
   setScenario: (id: ScenarioId) => void;
   setMode: (id: ModeId) => void;
   setLangPair: (id: LangPair) => void;
+  setCaptionTask: (task: CaptionTask) => boolean;
   setAudioSource: (s: OfflineAudioSource) => void;
   setIncludeSourceTranscript: (v: boolean) => void;
   setTranscriptRetentionEnabled: (v: boolean) => void;
   setMicDistance: (v: MicDistance) => void;
+  setMicDeviceId: (v: string) => void;
   setOnlineProvider: (v: OnlineProvider) => void;
   applyHealth: (event: HealthEvent) => void;
   applyAudioLevel: (event: AudioLevelEvent) => void;
@@ -269,25 +273,31 @@ interface PersistedPrefs {
   scenarioId: ScenarioId;
   modeId: ModeId;
   langPair: LangPair;
+  captionTask: CaptionTask;
   audioSource: OfflineAudioSource;
   includeSourceTranscript: boolean;
   transcriptRetentionEnabled?: boolean;
   micDistance: MicDistance;
+  micDeviceId?: string;
   onlineProvider: OnlineProvider;
 }
 const PREFS_KEY = 'meeting-audio:settings:v1';
 const PREFS_VERSION = 1;
 
-function loadPrefs(): Partial<PersistedPrefs> | null {
+const INVALID_TASK_NOTICE = '字幕設定無效，已恢復原翻譯方向或預設值；請確認工作目的後再開始。';
+
+function loadPrefs(): { prefs: Partial<PersistedPrefs> | null; notice: string | null } {
   try {
-    if (typeof localStorage === 'undefined') return null;
+    if (typeof localStorage === 'undefined') return { prefs: null, notice: null };
     const raw = localStorage.getItem(PREFS_KEY);
-    if (!raw) return null;
+    if (!raw) return { prefs: null, notice: null };
     const parsed = JSON.parse(raw) as PersistedPrefs;
-    if (parsed.v !== PREFS_VERSION) return null;
-    return parsed;
+    if (!parsed || typeof parsed !== 'object' || parsed.v !== PREFS_VERSION) {
+      return { prefs: null, notice: INVALID_TASK_NOTICE };
+    }
+    return { prefs: parsed, notice: null };
   } catch {
-    return null;
+    return { prefs: null, notice: INVALID_TASK_NOTICE };
   }
 }
 
@@ -305,7 +315,19 @@ export type SettingsStore = StoreApi<SettingsState>;
 
 export function createSettingsStore(): SettingsStore {
   const initialTimestamp = new Date().toISOString();
-  const hydrated = loadPrefs();
+  const loaded = loadPrefs();
+  const hydrated = loaded.prefs;
+  const legacyPair = hydrated?.langPair;
+  const safePair =
+    legacyPair === 'en→zh-TW' || legacyPair === 'zh-TW→en' ? legacyPair : DEFAULT_LANG_PAIR;
+  const parsedTask = CaptionTask.safeParse(hydrated?.captionTask);
+  const captionTask: CaptionTask = parsedTask.success
+    ? parsedTask.data
+    : { purpose: 'translation', langPair: safePair };
+  const invalidTask = Boolean(hydrated && 'captionTask' in hydrated && !parsedTask.success);
+  const invalidPair = legacyPair !== undefined && legacyPair !== safePair;
+  const captionTaskNotice =
+    loaded.notice ?? (invalidTask || invalidPair ? INVALID_TASK_NOTICE : null);
   // If a previous full-build session left an offline mode persisted but the
   // current build is online-only, fall back to defaults — otherwise the user
   // would land on a disabled (greyed-out) selection they couldn't easily fix.
@@ -313,42 +335,104 @@ export function createSettingsStore(): SettingsStore {
     Boolean(id && list.find((o) => o.id === id)?.enabled);
   const safeScenario = isEnabled(SCENARIO_OPTIONS, hydrated?.scenarioId)
     ? hydrated!.scenarioId!
-    : DEFAULT_SCENARIO;
+    : hydrated?.audioSource === 'system'
+      ? 'online_meeting_box'
+      : DEFAULT_SCENARIO;
+  const previousScenario = SCENARIO_OPTIONS.find((s) => s.id === hydrated?.scenarioId);
+  const scenarioNotice =
+    previousScenario && !previousScenario.enabled
+      ? `${previousScenario.labelZh}不可用：${previousScenario.hint} 已保留原單一音源，請確認場景後再開始。`
+      : null;
   const safeMode = isEnabled(MODE_OPTIONS, hydrated?.modeId) ? hydrated!.modeId! : DEFAULT_MODE;
-  const store = createStore<SettingsState>((set) => ({
+  const store = createStore<SettingsState>((set, get) => ({
     scenarioId: safeScenario,
+    scenarioNotice,
     modeId: safeMode,
-    langPair: hydrated?.langPair ?? DEFAULT_LANG_PAIR,
+    langPair: captionTask.purpose === 'translation' ? captionTask.langPair : safePair,
+    captionTask,
+    captionTaskNotice,
     audioSource: hydrated?.audioSource ?? 'mic',
     includeSourceTranscript: hydrated?.includeSourceTranscript ?? true,
     transcriptRetentionEnabled: hydrated?.transcriptRetentionEnabled ?? false,
     micDistance: hydrated?.micDistance ?? 'meeting',
+    micDeviceId: typeof hydrated?.micDeviceId === 'string' ? hydrated.micDeviceId : '',
     onlineProvider: hydrated?.onlineProvider ?? 'openai',
     health: defaultHealth(initialTimestamp),
     audioLevel: null,
+    captureGap: null,
+    retentionGap: null,
     sessionStartAt: null,
     translateMinutesAccum: 0,
     whisperMinutesAccum: 0,
     activeSessionBilingual: null,
 
-    setScenario: (id) =>
+    setScenario: (id) => {
+      const option = SCENARIO_OPTIONS.find((s) => s.id === id);
+      if (!option?.enabled) {
+        set({ scenarioNotice: option?.hint ?? '此場景不可用，已保留目前音源。' });
+        return;
+      }
       set({
         scenarioId: id,
+        scenarioNotice: null,
         audioSource: id === 'online_meeting_box' ? 'system' : 'mic',
-      }),
+      });
+    },
     setMode: (id) => set({ modeId: id }),
-    setLangPair: (id) => set({ langPair: id }),
+    setLangPair: (id) =>
+      set((state) => ({
+        langPair: id,
+        captionTask:
+          state.captionTask.purpose === 'translation'
+            ? { purpose: 'translation', langPair: id }
+            : state.captionTask,
+      })),
+    setCaptionTask: (task) => {
+      if (get().sessionStartAt !== null) {
+        set({ captionTaskNotice: '會議進行中無法變更字幕工作目的，請先停止會議。' });
+        return false;
+      }
+      const parsed = CaptionTask.safeParse(task);
+      if (!parsed.success) {
+        set({ captionTaskNotice: '字幕設定無效，已保留目前工作目的。' });
+        return false;
+      }
+      set({
+        captionTask: parsed.data,
+        captionTaskNotice: null,
+        ...(parsed.data.purpose === 'translation' ? { langPair: parsed.data.langPair } : {}),
+      });
+      return true;
+    },
     setAudioSource: (audioSource) => set({ audioSource }),
     setIncludeSourceTranscript: (v) => set({ includeSourceTranscript: v }),
     setTranscriptRetentionEnabled: (v) => set({ transcriptRetentionEnabled: v }),
     setMicDistance: (v) => set({ micDistance: v }),
+    setMicDeviceId: (v) => {
+      if (get().sessionStartAt === null) set({ micDeviceId: v });
+    },
     setOnlineProvider: (v) => set({ onlineProvider: v }),
 
     applyHealth: (event) =>
       set((state) => {
+        const previous = state.health[event.component];
+        if (
+          event.component === 'audio' &&
+          previous.reason &&
+          previous.reason !== 'capture_resumed' &&
+          !event.reason &&
+          (event.state === 'connected' || event.state === 'silence_detected')
+        )
+          return event.retentionGap ? { retentionGap: event.retentionGap } : state;
         const snapshot: HealthSnapshot = { state: event.state, timestamp: event.timestamp };
+        if (event.reason !== undefined) snapshot.reason = event.reason;
         if (event.message !== undefined) snapshot.message = event.message;
-        return { health: { ...state.health, [event.component]: snapshot } };
+        if (event.recoveryFailure !== undefined) snapshot.recoveryFailure = event.recoveryFailure;
+        return {
+          health: { ...state.health, [event.component]: snapshot },
+          ...(event.captureGap ? { captureGap: event.captureGap } : {}),
+          ...(event.retentionGap ? { retentionGap: event.retentionGap } : {}),
+        };
       }),
 
     applyAudioLevel: (event) =>
@@ -363,6 +447,8 @@ export function createSettingsStore(): SettingsStore {
 
     startSession: () =>
       set((state) => ({
+        captureGap: null,
+        retentionGap: null,
         sessionStartAt: Date.now(),
         // Snapshot the bilingual mode at session start so the pricing
         // panel uses the rate the session is actually billed at, even if
@@ -394,15 +480,21 @@ export function createSettingsStore(): SettingsStore {
     reset: () =>
       set({
         scenarioId: DEFAULT_SCENARIO,
+        scenarioNotice: null,
         modeId: DEFAULT_MODE,
         langPair: DEFAULT_LANG_PAIR,
+        captionTask: { purpose: 'translation', langPair: DEFAULT_LANG_PAIR },
+        captionTaskNotice: null,
         audioSource: 'mic',
         includeSourceTranscript: true,
         transcriptRetentionEnabled: false,
         micDistance: 'meeting',
+        micDeviceId: '',
         onlineProvider: 'openai',
         health: defaultHealth(new Date().toISOString()),
         audioLevel: null,
+        captureGap: null,
+        retentionGap: null,
         sessionStartAt: null,
         translateMinutesAccum: 0,
         whisperMinutesAccum: 0,
@@ -420,10 +512,12 @@ export function createSettingsStore(): SettingsStore {
         scenarioId: state.scenarioId,
         modeId: state.modeId,
         langPair: state.langPair,
+        captionTask: state.captionTask,
         audioSource: state.audioSource,
         includeSourceTranscript: state.includeSourceTranscript,
         transcriptRetentionEnabled: state.transcriptRetentionEnabled,
         micDistance: state.micDistance,
+        micDeviceId: state.micDeviceId,
         onlineProvider: state.onlineProvider,
       };
       const snap = JSON.stringify(prefs);

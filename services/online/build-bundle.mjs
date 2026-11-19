@@ -19,25 +19,45 @@ import { dirname, resolve } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(resolve(here, 'package.json'), 'utf8'));
+const managedIndex = process.argv.indexOf('--managed-output');
+const managedOutput = managedIndex >= 0 ? process.argv[managedIndex + 1] : undefined;
+if (managedIndex >= 0 && !managedOutput) throw new Error('--managed-output requires a path');
 
+const workerOutput = resolve(
+  dirname(managedOutput ?? resolve(here, 'dist/server.bundle.cjs')),
+  'meeting-writer.worker.cjs',
+);
 await build({
-  entryPoints: ['src/server.ts'],
-  outfile: 'dist/server.bundle.cjs',
+  entryPoints: ['src/storage/meeting-writer.worker.ts'],
+  outfile: workerOutput,
   bundle: true,
   platform: 'node',
   format: 'cjs',
   target: 'node22',
   minify: true,
-  sourcemap: false,
-  // Pin compile-time constants so the bundle never reaches for them at
-  // runtime via import.meta / package.json reads (both broken in CJS bundles).
-  define: {
-    __APP_VERSION__: JSON.stringify(pkg.version ?? '0.0.0'),
-    __SERVER_BUNDLED__: 'true',
-  },
-  // Stub pino-pretty so it cannot be loaded even if a transport ref slips
-  // through. The release sets LOG_FORMAT=json which avoids the code path
-  // entirely; this is belt-and-suspenders.
-  external: ['pino-pretty'],
   logLevel: 'info',
 });
+
+if (!process.argv.includes('--worker-only'))
+  await build({
+    entryPoints: ['src/server.ts'],
+    outfile: managedOutput ?? 'dist/server.bundle.cjs',
+    bundle: true,
+    platform: 'node',
+    format: 'cjs',
+    target: 'node22',
+    minify: true,
+    sourcemap: false,
+    // Pin compile-time constants so the bundle never reaches for them at
+    // runtime via import.meta / package.json reads (both broken in CJS bundles).
+    define: {
+      __APP_VERSION__: JSON.stringify(pkg.version ?? '0.0.0'),
+      __SERVER_BUNDLED__: managedOutput ? 'false' : 'true',
+      __ARCHIVE_WORKER_PATH__: '"meeting-writer.worker.cjs"',
+    },
+    // Stub pino-pretty so it cannot be loaded even if a transport ref slips
+    // through. The release sets LOG_FORMAT=json which avoids the code path
+    // entirely; this is belt-and-suspenders.
+    external: ['pino-pretty'],
+    logLevel: 'info',
+  });

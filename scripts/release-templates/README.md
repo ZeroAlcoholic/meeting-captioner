@@ -1,7 +1,7 @@
 # meeting-audio (online distribution)
 
 Live caption + Traditional Chinese translation for meetings, powered by
-OpenAI Realtime. This is the **online-only** slim build — no offline STT,
+OpenAI Realtime Translation or Gemini Live Translate. This is the **online-only** slim build — no offline STT,
 no model files, no Python dependencies.
 
 ## What's in this folder
@@ -23,12 +23,24 @@ meeting-audio-online/
 ## Requirements
 
 - **Node.js 22 or newer** — <https://nodejs.org>
-- An **OpenAI API key** with access to the Realtime translation API
+- At least one configured key: `OPENAI_API_KEY`, `OPENAI_API_KEY_AUDIO`, or
+  `GEMINI_API_KEY`, with access to its dedicated live translation model
 - Microphone permission in your browser (Chrome / Edge recommended)
 
 ## Setup
 
 ### 1. Set `OPENAI_API_KEY` in your environment (one-time)
+
+The examples below use the primary OpenAI key. Substitute `GEMINI_API_KEY` for a
+Gemini-only environment, or `OPENAI_API_KEY_AUDIO` for an alternate-key-only
+OpenAI environment. Both launchers accept all three options. Configure both
+providers to enable cross-provider failover.
+
+OpenAI prefers `OPENAI_API_KEY`. Confirmed permission failures can use
+`OPENAI_API_KEY_AUDIO`; ordinary network failures do not change accounts.
+The server reads the environment once at startup. After changing keys, restart
+the service from a terminal that has the updated variables. Existing terminals
+keep their old inherited environment; a successful `setx` does not update them.
 
 **Windows — persistent** (recommended; survives reboots, applies to every
 new terminal and to Explorer double-clicks):
@@ -38,7 +50,8 @@ setx OPENAI_API_KEY "sk-proj-..."
 ```
 
 Then **close that window** and open a new one (or just double-click
-`start.bat` afterwards — Explorer-launched processes inherit `setx` values).
+`start.bat` from a newly opened terminal). If Explorer still has an old
+environment, sign out and back in before using a double-click launch.
 
 **Windows — session only** (useful for ad-hoc testing):
 

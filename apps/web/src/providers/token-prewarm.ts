@@ -15,7 +15,7 @@
 export class WarmTokenCache<T> {
   private entry: { value: T; mintedAt: number; key: string; expiresAtMs: number | null } | null =
     null;
-  private inFlight = false;
+  private inFlight: AbortController | null = null;
 
   constructor(
     /** Max age of a pre-minted token before it's considered stale. */
@@ -44,7 +44,7 @@ export class WarmTokenCache<T> {
    */
   async prewarm(
     key: string,
-    mint: () => Promise<T>,
+    mint: (signal: AbortSignal) => Promise<T>,
     expiresAtMs: (value: T) => number | null,
     refreshIfOlderThanMs?: number,
   ): Promise<void> {
@@ -55,14 +55,16 @@ export class WarmTokenCache<T> {
       this.entry !== null &&
       nowMs - this.entry.mintedAt >= refreshIfOlderThanMs;
     if (this.entry && this.entry.key === key && this.isFresh(this.entry, nowMs) && !aged) return;
-    this.inFlight = true;
+    const request = new AbortController();
+    this.inFlight = request;
     try {
-      const value = await mint();
-      this.entry = { value, mintedAt: this.now(), key, expiresAtMs: expiresAtMs(value) };
+      const value = await mint(request.signal);
+      if (this.inFlight !== request || request.signal.aborted) return;
+      this.entry = { value, mintedAt: nowMs, key, expiresAtMs: expiresAtMs(value) };
     } catch {
       /* pre-mint is best-effort */
     } finally {
-      this.inFlight = false;
+      if (this.inFlight === request) this.inFlight = null;
     }
   }
 
@@ -87,5 +89,8 @@ export class WarmTokenCache<T> {
 
   clear(): void {
     this.entry = null;
+    const pending = this.inFlight;
+    this.inFlight = null;
+    pending?.abort();
   }
 }

@@ -112,3 +112,49 @@ describe('WarmTokenCache', () => {
     expect(mint).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('WarmTokenCache cancellation', () => {
+  it('clear aborts the pending mint and prevents its late result from refilling the cache', async () => {
+    const cache = new WarmTokenCache<string>();
+    let resolveMint!: (value: string) => void;
+    let signal!: AbortSignal;
+    const pending = cache.prewarm(
+      'k',
+      (input) => {
+        signal = input;
+        return new Promise<string>((resolve) => {
+          resolveMint = resolve;
+        });
+      },
+      () => null,
+    );
+    cache.clear();
+    expect(signal?.aborted).toBe(true);
+    resolveMint('old');
+    await pending;
+    expect(cache.consume('k')).toBeNull();
+  });
+
+  it('clear lets a new mint proceed even if the old request ignores cancellation', async () => {
+    const cache = new WarmTokenCache<string>();
+    let resolveOld!: (value: string) => void;
+    const old = cache.prewarm(
+      'old',
+      () =>
+        new Promise<string>((resolve) => {
+          resolveOld = resolve;
+        }),
+      () => null,
+    );
+    cache.clear();
+    await cache.prewarm(
+      'new',
+      async () => 'current',
+      () => null,
+    );
+    resolveOld('stale');
+    await old;
+    expect(cache.consume('new')).toBe('current');
+    expect(cache.consume('old')).toBeNull();
+  });
+});

@@ -6,7 +6,8 @@ real CTranslate2 model is never required at test time.
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -16,6 +17,31 @@ from app.pipeline.postprocess import (
     restore_placeholders,
 )
 from app.pipeline.translation import translate
+
+
+@pytest.mark.parametrize("direction", ["en", "zh"])
+def test_marian_source_includes_eos_after_sentencepiece_encoding(direction):
+    """Transformers-converted Marian models do not append source EOS in CT2."""
+    from app.pipeline import translation as mt
+
+    source_sp = Mock()
+    source_sp.EncodeAsPieces.return_value = ["▁meeting", "."]
+    target_sp = Mock()
+    target_sp.DecodePieces.return_value = "translated"
+    translator = Mock()
+    translator.translate_batch.return_value = [SimpleNamespace(hypotheses=[["translated"]])]
+    with (
+        patch.dict(mt._translators, {direction: translator}, clear=True),
+        patch.dict(mt._src_sps, {direction: source_sp}, clear=True),
+        patch.dict(mt._tgt_sps, {direction: target_sp}, clear=True),
+    ):
+        assert mt._translate_sync("meeting.", direction) == "translated"
+
+    source_tokens = translator.translate_batch.call_args.args[0][0]
+    assert source_tokens[-1] == "</s>"
+    assert source_tokens.count("</s>") == 1
+    expected_prefix = [">>cmn_Hant<<"] if direction == "en" else []
+    assert source_tokens[:-1] == expected_prefix + ["▁meeting", "."]
 
 # ── postprocess ───────────────────────────────────────────────────────────────
 

@@ -5,6 +5,7 @@ import {
   getCaptureContext,
   prewarmCapture,
   resumeCaptureContext,
+  resumeAudioContext,
 } from './audio-engine.js';
 
 // NOTE: the global beforeEach in test-setup already resets the engine; we also
@@ -49,6 +50,7 @@ describe('audio-engine', () => {
     installFakeAudioContext();
   });
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     __resetAudioEngineForTests();
   });
@@ -115,5 +117,151 @@ describe('audio-engine', () => {
     vi.stubGlobal('webkitAudioContext', undefined);
     __resetAudioEngineForTests();
     expect(getCaptureContext()).toBeNull();
+  });
+  it('automatically retries one rejected module load and shares the recovered result', async () => {
+    addModule.mockRejectedValueOnce(new Error('temporary module download failure'));
+    const ctx = getCaptureContext()!;
+    await Promise.all([ensureCaptureWorklet(ctx), ensureCaptureWorklet(ctx)]);
+    expect(addModule).toHaveBeenCalledTimes(2);
+    await ensureCaptureWorklet(ctx);
+    expect(addModule).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not poison later attempts after both module loads fail', async () => {
+    addModule
+      .mockRejectedValueOnce(new Error('first failure'))
+      .mockRejectedValueOnce(new Error('second failure'));
+    const ctx = getCaptureContext()!;
+    await expect(ensureCaptureWorklet(ctx)).rejects.toThrow('second failure');
+    await expect(ensureCaptureWorklet(ctx)).resolves.toBeUndefined();
+    expect(addModule).toHaveBeenCalledTimes(3);
+  });
+
+  it('bounds a hung module wait without starting a duplicate native registration', async () => {
+    vi.useFakeTimers();
+    let finish!: () => void;
+    addModule.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const ctx = getCaptureContext()!;
+    let failure: unknown;
+    void ensureCaptureWorklet(ctx).catch((error) => {
+      failure = error;
+    });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toMatch(/timed out/i);
+    const second = ensureCaptureWorklet(ctx);
+    expect(addModule).toHaveBeenCalledTimes(1);
+    finish();
+    await expect(second).resolves.toBeUndefined();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('cancels one module waiter without cancelling another owner or closing the context', async () => {
+    let finish!: () => void;
+    addModule.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const ctx = getCaptureContext()!;
+    const owner = new AbortController();
+    let failure: unknown;
+    void ensureCaptureWorklet(ctx, owner.signal).catch((error) => {
+      failure = error;
+    });
+    const second = ensureCaptureWorklet(ctx);
+    owner.abort(new Error('owner cancelled'));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect((failure as Error | undefined)?.message).toBe('owner cancelled');
+    finish();
+    await second;
+    expect(addModule).toHaveBeenCalledTimes(1);
+    expect(ctx.state).not.toBe('closed');
+  });
+
+  it('does not start native work for an already cancelled caller', async () => {
+    const owner = new AbortController();
+    owner.abort(new Error('cancelled'));
+    await expect(ensureCaptureWorklet(getCaptureContext()!, owner.signal)).rejects.toThrow(
+      'cancelled',
+    );
+    await expect(resumeCaptureContext(owner.signal)).rejects.toThrow('cancelled');
+    expect(addModule).not.toHaveBeenCalled();
+    expect(resume).not.toHaveBeenCalled();
+  });
+
+  it('reports an unavailable worklet instead of caching unsupported capture as success', async () => {
+    const ctx = getCaptureContext()!;
+    Object.defineProperty(ctx, 'audioWorklet', { value: undefined });
+    await expect(ensureCaptureWorklet(ctx)).rejects.toThrow(/AudioWorklet unavailable/);
+  });
+
+  it('propagates resume failure and permits a later gesture to retry', async () => {
+    resume.mockRejectedValueOnce(new Error('autoplay denied'));
+    await expect(resumeCaptureContext()).rejects.toThrow('autoplay denied');
+    await expect(resumeCaptureContext()).resolves.toBeUndefined();
+    expect(resume).toHaveBeenCalledTimes(2);
+  });
+
+  it('bounds a hung resume and shares the still-pending native resume on retry', async () => {
+    vi.useFakeTimers();
+    let finish!: () => void;
+    resume.mockImplementation(function (this: { state: string }) {
+      return new Promise<void>((resolve) => {
+        finish = () => {
+          this.state = 'running';
+          resolve();
+        };
+      });
+    });
+    let failure: unknown;
+    void resumeCaptureContext().catch((error) => {
+      failure = error;
+    });
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toMatch(/timed out/i);
+    const second = resumeCaptureContext();
+    expect(resume).toHaveBeenCalledTimes(1);
+    finish();
+    await second;
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('does not call a suspended context successfully resumed unless it is running', async () => {
+    resume.mockResolvedValue(undefined);
+    await expect(resumeCaptureContext()).rejects.toThrow(/not running/);
+  });
+  it('resumes a private display context without touching the shared capture context', async () => {
+    const shared = getCaptureContext()!;
+    const display = new AudioContext();
+    await resumeAudioContext(display);
+    expect(resume).toHaveBeenCalledTimes(1);
+    expect(resume.mock.contexts[0]).toBe(display);
+    expect(display.state).toBe('running');
+    expect(shared.state).toBe('suspended');
+  });
+
+  it('uses a fresh local module URL after failures without changing a loaded context', async () => {
+    addModule
+      .mockRejectedValueOnce(new Error('HTTP 503 cached by browser module map'))
+      .mockRejectedValueOnce(new Error('HTTP 503 still unavailable'));
+    const ctx = getCaptureContext()!;
+    await expect(ensureCaptureWorklet(ctx)).rejects.toThrow('HTTP 503 still unavailable');
+    await ensureCaptureWorklet(ctx);
+    await ensureCaptureWorklet(ctx);
+    expect(addModule.mock.calls.map((call) => call[0])).toEqual([
+      '/pcm-worklet.js',
+      '/pcm-worklet.js?attempt=1',
+      '/pcm-worklet.js?attempt=2',
+    ]);
+    expect(getCaptureContext()).toBe(ctx);
+    expect(constructed).toBe(1);
   });
 });

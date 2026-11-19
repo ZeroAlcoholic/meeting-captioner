@@ -1,26 +1,30 @@
 import { fileURLToPath, URL } from 'node:url';
 import react from '@vitejs/plugin-react';
-import { defineConfig, loadEnv } from 'vite';
+import { defineConfig, loadEnv, type ConfigEnv, type Plugin } from 'vite';
+import { localVadAssets } from './vad-assets.js';
 
-// Build-time alias swap so the offline path is fully tree-shaken from the
-// online-slim distribution. The barrel `src/providers/use-offline-stt.ts`
-// resolves to either the real module or a tiny stub based on
-// VITE_DEPLOYMENT_MODE.
-//
-// Why an alias instead of a runtime branch: static `import` statements are
-// hoisted regardless of which branch consumes them, so a runtime check
-// cannot eliminate the offline module from the bundle. Aliasing rewrites
-// the resolved path before the bundler ever sees the offline source.
+// Match the two capability aliases in tsconfig.app/online.json. A runtime
+// branch cannot isolate static imports or their module-loading side effects.
 
-export default defineConfig(({ mode }) => {
+export function createWebConfig({ mode }: ConfigEnv, onlineOnly = false) {
   const env = loadEnv(mode, process.cwd(), '');
-  const deploymentMode = (env.VITE_DEPLOYMENT_MODE ?? 'full').toLowerCase();
-  const isOnline = deploymentMode === 'online';
+  const isOnline = onlineOnly || (env.VITE_DEPLOYMENT_MODE ?? 'full').toLowerCase() === 'online';
 
   const resolve = (rel: string) => fileURLToPath(new URL(rel, import.meta.url));
 
   return {
-    plugins: [react()],
+    plugins: [
+      react(),
+      localVadAssets(),
+      {
+        name: 'online-local-boundary',
+        load(id: string) {
+          if (isOnline && /\/src\/providers\/(offline|hybrid)\//.test(id.replaceAll('\\', '/'))) {
+            this.error(`Online deployment cannot import local implementation: ${id}`);
+          }
+        },
+      } satisfies Plugin,
+    ],
     define: {
       __DEPLOYMENT_MODE__: JSON.stringify(isOnline ? 'online' : 'full'),
     },
@@ -29,8 +33,14 @@ export default defineConfig(({ mode }) => {
         {
           find: '@meeting-audio/offline-stt',
           replacement: isOnline
-            ? resolve('./src/providers/use-offline-stt.stub.ts')
-            : resolve('./src/providers/use-offline-stt.real.ts'),
+            ? resolve('./src/providers/local-mode-unavailable.ts')
+            : resolve('./src/providers/offline/use-offline-stt.ts'),
+        },
+        {
+          find: '@meeting-audio/hybrid',
+          replacement: isOnline
+            ? resolve('./src/providers/local-mode-unavailable.ts')
+            : resolve('./src/providers/hybrid/use-hybrid-mode.ts'),
         },
       ],
     },
@@ -39,8 +49,13 @@ export default defineConfig(({ mode }) => {
       strictPort: true,
     },
     test: {
+      // Keep discovery inside the source tree; unrelated Python caches may be
+      // unreadable on Windows and must not prevent the JS suite from starting.
+      include: ['src/**/*.test.{ts,tsx}'],
       // Reset the shared audio-engine cache before every test (see test-setup).
       setupFiles: ['./src/test-setup.ts'],
     },
   };
-});
+}
+
+export default defineConfig((env) => createWebConfig(env));

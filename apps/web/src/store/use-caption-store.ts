@@ -4,6 +4,7 @@ import { createCaptionStore, type CaptionState, type CaptionStore } from './capt
 
 export const captionStore: CaptionStore = createCaptionStore({
   persistenceEnabled: settingsStore.getState().transcriptRetentionEnabled,
+  captionTask: settingsStore.getState().captionTask,
 });
 
 settingsStore.subscribe((state, previous) => {

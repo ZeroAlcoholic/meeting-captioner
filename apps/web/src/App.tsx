@@ -1,6 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { applyCaptureHealth } from './providers/coalesce-handlers.js';
+import type { TranscriptEvent, TranslationEvent } from '@meeting-audio/contracts';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { CaptionBoard } from './caption-board/CaptionBoard.js';
 import { SettingsPanel } from './components/SettingsPanel.js';
+import { BackupControls } from './components/BackupControls.js';
 import { RealtimePricingPanel } from './components/RealtimePricingPanel.js';
 import { GeminiPricingPanel } from './components/GeminiPricingPanel.js';
 import { MicLevelBar } from './components/MicLevelBar.js';
@@ -17,18 +20,31 @@ import {
 } from './components/SessionLauncher.js';
 import { ErrorBoundary } from './components/ErrorBoundary.js';
 import { computeFailover } from './providers/failover.js';
+import { MeetingRecovery, type RecoverySnapshot } from './providers/meeting-recovery.js';
+import { recoveryFailureFor, clearRecoveryRefusal } from './providers/recovery-attempt.js';
 import { fieldTestRecorder } from './providers/field-test-recorder.js';
 import { prewarmCapture } from './providers/audio-engine.js';
-import { armCaptureHandoff } from './providers/capture-lease.js';
+import {
+  armCaptureHandoff,
+  retainCaptureForRecovery,
+  releaseCaptureRecovery,
+} from './providers/capture-lease.js';
 import { useOpenAIRealtime } from './providers/use-openai-realtime.js';
 import { useGeminiLive } from './providers/use-gemini-live.js';
-import { useOfflineSTT } from './providers/use-offline-stt.js';
-import { useHybridMode } from './providers/use-hybrid-mode.js';
+import { useOfflineSTT } from '@meeting-audio/offline-stt';
+import { useHybridMode } from '@meeting-audio/hybrid';
 import { useFakeReplay } from './providers/use-fake-replay.js';
-import { useSettingsStore } from './settings/use-settings-store.js';
+import { settingsStore, useSettingsStore } from './settings/use-settings-store.js';
 import { captionStore, useCaptionStore } from './store/use-caption-store.js';
-import type { SessionMode } from './store/caption-store.js';
+import { resumeCaptionSession, type SessionMode } from './store/caption-store.js';
 import { IS_ONLINE_ONLY } from './deployment.js';
+import { PureCaptionWorkspace } from './components/PureCaptionWorkspace.js';
+import { meetingArchive } from './store/meeting-archive.js';
+import { MeetingPreflight } from './components/MeetingPreflight.js';
+import {
+  RemoteTranslationTrack,
+  type RemoteTranslationHandle,
+} from './components/RemoteTranslationTrack.js';
 
 // Human-readable backend names, shared by the auto-switch notice and the manual
 // banner so the two can never disagree about what switched to what. Module
@@ -43,14 +59,162 @@ const LABEL_OF: Record<'openai' | 'gemini', string> = { openai: 'OpenAI', gemini
  */
 const STANDBY_TOKEN_REFRESH_MS = 30_000;
 
-/**
- * Minimum spacing between automatic handoffs. One failure is something the app
- * can route around; two in a row means both backends are unhappy, and bouncing
- * the meeting between them helps nobody. After this the operator decides.
- */
-const AUTO_HANDOFF_COOLDOWN_MS = 30_000;
-
 export function App() {
+  useEffect(() => {
+    window.addEventListener('beforeunload', meetingArchive.beforeUnload);
+    return () => window.removeEventListener('beforeunload', meetingArchive.beforeUnload);
+  }, []);
+  const [preflightActive, setPreflightActive] = useState(false);
+  const task = useSettingsStore((s) => s.captionTask);
+  const notice = useSettingsStore((s) => s.captionTaskNotice);
+  const scenarioNotice = useSettingsStore((s) => s.scenarioNotice);
+  const started = useSettingsStore((s) => s.sessionStartAt);
+  const phase = useCaptionStore((s) => s.sessionPhase);
+  const restored = useCaptionStore((s) => s.restoredFromStorage);
+  const locked = started !== null || (!restored && (phase === 'running' || phase === 'paused'));
+  return (
+    <div className="meeting-frame">
+      <MeetingPreflight disabled={locked} onActive={setPreflightActive} />
+      <fieldset disabled={preflightActive} className="meeting-workspace">
+        <nav className="purpose-switch" aria-label="字幕工作目的">
+          <span>工作目的</span>
+          <button
+            disabled={locked}
+            aria-pressed={task.purpose === 'translation'}
+            onClick={() =>
+              settingsStore.getState().setCaptionTask({
+                purpose: 'translation',
+                langPair: settingsStore.getState().langPair,
+              })
+            }
+          >
+            即時翻譯
+          </button>
+          <button
+            disabled={locked}
+            aria-pressed={task.purpose === 'transcription'}
+            onClick={() => {
+              const s = settingsStore.getState();
+              s.setMode('online_full');
+              s.setCaptionTask({
+                purpose: 'transcription',
+                inputLanguages: ['zh-tw', 'en'],
+                textPolicy: 'zh-TW-preserve-original',
+              });
+            }}
+          >
+            純字幕（繁中＋原文）
+          </button>
+          {locked && <small>停止此場收音後可切換工作目的</small>}
+          {notice && <span role="status">{notice}</span>}
+        </nav>
+        {scenarioNotice && <p role="status">{scenarioNotice}</p>}
+        <BackupControls />
+        {task.purpose === 'transcription' ? <PureCaptionWorkspace /> : <TranslationApp />}
+      </fieldset>
+    </div>
+  );
+}
+
+function TranslationArchiveStatus() {
+  const sessionId = useCaptionStore((s) => s.sessionId);
+  const phase = useCaptionStore((s) => s.sessionPhase);
+  const [retrying, setRetrying] = useState(false);
+  const [retryError, setRetryError] = useState<string | null>(null);
+  const status = useSyncExternalStore(
+    meetingArchive.subscribe,
+    meetingArchive.getStatus,
+    meetingArchive.getStatus,
+  );
+  if (!sessionId || (status.meetingId !== sessionId && status.state !== 'read_only')) return null;
+  return (
+    <section aria-label="翻譯保存狀態" data-testid="translation-persistence-status">
+      {status.state === 'read_only' && status.error !== 'archive_generation_changed' && (
+        <button
+          disabled={retrying}
+          onClick={() => {
+            setRetrying(true);
+            setRetryError(null);
+            void meetingArchive
+              .retryWriterOwnership()
+              .catch(() =>
+                setRetryError('另一個分頁仍持有寫入權限。關閉該分頁後，請等 15 秒再重試。'),
+              )
+              .finally(() => setRetrying(false));
+          }}
+        >
+          重新檢查寫入權限
+        </button>
+      )}
+      <span role="status">
+        {status.state === 'read_only'
+          ? status.error === 'archive_generation_changed'
+            ? '本機資料已還原，舊內容暫停寫入'
+            : '此分頁沒有寫入權限'
+          : status.error
+            ? '保存異常，資料尚未全部確認'
+            : status.finalizing
+              ? '收音已停止，正在結案'
+              : status.pendingCount
+                ? '正在保存'
+                : status.manifest?.saved
+                  ? '已保存並結案'
+                  : status.lastSavedAt
+                    ? '已自動保存，尚未結案'
+                    : '等待逐字稿'}{' '}
+        · 待保存 {status.pendingCount} 筆
+      </span>
+      {status.lostCount > 0 && <p role="alert">有 {status.lostCount} 筆未能保留，逐字稿不完整。</p>}
+      {!!status.manifest?.gaps.length && (
+        <p role="status" data-testid="archive-gap-notice">
+          有 {status.manifest.gaps.length} 筆已知缺口；字幕完整性仍待核對。
+        </p>
+      )}
+      {status.memoryBytes > 0 ? (
+        <p role="alert">尚有內容僅在記憶體中，關閉或重新整理分頁可能遺失。請先恢復本機保存。</p>
+      ) : status.pendingCount > 0 ? (
+        <p>內容已暫存於此瀏覽器，尚待本機服務確認保存。</p>
+      ) : null}
+      {status.exportFailure && <p role="alert">匯出副本更新失敗，請重試保存後再匯出。</p>}
+      {status.error === 'archive_generation_changed' && (
+        <p role="alert">舊待存內容仍保留。請保留此分頁，勿清除瀏覽器資料；待核對後再恢復保存。</p>
+      )}
+      {status.retryBlocked && status.error !== 'archive_generation_changed' && (
+        <p role="alert">
+          本機服務拒絕保存資料，已暫停自動重送；待存逐字稿仍保留。請更新或修復本機服務後，停止收音並按「重試保存／結案」。
+        </p>
+      )}
+      <p>原文與譯文自動保存在本機，不含錄音。</p>
+      {status.error === 'service_identity_changed' && (
+        <p role="alert">
+          本機服務的工作區或版本已改變，已停止自動補存。請保留此分頁，恢復原工作區與版本後重試保存；勿清除瀏覽器資料。
+        </p>
+      )}
+      {phase === 'ended' && (!status.manifest?.saved || status.exportFailure) && status.error && (
+        <button
+          disabled={retrying || status.finalizing}
+          onClick={() => {
+            setRetrying(true);
+            setRetryError(null);
+            void meetingArchive
+              .continueMeeting(sessionId)
+              .then(() => meetingArchive.finalizeMeeting(sessionId))
+              .catch(() => setRetryError('仍無法完成保存，請確認本機服務與寫入權限後重試。'))
+              .finally(() => setRetrying(false));
+          }}
+        >
+          重試保存／結案
+        </button>
+      )}
+      {retryError && <p role="alert">{retryError}</p>}
+    </section>
+  );
+}
+
+function TranslationApp() {
+  const remoteTrack = useRef<RemoteTranslationHandle | null>(null);
+  const selectedDual = useSettingsStore((s) => s.scenarioId === 'hybrid');
+  const separateTracks = useCaptionStore((s) => s.separateTracks);
   const fake = useFakeReplay();
   const realtime = useOpenAIRealtime();
   const gemini = useGeminiLive();
@@ -66,6 +230,7 @@ export function App() {
   const restoredFromStorage = useCaptionStore((s) => s.restoredFromStorage);
   const persistedSessionMode = useCaptionStore((s) => s.sessionMode);
   const persistedSessionPhase = useCaptionStore((s) => s.sessionPhase);
+  const storedTask = useCaptionStore((s) => s.captionTask);
   const segmentCount = useCaptionStore((s) => s.segments.length);
   const includeSourceTranscript = useSettingsStore((s) => s.includeSourceTranscript);
   const micDistance = useSettingsStore((s) => s.micDistance);
@@ -73,6 +238,9 @@ export function App() {
   // has exhausted its self-heal retries surfaces state 'failed' (while still
   // retrying), at which point we offer a one-click switch to the other model.
   const transportState = useSettingsStore((s) => s.health.transport.state);
+  const transportFailure = useSettingsStore((s) => s.health.transport.recoveryFailure);
+  const audioHealth = useSettingsStore((s) => s.health.audio.state);
+  const audioMessage = useSettingsStore((s) => s.health.audio.message);
   const transportMessage = useSettingsStore((s) => s.health.transport.message);
   const startSession = useSettingsStore((s) => s.startSession);
   const stopSession = useSettingsStore((s) => s.stopSession);
@@ -91,6 +259,135 @@ export function App() {
   // that the captions in front of them now come from a different model.
   const [autoSwitch, setAutoSwitch] = useState<{ fromLabel: string; toLabel: string } | null>(null);
 
+  // Meeting intent survives failed provider starts; a provider's idle state
+  // must not silently cancel a running meeting's recovery.
+  const [recoverOnline, setRecoverOnline] = useState(false);
+  const [archivePending, setArchivePending] = useState(false);
+  const [recovery] = useState(() => new MeetingRecovery());
+  const resumeMicrophone = useRef<() => void>(() => {});
+  const beginOnlineRecovery = useCallback(
+    (newMeeting = false) => {
+      const dual = newMeeting
+        ? settingsStore.getState().scenarioId === 'hybrid'
+        : captionStore.getState().separateTracks;
+      if (dual) {
+        settingsStore.setState({ audioSource: 'mic' });
+        remoteTrack.current?.prepare();
+      }
+      recovery.begin(newMeeting);
+      if (newMeeting) releaseCaptureRecovery();
+      retainCaptureForRecovery(
+        (event) => applyCaptureHealth(event, meetingArchive),
+        () => resumeMicrophone.current(),
+      );
+      setRecoverOnline(true);
+      if (newMeeting) setAutoSwitch(null);
+    },
+    [recovery],
+  );
+  const cancelOnlineRecovery = useCallback(() => {
+    recovery.cancel();
+    setArchivePending(false);
+    releaseCaptureRecovery();
+    setRecoverOnline(false);
+    setAutoSwitch(null);
+    return remoteTrack.current?.stop() ?? Promise.resolve();
+  }, [recovery]);
+
+  const archiveStart = useRef<{
+    meetingId: string;
+    ready: Promise<ReturnType<typeof meetingArchive.bindCurrentMeeting>>;
+  } | null>(null);
+  const [archiveError, setArchiveError] = useState<string | null>(null);
+  const startArchivedOnline = useCallback(
+    async (backend: 'openai' | 'gemini', awaitContent = false): Promise<boolean> => {
+      const state = captionStore.getState();
+      const meetingId = state.sessionId;
+      const generation = recovery.generation;
+      if (!meetingId || state.captionTask?.purpose !== 'translation') return false;
+      setArchiveError(null);
+      setArchivePending(true);
+      if (archiveStart.current?.meetingId !== meetingId) {
+        const createdAt = new Date(state.sessionStartMs ?? Date.now()).toISOString();
+        const metadata = {
+          meetingId,
+          title: `翻譯會議 ${new Date(createdAt).toLocaleString('zh-TW')}`,
+          createdAt,
+          captionTask: state.captionTask,
+          ...(state.separateTracks ? { separateTracks: true } : {}),
+        };
+        const modes = new Map(state.segments.map((segment) => [segment.segmentId, segment.mode]));
+        const events: Array<TranscriptEvent | TranslationEvent> = [
+          ...state.segments.map((segment): TranscriptEvent => ({ kind: 'transcript', ...segment })),
+          ...Object.values(state.translations).map(
+            (translation): TranslationEvent => ({
+              kind: 'translation',
+              ...translation,
+              mode: modes.get(translation.sourceSegmentId) ?? 'online_full',
+            }),
+          ),
+        ];
+        const ready = (
+          events.length
+            ? meetingArchive.restoreTranslationSnapshot(
+                metadata,
+                events,
+                state.archiveGeneration ?? null,
+              )
+            : meetingArchive.startMeeting(metadata)
+        ).then(() => {
+          if (captionStore.getState().sessionId === meetingId)
+            captionStore.setState({ archiveGeneration: meetingArchive.getArchiveGeneration() });
+          return meetingArchive.bindCurrentMeeting();
+        });
+        archiveStart.current = { meetingId, ready };
+      }
+      try {
+        const archive = await archiveStart.current.ready;
+        // Stop, purpose change and a newer Start revoke pending admission before capture starts.
+        if (
+          !recovery.isCurrent(generation) ||
+          captionStore.getState().sessionId !== meetingId ||
+          captionStore.getState().sessionPhase !== 'running'
+        )
+          return false;
+        if (state.separateTracks) void remoteTrack.current?.start(backend, archive, meetingId);
+        return backend === 'gemini'
+          ? gemini.start({ awaitContent, archive })
+          : realtime.start({ awaitContent, archive });
+      } catch {
+        if (recovery.isCurrent(generation)) {
+          void remoteTrack.current?.stop();
+          archiveStart.current = null;
+          setArchiveError(
+            '無法完成本機保存或取得寫入權限；原字幕仍保留，請確認本機服務與其他分頁後重試。',
+          );
+        }
+        return false;
+      } finally {
+        if (recovery.isCurrent(generation)) setArchivePending(false);
+      }
+    },
+    [recovery, gemini.start, realtime.start],
+  );
+
+  useEffect(() => {
+    const checkpoint = () => meetingArchive.checkpoint();
+    window.addEventListener('pagehide', checkpoint);
+    return () => {
+      window.removeEventListener('pagehide', checkpoint);
+      checkpoint();
+    };
+  }, []);
+
+  useEffect(
+    () => () => {
+      recovery.cancel();
+      releaseCaptureRecovery();
+    },
+    [recovery],
+  );
+
   const markFieldTest = useCallback((label: string) => {
     if (!fieldTestRecorder.current()) return;
     fieldTestRecorder.mark(label);
@@ -101,15 +398,36 @@ export function App() {
     fieldTestRecorder.finish(note);
   }, []);
 
-  const isRunning =
+  const providerRunning =
     fake.status === 'running' ||
     realtime.status === 'running' ||
     gemini.status === 'running' ||
     offline.status === 'running' ||
     hybrid.status === 'running';
-  const activeError = fake.error ?? realtime.error ?? gemini.error ?? offline.error ?? hybrid.error;
+  const isRunning = providerRunning || recoverOnline;
+  // Which backend is actually carrying the meeting. Needed by the error
+  // precedence below and by the failover decision further down.
+  const runningBackend =
+    realtime.status === 'running' ? 'openai' : gemini.status === 'running' ? 'gemini' : null;
+  // Make-before-break can leave a standby that refused to start holding an
+  // error while the backend actually carrying the meeting recovers on its own.
+  // The board must report the meeting's state, so the running backend's error
+  // wins; with nothing running, either backend's error is the meeting's.
+  const onlineError =
+    runningBackend === 'gemini'
+      ? gemini.error
+      : runningBackend === 'openai'
+        ? realtime.error
+        : (realtime.error ?? gemini.error);
+  const activeError =
+    fake.error ??
+    onlineError ??
+    offline.error ??
+    hybrid.error ??
+    (audioHealth === 'failed' || audioHealth === 'no_audio_track' ? audioMessage : null);
 
   const handleStartFake = () => {
+    cancelOnlineRecovery();
     realtime.stop();
     gemini.stop();
     offline.stop();
@@ -119,7 +437,7 @@ export function App() {
     // events would append into any restored history with timestamps anchored
     // to the previous sessionStartMs. beginSession() also clears the
     // restoredFromStorage flag so the 📂 chip dismisses.
-    captionStore.getState().beginSession('fake');
+    captionStore.getState().beginSession('fake', settingsStore.getState().captionTask);
     void fake.start();
   };
 
@@ -127,9 +445,14 @@ export function App() {
   // existing transcript/history is preserved and new events append to it —
   // that's the Resume-after-Pause path. A fresh Start passes false.
   const startRealCore = useCallback(
-    async (continueSession: boolean): Promise<boolean> => {
+    async (continueSession: boolean, keepPeerRunning = false): Promise<boolean> => {
+      const isAutoRestart = realtime.status === 'running';
+      beginOnlineRecovery(!isAutoRestart && !continueSession);
+      const generation = recovery.generation;
       fake.stop();
-      gemini.stop();
+      // A failover brings this backend up while the failing one keeps its own
+      // retries, and stops the loser only once this one is connected.
+      if (!keepPeerRunning) gemini.stop();
       offline.stop();
       hybrid.stop();
       setPausedMode(null);
@@ -150,29 +473,49 @@ export function App() {
       // append onto the previous session's timestamps. realtime.status ===
       // 'running' is true only when the OpenAI provider is live in *this* tab
       // session, which is exactly the restart-vs-fresh-start distinction we need.
-      const isAutoRestart = realtime.status === 'running';
       if (!isAutoRestart && !continueSession) {
-        captionStore.getState().beginSession('real');
+        captionStore
+          .getState()
+          .beginSession(
+            'real',
+            settingsStore.getState().captionTask,
+            settingsStore.getState().scenarioId === 'hybrid',
+          );
       }
       // Start the cost timer ONLY after the realtime provider reaches the
       // 'running' state. If start() fails (mic denied, /session error, SDP
       // exchange refused), it returns false and we never accrue billed time
       // for a session that never connected — the inflated-elapsed-total bug
       // Codex flagged.
-      const ok = await realtime.start();
-      if (ok) {
+      const ok = await startArchivedOnline('openai', continueSession);
+      if (ok && recovery.isCurrent(generation)) {
         startSession();
         markFieldTest('openai running');
       }
       return ok;
     },
-    [fake, gemini, offline, hybrid, realtime, startSession, stopSession, markFieldTest],
+    [
+      startArchivedOnline,
+      fake,
+      gemini,
+      offline,
+      hybrid,
+      realtime,
+      startSession,
+      stopSession,
+      markFieldTest,
+      beginOnlineRecovery,
+      recovery,
+    ],
   );
 
   // Fresh start (clears history). Wrapped so the onClick MouseEvent never
   // leaks into startRealCore's boolean param.
   const handleStartReal = useCallback(
-    (): Promise<boolean> => startRealCore(false),
+    (manual = true): Promise<boolean> => {
+      if (manual) clearRecoveryRefusal('openai', 'translation');
+      return startRealCore(false);
+    },
     [startRealCore],
   );
 
@@ -208,7 +551,7 @@ export function App() {
       //     DisplayMediaAudioProvider entirely. The user re-confirms the
       //     getDisplayMedia picker if they switch to 'system'.
       // The reconnecting pill on the caption board surfaces the brief gap.
-      void handleStartReal().then((ok) => {
+      void handleStartReal(false).then((ok) => {
         // If the auto-restart failed AND the trigger was an audioSource
         // change, revert the UI selection so the visible chip/state matches
         // reality. Common case: user flips Mic → System, dismisses Chrome's
@@ -246,36 +589,71 @@ export function App() {
   // start clears history; mirrors handleStartReal's exclusivity. Not billed via
   // the OpenAI cost panel.
   const handleStartGemini = useCallback(async (): Promise<boolean> => {
+    clearRecoveryRefusal('gemini', 'translation');
+    beginOnlineRecovery(true);
+    const generation = recovery.generation;
     fake.stop();
     realtime.stop();
     offline.stop();
     hybrid.stop();
+    // Stop may still be draining the previous meeting. Finalize and flush it
+    // before beginSession clears history, so its tail cannot enter this meeting.
+    gemini.stop();
     setPausedMode(null);
-    captionStore.getState().beginSession('gemini');
-    const ok = await gemini.start();
-    if (ok) {
+    captionStore
+      .getState()
+      .beginSession(
+        'gemini',
+        settingsStore.getState().captionTask,
+        settingsStore.getState().scenarioId === 'hybrid',
+      );
+    const ok = await startArchivedOnline('gemini');
+    if (ok && recovery.isCurrent(generation)) {
       markFieldTest('gemini running');
     }
     return ok;
-  }, [fake, realtime, offline, hybrid, gemini, markFieldTest]);
+  }, [
+    fake,
+    realtime,
+    offline,
+    hybrid,
+    gemini,
+    markFieldTest,
+    beginOnlineRecovery,
+    recovery,
+    startArchivedOnline,
+  ]);
+
+  const retainBrowserMicrophone = useCallback(() => {
+    if (settingsStore.getState().audioSource === 'mic') {
+      retainCaptureForRecovery(
+        (event) => applyCaptureHealth(event, meetingArchive),
+        () => resumeMicrophone.current(),
+      );
+    }
+  }, []);
 
   const handleStartOffline = () => {
+    cancelOnlineRecovery();
     fake.stop();
     realtime.stop();
     gemini.stop();
     hybrid.stop();
     setPausedMode(null);
-    captionStore.getState().beginSession('offline');
+    captionStore.getState().beginSession('offline', settingsStore.getState().captionTask);
+    retainBrowserMicrophone();
     void offline.start();
   };
 
   const handleStartHybrid = () => {
+    cancelOnlineRecovery();
     fake.stop();
     realtime.stop();
     gemini.stop();
     offline.stop();
     setPausedMode(null);
-    captionStore.getState().beginSession('hybrid');
+    captionStore.getState().beginSession('hybrid', settingsStore.getState().captionTask);
+    retainBrowserMicrophone();
     void hybrid.start();
   };
 
@@ -286,28 +664,32 @@ export function App() {
   // beginSession(), so new events append to the preserved history. This is the
   // "stop without losing the LOG" path the operator needs mid-meeting.
   const handlePause = () => {
+    cancelOnlineRecovery();
     if (fake.status === 'running') {
       fake.stop();
       setPausedMode('fake');
-    } else if (realtime.status === 'running') {
-      realtime.stop();
-      stopSession();
-      setPausedMode('real');
-    } else if (gemini.status === 'running') {
-      gemini.stop();
-      setPausedMode('gemini');
+    } else if (realtime.status === 'running' || gemini.status === 'running') {
+      setPausedMode(onlineProvider === 'gemini' ? 'gemini' : 'real');
     } else if (offline.status === 'running') {
       offline.stop();
       setPausedMode('offline');
     } else if (hybrid.status === 'running') {
       hybrid.stop();
       setPausedMode('hybrid');
+    } else if (recoverOnline) {
+      setPausedMode(persistedSessionMode);
     }
+    // A handoff can have two providers, including an unfinished start. Pause
+    // cancels both owners before persisting the paused phase.
+    realtime.stop();
+    gemini.stop();
+    stopSession();
     // No beginSession() / clear() / endSession(): history is preserved for Resume.
     // Mark the persisted phase 'paused' then force a synchronous write so the
     // just-finalized last utterance is durable the instant capture pauses — and
     // a reload while paused can offer to continue.
     captionStore.getState().setSessionPhase('paused');
+    meetingArchive.checkpoint();
     captionStore.getState().flushNow();
     markFieldTest('pause');
   };
@@ -320,7 +702,9 @@ export function App() {
   // backend). CLAUDE.md: provider switch must not clear the transcript.
   const resumeProviderForMode = useCallback(
     (m: SessionMode) => {
+      if (IS_ONLINE_ONLY && (m === 'offline' || m === 'hybrid')) return;
       if (m === 'real' || m === 'gemini') {
+        beginOnlineRecovery();
         const nextMode: SessionMode = onlineProvider === 'gemini' ? 'gemini' : 'real';
         captionStore.getState().setSessionMode(nextMode);
         captionStore.getState().flushNow();
@@ -329,7 +713,7 @@ export function App() {
           realtime.stop();
           offline.stop();
           hybrid.stop();
-          void gemini.start();
+          void startArchivedOnline('gemini');
         } else {
           void startRealCore(true);
         }
@@ -340,12 +724,14 @@ export function App() {
         realtime.stop();
         gemini.stop();
         hybrid.stop();
+        retainBrowserMicrophone();
         void offline.start();
       } else if (m === 'hybrid') {
         fake.stop();
         realtime.stop();
         gemini.stop();
         offline.stop();
+        retainBrowserMicrophone();
         void hybrid.start();
       } else if (m === 'fake') {
         realtime.stop();
@@ -355,10 +741,22 @@ export function App() {
         void fake.start();
       }
     },
-    [fake, realtime, gemini, offline, hybrid, onlineProvider, startRealCore],
+    [
+      startArchivedOnline,
+      fake,
+      realtime,
+      gemini,
+      offline,
+      hybrid,
+      onlineProvider,
+      startRealCore,
+      beginOnlineRecovery,
+      retainBrowserMicrophone,
+    ],
   );
 
   const handleResume = () => {
+    clearRecoveryRefusal(settingsStore.getState().onlineProvider, 'translation');
     const m = pausedMode;
     setPausedMode(null);
     if (!m) return;
@@ -374,6 +772,12 @@ export function App() {
   const handleContinue = () => {
     const m = persistedSessionMode;
     if (!m) return;
+    if (IS_ONLINE_ONLY && (m === 'offline' || m === 'hybrid')) return;
+    if (!resumeCaptionSession(captionStore, settingsStore.getState().captionTask, m)) return;
+    if (m === 'real' || m === 'gemini') {
+      clearRecoveryRefusal(m === 'real' ? 'openai' : 'gemini', 'translation');
+      beginOnlineRecovery();
+    }
     captionStore.getState().setSessionPhase('running');
     if (m === 'gemini') {
       setOnlineProvider('gemini');
@@ -381,7 +785,7 @@ export function App() {
       realtime.stop();
       offline.stop();
       hybrid.stop();
-      void gemini.start();
+      void startArchivedOnline('gemini');
     } else if (m === 'real') {
       setOnlineProvider('openai');
       fake.stop();
@@ -399,7 +803,7 @@ export function App() {
   // (its own auto-retry is still running in the background), move the meeting
   // to the OTHER model — preserving the transcript. This is the
   // make-it-never-go-dark escape hatch: self-heal first, cross-model handoff
-  // second. Uses startRealCore(true)/gemini.start() (NO beginSession) so the
+  // second. Uses startRealCore(true)/startArchivedOnline('gemini') (NO beginSession) so the
   // existing history is kept and new captions append on the new backend.
   const onlineBackendAvailable = useCallback(
     (backend: 'openai' | 'gemini'): boolean =>
@@ -417,8 +821,6 @@ export function App() {
   // Decision logic lives in providers/failover.ts so the "when, and in which
   // direction?" rules stay unit-testable without a renderer. Computed here,
   // above the handoff effect that consumes it.
-  const runningBackend =
-    realtime.status === 'running' ? 'openai' : gemini.status === 'running' ? 'gemini' : null;
   const failover = computeFailover({
     isOnlineMode,
     runningBackend,
@@ -429,8 +831,6 @@ export function App() {
       gemini: onlineBackendAvailable('gemini'),
     },
   });
-  const failoverOffered = failover.show;
-
   const handleFailover = useCallback(
     (reason: 'manual' | 'auto' = 'manual') => {
       // Derive the live backend exactly as the banner's computeFailover does
@@ -439,49 +839,78 @@ export function App() {
       const from =
         realtime.status === 'running' ? 'openai' : gemini.status === 'running' ? 'gemini' : null;
       if (from === null) return;
+      const generation = recovery.generation;
       const target = from === 'gemini' ? 'openai' : 'gemini';
 
       // Do not stop a self-retrying backend unless the destination is actually
       // startable. Turning a degraded-but-recoverable session into no captions is
       // worse than leaving the current provider retrying in place.
       if (!onlineBackendAvailable(target)) return;
+      if (reason === 'manual') clearRecoveryRefusal(target, 'translation');
 
-      // Preserve the transcript (no beginSession) but record the NEW backend so a
-      // later crash-Continue resumes the model we switched TO, not the failed one.
-      captionStore.getState().setSessionPhase('running');
-      captionStore.getState().setSessionMode(target === 'gemini' ? 'gemini' : 'real');
-      setOnlineProvider(target);
       // Hold the live capture open across the swap. Without this the outgoing
       // provider stops the tracks and the incoming one re-opens the device —
       // seconds of dead air, and for system audio a share dialog the operator has
       // to click through mid-meeting.
       armCaptureHandoff();
 
-      // The notice is published only after the destination is demonstrably
-      // captioning. Announcing the switch up front and starting the new backend
-      // fire-and-forget meant that when the standby ALSO failed — an expired
-      // token, a handshake refused — the board said the meeting had continued
-      // on the other model while in fact nothing was running at all. A failure
-      // here leaves the provider's own error visible and the failover banner in
-      // place, so the operator sees the truth and still has a manual path.
+      // Make-before-break. The destination is brought up WHILE the failing
+      // backend keeps its own bounded retries, and nothing is torn down until
+      // the destination is connected. Breaking first cost the room the whole
+      // outage budget before the standby was even asked to start, and tearing
+      // the old session down mid-handshake killed reconnects that would have
+      // succeeded (docs/MEETING_CONTINUITY_REPAIR_2026-10-02.md). Whichever
+      // backend is connected first keeps the meeting; 數字① in
+      // docs/GOAL_PHASE_2.md budgets 3 s for captions to return.
+      //
+      // The switch is only claimed once the destination is demonstrably
+      // connected. Announcing it up front meant that when the standby ALSO
+      // failed — an expired token, a handshake refused — the board said the
+      // meeting had continued on the other model while in fact nothing was
+      // running at all. A failure here leaves the source backend running, its
+      // own error visible, and the operator still has a manual path.
       return (async () => {
-        let switched: boolean;
-        if (target === 'gemini') {
-          // Leaving OpenAI: drain its billed minutes before switching.
-          fake.stop();
-          realtime.stop();
-          stopSession();
-          offline.stop();
-          hybrid.stop();
-          switched = await gemini.start();
-        } else {
-          fake.stop();
-          gemini.stop();
-          offline.stop();
-          hybrid.stop();
-          switched = await startRealCore(true); // continueSession — preserves transcript
+        const switched =
+          target === 'gemini'
+            ? await startArchivedOnline('gemini', true)
+            : await startRealCore(true, true); // continueSession, keep Gemini retrying
+        if (!recovery.isCurrent(generation)) return;
+        // Same vendor first. If the backend we were leaving reconnected while
+        // the standby was coming up, the meeting stays on it and the standby is
+        // dropped instead: its own session resumption carries context across the
+        // outage that the other vendor cannot, and a model swap changes quality
+        // and cost for the rest of the meeting. The standby only takes over when
+        // the incumbent demonstrably could not come back on its own.
+        const incumbentConnected =
+          (from === 'gemini' ? gemini.getTransport() : realtime.getTransport()) === 'connected';
+        if (incumbentConnected) {
+          if (target === 'gemini') gemini.stop({ preserveHealth: true });
+          else {
+            realtime.stop({ preserveHealth: true });
+            stopSession();
+          }
+          (from === 'gemini' ? gemini : realtime).restoreHealth();
+          return;
         }
-        if (switched && reason === 'auto') {
+        if (!switched) {
+          (from === 'gemini' ? gemini : realtime).restoreHealth();
+          return;
+        }
+        // Preserve the transcript (no beginSession) but record the NEW backend so a
+        // later crash-Continue resumes the model we switched TO, not the failed one.
+        captionStore.getState().setSessionPhase('running');
+        captionStore.getState().setSessionMode(target === 'gemini' ? 'gemini' : 'real');
+        setOnlineProvider(target);
+        fake.stop();
+        offline.stop();
+        hybrid.stop();
+        if (target === 'gemini') {
+          // Leaving OpenAI: drain its billed minutes as it goes.
+          realtime.stop({ preserveHealth: true });
+          stopSession();
+        } else gemini.stop({ preserveHealth: true });
+        (target === 'gemini' ? gemini : realtime).restoreHealth();
+        if (reason === 'auto') {
           setAutoSwitch({ fromLabel: LABEL_OF[from], toLabel: LABEL_OF[target] });
         }
       })();
@@ -491,11 +920,13 @@ export function App() {
       gemini,
       onlineBackendAvailable,
       setOnlineProvider,
+      startArchivedOnline,
       fake,
       offline,
       hybrid,
       stopSession,
       startRealCore,
+      recovery,
     ],
   );
 
@@ -511,57 +942,132 @@ export function App() {
   const prewarmOpenAIStandby = realtime.prewarmStandby;
 
   useEffect(() => {
-    if (!isOnlineMode || !standbyReady || standbyBackend === null) return;
+    if (!recoverOnline || !isOnlineMode || !standbyReady || standbyBackend === null) return;
     const prewarm = standbyBackend === 'gemini' ? prewarmGeminiStandby : prewarmOpenAIStandby;
     // Re-mint anything older than the tick itself. Without that argument the
     // cache treats a 30-second-old token as fresh and skips, so the tick did
     // nothing, the token went stale at 45 seconds, and nothing replaced it
     // until 60 — a recurring 15-second window in which the failover this
     // standby exists for still paid for a token round-trip.
-    const mint = (): void => prewarm(STANDBY_TOKEN_REFRESH_MS);
+    const generation = recovery.generation;
+    const mint = (): void => {
+      if (recovery.isCurrent(generation)) prewarm(STANDBY_TOKEN_REFRESH_MS);
+    };
     mint();
     const timer = setInterval(mint, STANDBY_TOKEN_REFRESH_MS);
     return () => clearInterval(timer);
-  }, [isOnlineMode, standbyBackend, standbyReady, prewarmGeminiStandby, prewarmOpenAIStandby]);
+  }, [
+    recovery,
+    recoverOnline,
+    isOnlineMode,
+    standbyBackend,
+    standbyReady,
+    prewarmGeminiStandby,
+    prewarmOpenAIStandby,
+  ]);
 
-  // ─── Automatic handoff ────────────────────────────────────────────────────
-  // The banner alone was not enough. It only helps an operator who is looking
-  // at the laptop, and the person running a meeting is usually looking at the
-  // room. Captions stayed frozen until someone noticed and clicked. Now the app
-  // hands the meeting over itself the moment the live backend reports a failure
-  // it could not heal, and the banner becomes the fallback for when that fails.
-  //
-  // The ref makes it fire once per outage: the health state stays 'failed'
-  // while the old backend keeps retrying underneath, and re-entering would tear
-  // down the new session we just started.
-  //
-  // The cooldown is what stops it becoming a loop. If the backend we just moved
-  // to is also down, switching again lands back on the first one, and the app
-  // would bounce the meeting between two dead backends forever. After one
-  // automatic attempt the operator gets the banner instead — at that point the
-  // problem is not something automation can fix, and pretending otherwise just
-  // hides it.
-  const autoHandoffDone = useRef(false);
-  const lastAutoHandoffAt = useRef(0);
-  useEffect(() => {
-    if (!failoverOffered) {
-      autoHandoffDone.current = false;
-      return;
-    }
-    if (autoHandoffDone.current) return;
-    if (Date.now() - lastAutoHandoffAt.current < AUTO_HANDOFF_COOLDOWN_MS) return;
-    autoHandoffDone.current = true;
-    lastAutoHandoffAt.current = Date.now();
-    void handleFailover('auto');
-  }, [failoverOffered, handleFailover]);
-
-  const handleStop = () => {
-    if (fake.status === 'running') fake.stop();
-    if (realtime.status === 'running') {
+  const continueOnline = useCallback(
+    async (backend: 'openai' | 'gemini') => {
+      beginOnlineRecovery();
+      setPausedMode(null);
+      captionStore.getState().setSessionPhase('running');
+      captionStore.getState().setSessionMode(backend === 'gemini' ? 'gemini' : 'real');
+      setOnlineProvider(backend);
+      if (backend === 'openai') return startRealCore(true);
+      fake.stop();
       realtime.stop();
       stopSession();
-    }
-    if (gemini.status === 'running') gemini.stop();
+      offline.stop();
+      hybrid.stop();
+      return startArchivedOnline('gemini', true);
+    },
+    [
+      startArchivedOnline,
+      fake,
+      realtime,
+      gemini,
+      offline,
+      hybrid,
+      setOnlineProvider,
+      startRealCore,
+      stopSession,
+      beginOnlineRecovery,
+    ],
+  );
+
+  const sourceNeedsUser = audioHealth === 'failed' || audioHealth === 'no_audio_track';
+  resumeMicrophone.current = () => {
+    const mode = captionStore.getState().sessionMode;
+    if (mode === 'offline') void offline.start();
+    else if (mode === 'hybrid') void hybrid.start();
+    else void continueOnline(settingsStore.getState().onlineProvider);
+  };
+
+  // Providers own each network attempt. The meeting scheduler alone owns the
+  // escalation/idle retry clock; it re-reads stores when a deadline expires.
+  useEffect(() => {
+    const readCurrent = (): RecoverySnapshot => {
+      const settings = settingsStore.getState();
+      return {
+        online: IS_ONLINE_ONLY || settings.modeId === 'online_full',
+        sessionRunning: pausedMode === null && captionStore.getState().sessionPhase === 'running',
+        sourceBlocked:
+          archivePending ||
+          archiveError !== null ||
+          (settings.health.audio.reason !== undefined &&
+            settings.health.audio.reason !== 'capture_resumed') ||
+          settings.health.audio.state === 'failed' ||
+          settings.health.audio.state === 'no_audio_track',
+        selectedBackend: settings.onlineProvider,
+        runningBackend,
+        anyProviderRunning: providerRunning,
+        transportState: settings.health.transport.state,
+        sourceRetryOnly:
+          settings.health.transport.recoveryFailure?.layer === 'audio' &&
+          settings.health.transport.recoveryFailure.provider === settings.onlineProvider,
+        failures: {
+          openai: recoveryFailureFor('openai', 'translation'),
+          gemini: recoveryFailureFor('gemini', 'translation'),
+        },
+        available: {
+          openai: onlineBackendAvailable('openai'),
+          gemini: onlineBackendAvailable('gemini'),
+        },
+      };
+    };
+    recovery.update(readCurrent(), readCurrent, (action) => {
+      if (action.kind === 'handoff') void handleFailover('auto');
+      else void continueOnline(action.target);
+    });
+  }, [
+    recovery,
+    recoverOnline,
+    archivePending,
+    archiveError,
+    modeId,
+    persistedSessionPhase,
+    audioHealth,
+    pausedMode,
+    sourceNeedsUser,
+    transportState,
+    transportFailure,
+    runningBackend,
+    providerRunning,
+    onlineProvider,
+    onlineBackendAvailable,
+    handleFailover,
+    continueOnline,
+  ]);
+
+  const handleStop = () => {
+    const stoppedId = captionStore.getState().sessionId;
+    const admission =
+      archiveStart.current?.meetingId === stoppedId ? archiveStart.current.ready : null;
+    const remoteTail = cancelOnlineRecovery();
+    if (fake.status === 'running') fake.stop();
+    const openaiTail = realtime.stop();
+    stopSession();
+    const tailComplete = gemini.stop();
     if (offline.status === 'running') offline.stop();
     if (hybrid.status === 'running') hybrid.stop();
     setPausedMode(null);
@@ -569,6 +1075,19 @@ export function App() {
     // the user can still hit Export after Stop — endSession() is a metadata
     // flag, not a clear.
     captionStore.getState().endSession();
+    meetingArchive.checkpoint();
+    if (stoppedId && admission) {
+      void Promise.all([admission, openaiTail, tailComplete, remoteTail])
+        .then(() => meetingArchive.finalizeMeeting(stoppedId))
+        .catch(() => {
+          // The archive status owns retryable persistence errors and clears them after recovery.
+          if (
+            captionStore.getState().sessionId === stoppedId &&
+            meetingArchive.getStatus().meetingId !== stoppedId
+          )
+            setArchiveError('收音已停止，但尚未完成保存或結案；請保留此分頁並重試保存。');
+        });
+    }
     finishFieldTest('stopped from app Stop');
     // Durably write the final transcript synchronously on Stop, closing the
     // debounce window so a tab-close right after Stop can't drop the last line.
@@ -603,11 +1122,19 @@ export function App() {
   // when the tab went away — offer to continue it.
   const resumable =
     idle &&
+    storedTask?.purpose !== 'transcription' &&
     restoredFromStorage &&
     segmentCount > 0 &&
     persistedSessionMode !== null &&
     (persistedSessionPhase === 'running' || persistedSessionPhase === 'paused')
-      ? { count: segmentCount, label: MODE_LABELS[persistedSessionMode] }
+      ? {
+          count: segmentCount,
+          label: MODE_LABELS[persistedSessionMode],
+          ...(IS_ONLINE_ONLY &&
+          (persistedSessionMode === 'offline' || persistedSessionMode === 'hybrid')
+            ? { unavailableReason: '此版本未包含地端處理；字幕已保留，請使用完整版本繼續原會議。' }
+            : {}),
+        }
       : null;
 
   // Each option selects its config (mode/backend) AND starts in one click.
@@ -688,10 +1215,23 @@ export function App() {
   // Show the full launcher grid only on a fresh idle screen (no transcript yet).
   // When a session is restored, the transcript stays visible and the slim
   // ContinueBanner sits above it instead.
-  const showLauncher = idle && segmentCount === 0;
+  const showLauncher = idle && (segmentCount === 0 || storedTask?.purpose === 'transcription');
 
   return (
     <main className="app-shell">
+      <TranslationArchiveStatus />
+      {archivePending && <p role="status">正在準備本機保存與核對歷史字幕，原紀錄仍保留。</p>}
+      {archiveError && (
+        <div>
+          <p role="alert">{archiveError}</p>
+          <button
+            onClick={handleContinue}
+            disabled={archivePending || persistedSessionPhase !== 'running'}
+          >
+            重試此會議
+          </button>
+        </div>
+      )}
       <header className="app-header">
         <div>
           <h1>Meeting Audio</h1>
@@ -879,14 +1419,19 @@ export function App() {
       {activeError && (
         <div className="app-error" role="alert">
           <span>{activeError}</span>
-          {realtime.error && realtime.apiKeyStatus === 'present' && (
+          {(realtime.error || gemini.error || sourceNeedsUser) && (
             <button
               type="button"
               className="app-error-retry"
-              onClick={handleStartReal}
+              onClick={() => {
+                clearRecoveryRefusal(settingsStore.getState().onlineProvider, 'translation');
+                resumeMicrophone.current();
+              }}
               data-testid="retry-real"
             >
-              Retry
+              {sourceNeedsUser && audioSource === 'system' && modeId === 'online_full'
+                ? '重新分享音訊'
+                : '繼續此會議'}
             </button>
           )}
         </div>
@@ -921,6 +1466,7 @@ export function App() {
         />
       )}
 
+      {(selectedDual || separateTracks) && <RemoteTranslationTrack ref={remoteTrack} />}
       {/* Inner boundary: a bug in caption rendering must not take the controls,
           the health row and the export button down with it. The audio and the
           transport keep running underneath, so a reload resumes the meeting. */}

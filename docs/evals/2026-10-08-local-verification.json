@@ -1,0 +1,61 @@
+{
+  "date": "2026-10-08",
+  "scope": "Native Chrome AudioContext/AudioWorklet, Silero VAD, provider lifecycle, IndexedDB, actual SQLite, reload, correction and export. Upstream recognition responses are controlled fixtures.",
+  "realCloudVerified": false,
+  "regressions": {
+    "webAndContracts": 656,
+    "online": 149,
+    "managedService": 6,
+    "evaluator": 8,
+    "typecheck": "passed",
+    "lint": "passed"
+  },
+  "longRuns": [
+    {
+      "provider": "openai",
+      "observedMs": 3600016,
+      "samples": 240,
+      "connections": 3,
+      "maxJsHeapBytes": 54071604,
+      "segments": 302,
+      "eventCount": 305,
+      "pendingCount": 0,
+      "unfinishedTurns": 0,
+      "knownUnrecoverableGaps": 2,
+      "estimatedGapMs": 547,
+      "checks": "DB integrity, event/export equality, every original turn exactly once, corrected projection equality, TXT equality, chronology, pending=0"
+    },
+    {
+      "provider": "gemini",
+      "observedMs": 3600026,
+      "samples": 240,
+      "connections": 8,
+      "maxJsHeapBytes": 69453140,
+      "segments": 301,
+      "eventCount": 309,
+      "pendingCount": 0,
+      "unfinishedTurns": 0,
+      "knownUnrecoverableGaps": 7,
+      "estimatedGapMs": 2650,
+      "checks": "DB integrity, event/export equality, every original turn exactly once, corrected projection equality, TXT equality, chronology, pending=0"
+    }
+  ],
+  "deployment": {
+    "url": "http://127.0.0.1:43871",
+    "instanceId": "8526191a-9ce4-4b5b-b51d-7651eb69423c",
+    "buildId": "5525eb2e07c6ed43f9e9e51aeaf6335882082372472a36ac4c8075d5fa282df3",
+    "repeatStartReused": true,
+    "healthOk": true,
+    "storageAvailable": true,
+    "unsupportedFormatStatus": 415,
+    "independentOpenAIKeys": true,
+    "chromeRendered": true,
+    "vadAssetsAvailable": true,
+    "cloudCallsDuringVerification": 0
+  },
+  "limitations": [
+    "No real cloud account, mixed-language accuracy, latency or internal/external network acceptance.",
+    "No raw audio recording or replay; renewal gaps remain explicitly marked.",
+    "Heap observations measure JavaScript heap, not total browser/native memory."
+  ]
+}

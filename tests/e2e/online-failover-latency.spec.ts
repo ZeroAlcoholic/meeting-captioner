@@ -120,12 +120,18 @@ async function armCaptionProbe(
 async function keepSpeaking(
   page: import('@playwright/test').Page,
   marker: string,
+  target: 'openai' | 'gemini' = 'openai',
 ): Promise<() => Promise<void>> {
-  await page.evaluate((text) => {
-    window.__speaking = window.setInterval(() => {
-      window.__mock.oai.emit({ type: 'session.output_transcript.delta', delta: text });
-    }, 100);
-  }, marker);
+  await page.evaluate(
+    ({ text, target }) => {
+      window.__speaking = window.setInterval(() => {
+        if (target === 'openai')
+          window.__mock.oai.emit({ type: 'session.output_transcript.delta', delta: text });
+        else window.__mock.gemini.send({ serverContent: { outputTranscription: { text } } });
+      }, 100);
+    },
+    { text: marker, target },
+  );
   return async () => {
     await page.evaluate(() => {
       window.clearInterval(window.__speaking);
@@ -152,61 +158,77 @@ test.describe('數字① — failover caption gap', () => {
   // measurement before it produced a number.
   test.setTimeout(120_000);
 
-  test('A1+A2 — a dead Gemini hands the meeting to OpenAI with nobody clicking', async ({
-    page,
-  }) => {
-    await page.goto('/');
-    await page.getByTestId('launch-gemini').click();
-    await expect.poll(() => mock.geminiOpenSockets(), { timeout: 10_000 }).toBeGreaterThan(0);
+  for (const from of ['gemini', 'openai'] as const) {
+    test(`A1+A2 — a dead ${from} hands the meeting to the alternate with nobody clicking`, async ({
+      page,
+    }) => {
+      await page.goto('/');
+      if (from === 'gemini') {
+        await page.getByTestId('launch-gemini').click();
+        await expect.poll(() => mock.geminiOpenSockets(), { timeout: 10_000 }).toBeGreaterThan(0);
 
-    // Prove captions were flowing before the fault, otherwise a measurement of
-    // "captions came back" is meaningless.
-    await mock.geminiServerContent({
-      inputTranscription: { text: 'Before the handoff.', languageCode: 'en-US' },
-      outputTranscription: { text: '交接前的句子。' },
-      turnComplete: true,
+        // Prove captions were flowing before the fault, otherwise a measurement of
+        // "captions came back" is meaningless.
+        await mock.geminiServerContent({
+          inputTranscription: { text: 'Before the handoff.', languageCode: 'en-US' },
+          outputTranscription: { text: '交接前的句子。' },
+          turnComplete: true,
+        });
+      } else {
+        await page.getByTestId('start-real').click();
+        await expect.poll(() => mock.oaiReady()).toBe(true);
+        await mock.oaiInput('Before the handoff.');
+        await mock.oaiOutput('交接前的句子。');
+        await mock.oaiComplete();
+      }
+      await expect(page.locator('body')).toContainText('交接前的句子。', { timeout: 5_000 });
+      const capturesBefore = await mock.micAcquisitions();
+      expect(capturesBefore).toBe(1);
+
+      // Break the token broker FIRST: Gemini mints a fresh token on every
+      // reconnect, so leaving it healthy would let the first backoff tick heal
+      // the session and there would be no outage to measure.
+      if (from === 'gemini') mock.setGeminiSessionFailing(true);
+      else mock.setOaiSessionFailing(true);
+
+      // No click anywhere in this test. The app is expected to move the meeting
+      // itself, and the clock stops when the ROOM sees a caption again — not when
+      // the app first admits something is wrong.
+      const stopSpeaking = await keepSpeaking(
+        page,
+        RESUMED_CAPTION,
+        from === 'gemini' ? 'openai' : 'gemini',
+      );
+      await armCaptionProbe(page, RESUMED_CAPTION);
+      const t0 = await pageNow(page);
+      if (from === 'gemini') await mock.geminiClose();
+      else await mock.oaiClosed();
+
+      await expect(page.getByTestId('caption-target')).toContainText(RESUMED_CAPTION, {
+        timeout: OUTAGE_CEILING_MS,
+      });
+      const elapsed = (await readProbeMark(page)) - t0;
+      await stopSpeaking();
+
+      // The switch must be visible: captions silently coming from a different
+      // model, at different quality and cost, is a lie of omission.
+      const notice = page.getByTestId('autoswitch-notice');
+      await expect(notice).toBeVisible();
+      await expect(notice).toContainText('Gemini');
+      await expect(notice).toContainText('OpenAI');
+
+      // The capture was handed over, not re-opened. On a real machine a second
+      // acquisition means a device open — and for system audio, a share dialog
+      // in the middle of the meeting.
+      expect(await mock.micAcquisitions()).toBe(capturesBefore);
+
+      // CLAUDE.md: a provider switch must not clear the transcript.
+      await expect(page.locator('body')).toContainText('交接前的句子。');
+
+      await reportGap(`${from} 故障 → 字幕回到畫面`, elapsed);
+      expect(elapsed).toBeLessThanOrEqual(GAP_BUDGET_MS);
     });
-    await expect(page.locator('body')).toContainText('交接前的句子。', { timeout: 5_000 });
-    const capturesBefore = await mock.micAcquisitions();
-    expect(capturesBefore).toBe(1);
-
-    // Break the token broker FIRST: Gemini mints a fresh token on every
-    // reconnect, so leaving it healthy would let the first backoff tick heal
-    // the session and there would be no outage to measure.
-    mock.setGeminiSessionFailing(true);
-
-    // No click anywhere in this test. The app is expected to move the meeting
-    // itself, and the clock stops when the ROOM sees a caption again — not when
-    // the app first admits something is wrong.
-    const stopSpeaking = await keepSpeaking(page, RESUMED_CAPTION);
-    await armCaptionProbe(page, RESUMED_CAPTION);
-    const t0 = await pageNow(page);
-    await mock.geminiClose();
-
-    await expect(page.getByTestId('caption-target')).toContainText(RESUMED_CAPTION, {
-      timeout: OUTAGE_CEILING_MS,
-    });
-    const elapsed = (await readProbeMark(page)) - t0;
-    await stopSpeaking();
-
-    // The switch must be visible: captions silently coming from a different
-    // model, at different quality and cost, is a lie of omission.
-    const notice = page.getByTestId('autoswitch-notice');
-    await expect(notice).toBeVisible();
-    await expect(notice).toContainText('Gemini');
-    await expect(notice).toContainText('OpenAI');
-
-    // The capture was handed over, not re-opened. On a real machine a second
-    // acquisition means a device open — and for system audio, a share dialog
-    // in the middle of the meeting.
-    expect(await mock.micAcquisitions()).toBe(capturesBefore);
-
-    // CLAUDE.md: a provider switch must not clear the transcript.
-    await expect(page.locator('body')).toContainText('交接前的句子。');
-
-    await reportGap('Gemini 故障 → 字幕回到畫面', elapsed);
-    expect(elapsed).toBeLessThanOrEqual(GAP_BUDGET_MS);
-  });
+  }
 
   test('A3 — a recovered OpenAI backend resumes captions within the gap budget', async ({
     page,

@@ -5,6 +5,9 @@ coverage
 .pnpm-store
 .venv
 __pycache__
+.pytest_cache
+.cache
+release
 *.lock
 pnpm-lock.yaml
 test-results

@@ -4,6 +4,7 @@ import type {
   TranscriptEvent,
   TranslationEvent,
 } from '@meeting-audio/contracts';
+import type { SampleRange } from './meeting-audio-buffer.js';
 
 export type ProviderStatus = 'idle' | 'running' | 'stopped';
 
@@ -26,6 +27,15 @@ export interface AudioSource {
   readonly analyser: AnalyserNode | null;
   acquire(onHealth: (e: HealthEvent) => void): Promise<MediaStream>;
   release(): void;
+  captureRangeForNativeFrames?(context: AudioContext, from: number, to: number): SampleRange | null;
+}
+
+/** Fixed for one hook lifetime; capture ownership stays with the meeting track. */
+export interface TranslationTrackScope {
+  trackId: 'mic' | 'remote';
+  createAudio(): AudioSource;
+  onHealth(event: HealthEvent): void;
+  onAudioLevel(event: AudioLevelEvent): void;
 }
 
 /**

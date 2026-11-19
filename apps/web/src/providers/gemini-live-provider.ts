@@ -13,7 +13,22 @@ import type {
 } from './types.js';
 import { MicrophoneAudioProvider } from './microphone-audio-provider.js';
 import { getCaptureContext, ensureCaptureWorklet, resumeCaptureContext } from './audio-engine.js';
+import { monitorCaptureHealth } from './capture-health.js';
 import { WarmTokenCache } from './token-prewarm.js';
+import { serviceFetch } from './service-fetch.js';
+import {
+  createRecoveryAttempt,
+  assertRecoveryAllowed,
+  recoveryHttpError,
+  normalizeRecoveryError,
+  permanentRecoveryFailure,
+  recoveryFailureFor,
+  RecoveryError,
+  recoveryError,
+  protocolRecoveryKind,
+  RECOVERY_ATTEMPT_TIMEOUT_MS,
+  type RecoveryAttempt,
+} from './recovery-attempt.js';
 
 // AudioWorklet PCM capture (shared with the offline path), at a smaller chunk
 // than the offline default of 4096 (256 ms). Chunk size is front-of-pipe
@@ -37,7 +52,7 @@ const GEMINI_PCM_CHUNK_SIZE = 512; // 32 ms @ 16 kHz
 // variant. The browser connects directly with the short-lived token minted by
 // our /session/gemini route — the raw GEMINI_API_KEY never reaches the client.
 const GEMINI_WS_BASE =
-  'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained';
+  'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContentConstrained';
 
 const PROVIDER = 'gemini-live';
 const GEMINI_TRANSLATE_MODEL = 'models/gemini-3.5-live-translate-preview';
@@ -57,7 +72,7 @@ class SetupAbortedError extends Error {
 // A Gemini WS can stay OPEN while the server silently stops emitting
 // serverContent — captions freeze with a "connected" health state and no error.
 // Detect it by counting cumulative audio-active level-poll ticks since the last
-// server message: when audio is clearly flowing IN but nothing comes back OUT
+// caption text: when audio is clearly flowing IN but nothing comes back OUT
 // past the threshold, force a reconnect (which resumes the session via
 // resumptionHandle). Mirrors the OpenAI stale-data detector so both backends
 // self-heal a silent upstream wedge instead of leaving the operator staring at
@@ -78,18 +93,8 @@ const STALE_AUDIO_ACTIVE_DB_BY_MIC: Record<'meeting' | 'close' | 'far' | 'off', 
 // backoff — auto-heal never stops.
 const RECONNECT_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000];
 
-// How long an outage may last before we tell the operator they can switch
-// backends. This is deliberately a CLOCK, not an attempt count. Counting
-// attempts ties the warning to the backoff ladder, whose rungs fall at 1, 3, 7,
-// 15 and 31 s — so "after five attempts" meant 31 s of frozen captions before
-// the failover affordance appeared (measured: 31162 ms, see
-// docs/FAILOVER_BASELINE_2026-08-12.md). A clock decouples the two: retries
-// keep climbing the ladder underneath while the operator learns within seconds
-// that this meeting has a problem and has an escape hatch.
-//
-// 2 s is chosen to clear a single transient drop — the common case reconnects
-// on the 1 s rung and never trips this — without making a real outage wait.
-const FAILOVER_SIGNAL_AFTER_MS = 2_000;
+// A pending handshake must not be cancelled by a shorter failover clock.
+// Only completed failed attempts emit 'failed'; the coordinator owns outage budgets.
 
 // ── Stop drain ────────────────────────────────────────────────────────────────
 // Gemini keeps translating after the last audio frame — roughly 2-3 s of lag is
@@ -157,12 +162,13 @@ function translateTargetCode(langPair: string): string {
 
 function assertTranslateModel(model: string): void {
   if (model !== GEMINI_TRANSLATE_MODEL) {
-    throw new Error(`Unsupported Gemini model: ${model}`);
+    throw recoveryError('unsupported', 'gemini', 'translation', 'Unsupported Gemini model');
   }
 }
 
 // ── Minimal shapes of the Gemini server messages we consume ──────────────────
 interface GeminiServerMessage {
+  error?: unknown;
   setupComplete?: unknown;
   serverContent?: {
     inputTranscription?: { text?: string; languageCode?: string };
@@ -187,15 +193,24 @@ interface GeminiToken {
   model: string;
 }
 
-async function postGeminiToken(url: string): Promise<GeminiToken> {
-  const res = await fetch(url, {
+class GeminiSocketCloseError extends Error {
+  constructor(readonly code: number) {
+    super(`Gemini socket closed before setupComplete (code ${code})`);
+  }
+}
+
+async function postGeminiToken(url: string, signal: AbortSignal): Promise<GeminiToken> {
+  if (signal.aborted) throw signal.reason;
+  assertRecoveryAllowed('gemini', 'translation');
+  const res = await serviceFetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: '{}',
+    signal,
   });
+  if (signal.aborted) throw signal.reason;
   if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`Gemini token mint failed (${res.status}): ${text || res.statusText}`);
+    throw recoveryHttpError(res, 'gemini', 'translation');
   }
   const data = (await res.json()) as { token?: string; model?: string };
   if (!data.token || !data.model) throw new Error('Gemini token response incomplete');
@@ -211,10 +226,27 @@ const warmGemini = new WarmTokenCache<GeminiToken>();
 export function prewarmGeminiSession(url: string, refreshIfOlderThanMs?: number): void {
   void warmGemini.prewarm(
     url,
-    () => postGeminiToken(url),
+    async (signal) => {
+      const attempt = createRecoveryAttempt({
+        parentSignal: signal,
+        generation: 0,
+        isCurrent: () => !signal.aborted,
+        label: 'Gemini token prewarm',
+      });
+      try {
+        return await attempt.run((requestSignal) => postGeminiToken(url, requestSignal));
+      } finally {
+        attempt.dispose();
+      }
+    },
     () => null,
     refreshIfOlderThanMs,
   );
+}
+
+/** Cancel speculative work when meeting intent or online mode ends. */
+export function cancelGeminiPrewarm(): void {
+  warmGemini.clear();
 }
 
 /** Test hook: drop any pre-warmed Gemini token so it can't leak across tests. */
@@ -226,44 +258,55 @@ export class GeminiLiveProvider implements CaptionProvider {
   readonly name = PROVIDER;
 
   private _status: ProviderStatus = 'idle';
+  // Async work from a previous start must never adopt a socket or capture graph
+  // after Stop, even if this same provider has already been started again.
+  private generation = 0;
+  private captureController: AbortController | null = null;
   private readonly mic: AudioSource;
+  // A restart while the permission/device request is pending must share that
+  // acquisition. Acquiring twice through the same lease would claim it twice
+  // while release() can return only one claim.
+  private pendingMic: Promise<MediaStream> | null = null;
   private ws: WebSocket | null = null;
   // Shared capture context (owned by audio-engine; never closed here).
   private audioCtx: AudioContext | null = null;
   private sourceNode: MediaStreamAudioSourceNode | null = null;
   private workletNode: AudioWorkletNode | null = null;
+  private captureHealth: ReturnType<typeof monitorCaptureHealth> | null = null;
   private stream: MediaStream | null = null;
   private levelInterval: ReturnType<typeof setInterval> | null = null;
 
   private reconnectAttempts = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  // Armed when an outage starts; fires once to surface the failover affordance.
-  private failoverSignalTimer: ReturnType<typeof setTimeout> | null = null;
+  private setupReady = false;
+  private attempt: RecoveryAttempt | null = null;
+  private reconnectInFlight = false;
+  private rotation: { timer: ReturnType<typeof setTimeout> } | null = null;
   // Post-Stop drain: capture is already released, the socket is held open only
   // to collect the tail the server still owes us.
   private drainTimer: ReturnType<typeof setTimeout> | null = null;
   private draining = false;
-  // Latches once the outage has been surfaced, so later backoff rungs keep
-  // reporting 'failed' instead of flipping back to 'reconnecting' — which would
-  // make the failover banner blink out from under the operator's cursor.
-  private outageSurfaced = false;
+  private stopComplete: Promise<void> = Promise.resolve();
+  private resolveStop: (() => void) | null = null;
   // Settles the in-flight setup handshake, if any. cleanup() must call this:
   // closing the socket alone leaves connect()'s promise pending behind the
-  // stale-socket guard, and its 15 s timer then fires a phantom setup-timeout
+  // stale-socket guard, and the attempt deadline then fires a phantom timeout
   // that lands on whatever session is running by then.
   private settleSetupOnTeardown: (() => void) | null = null;
 
   // Receive-side wedge detector state. `lastServerContentAt === 0` means the
   // detector is DISABLED (not connected yet / between reconnects); it arms on
-  // setupComplete and re-arms on every server message. audioActiveSamplesSince
+  // setupComplete and re-arms on caption progress. audioActiveSamplesSince
   // Content accumulates level-poll ticks above the mic-distance threshold and
-  // resets whenever a server message proves the upstream is alive.
+  // resets whenever caption text proves the upstream is progressing.
   private lastServerContentAt = 0;
   private audioActiveSamplesSinceContent = 0;
 
   // Session-resumption handle (lets a reconnect continue the same Gemini
   // session across the ~10-min connection / GoAway boundaries in a long meeting).
   private resumptionHandle: string | null = null;
+  private resumedSetupFailures = 0;
+  private freshSessionFallback = false;
 
   // Per-utterance ("turn") accumulation state. Gemini gives no segment ids, so
   // we mint one per turn; wall-clock startMs keeps captions ordered correctly.
@@ -315,46 +358,73 @@ export class GeminiLiveProvider implements CaptionProvider {
     // A restart cancels any drain still in flight. Left running, its timer
     // would fire finishStop() into the NEW session and tear down a live socket.
     if (this.draining) this.finishStop();
+    // A final-caption subscriber may already have started the replacement.
+    if (this.status === 'running') return;
     this._status = 'running';
+    const generation = ++this.generation;
+    const captureController = new AbortController();
+    this.captureController = captureController;
+    let phase: 'capture' | 'network' | 'audio' = 'capture';
     try {
       this.emitHealth('transport', 'connecting');
-      // Mint the ephemeral token CONCURRENTLY with mic acquisition — independent
-      // work, so overlapping them shaves a network RTT off time-to-first-caption
-      // (the mint completes while the user is still in the permission dialog on a
-      // cold start). Settle-wrapped so a mic denial can't orphan the in-flight
-      // fetch as an unhandled rejection.
-      const tokenPromise = this.mintToken().then(
-        (value) => ({ ok: true as const, value }),
-        (error: unknown) => ({ ok: false as const, error }),
-      );
-      this.stream = await this.mic.acquire(this.handlers.onHealth);
-      // User pressed Stop during mic grant. cleanup() releases the just-granted
-      // mic (and is idempotent with the stop() that already ran) — without it the
-      // late-resolved stream stays live and the OS mic indicator never turns off.
-      if (this._status !== 'running') {
-        this.cleanup();
-        void tokenPromise;
+      if (!this.isCurrentGeneration(generation)) return;
+      // Permission waiting is not network recovery time. Warm tokens still hide
+      // the normal mint RTT, and the 12s attempt starts after capture is granted.
+      const acquisition =
+        this.pendingMic ??
+        this.mic.acquire((event) => {
+          // A later start may share this pending acquisition, so health belongs
+          // to the current owner rather than the generation that requested it.
+          if (this._status === 'running') this.handlers.onHealth(event);
+        });
+      this.pendingMic = acquisition;
+      let stream: MediaStream;
+      try {
+        stream = await acquisition;
+      } finally {
+        if (this.pendingMic === acquisition) this.pendingMic = null;
+      }
+      if (!this.isCurrentGeneration(generation)) {
+        // Stop with no replacement still owns the eventual grant and must
+        // release it. A newer running start owns the shared grant instead.
+        if (this._status !== 'running') this.mic.release();
         return;
       }
-      const tok = await tokenPromise;
-      if (!tok.ok) {
-        throw tok.error instanceof Error ? tok.error : new Error('Gemini token mint failed');
-      }
-      const { token, model } = tok.value;
-      if (this._status !== 'running') {
-        this.cleanup();
-        return;
-      }
-      await this.connect(token, model);
-      await this.startAudioCapture();
+      this.stream = stream;
+      phase = 'network';
+      await this.connectAttempt(generation);
+      if (!this.isCurrentGeneration(generation)) return;
+      phase = 'audio';
+      await this.startAudioCapture(generation, captureController.signal);
+      if (!this.isCurrentGeneration(generation)) return;
       this.startLevelPolling();
     } catch (err) {
       // Teardown-initiated abort is not a failure: stop() already set the status
       // and ran cleanup(). Reporting it would paint a false api_error — possibly
       // onto a session the user has already restarted.
-      if (err instanceof SetupAbortedError) return;
+      if (err instanceof SetupAbortedError || !this.isCurrentGeneration(generation)) return;
       const message = err instanceof Error ? err.message : 'Unknown error starting Gemini Live';
-      this.emitHealth('transport', 'api_error', message);
+      if (phase === 'capture') {
+        this.emitHealth('audio', 'failed', '無法取得音源，請檢查收音權限與裝置。');
+      } else {
+        // Worklet setup already emits local audio health. Preserve its existing
+        // retryable behavior without recording a cloud/network failure.
+        const failure =
+          phase === 'network' ? normalizeRecoveryError(err, 'gemini', 'translation') : undefined;
+        this.emitHealth(
+          'transport',
+          'api_error',
+          message,
+          failure?.failure ?? {
+            layer: 'audio',
+            kind: 'stalled',
+            provider: 'gemini',
+            purpose: 'translation',
+            attemptId: crypto.randomUUID(),
+          },
+        );
+      }
+      if (!this.isCurrentGeneration(generation)) return;
       this._status = 'stopped';
       this.cleanup();
     }
@@ -369,21 +439,28 @@ export class GeminiLiveProvider implements CaptionProvider {
       return;
     }
     this._status = 'stopped';
+    const stoppedGeneration = ++this.generation;
+    this.cancelRotation();
+    this.attempt?.cancel(new SetupAbortedError());
 
     // The microphone goes off NOW. Whatever the socket still owes us, Stop has
     // to mean stopped from the user's point of view.
     this.stopCapture();
-    this.emitHealth('audio', 'stopped');
-    this.emitHealth('transport', 'stopped');
-
-    // Tell the server the audio stream ended so it flushes what it is still
-    // holding, then give that flush a bounded window to arrive.
+    // Install the drain/finish ownership before publishing stopped. A health
+    // subscriber may synchronously Start; it must find and retire the old drain.
     if (this.sendAudioStreamEnd()) {
       this.draining = true;
+      this.stopComplete = new Promise<void>((resolve) => {
+        this.resolveStop = resolve;
+      });
       this.drainTimer = setTimeout(() => this.finishStop(), STOP_DRAIN_CAP_MS);
-      return;
+    } else {
+      this.finishStop();
     }
-    this.finishStop();
+    if (this.generation !== stoppedGeneration) return;
+    this.emitHealth('audio', 'stopped');
+    if (this.generation !== stoppedGeneration) return;
+    this.emitHealth('transport', 'stopped');
   }
 
   /**
@@ -408,39 +485,77 @@ export class GeminiLiveProvider implements CaptionProvider {
   }
 
   /**
-   * Close out a stopped session: commit whatever the drain produced, then tear
-   * down. finalizeTurn runs LAST, not before the drain — committing first would
+   * Close out a stopped session: tear down, then commit whatever the drain
+   * produced. finalizeTurn runs LAST, not before the drain — committing first would
    * split the final sentence across two segments, with the half that arrived
    * during the drain orphaned in a segment nothing else references.
    */
   private finishStop(): void {
+    const resolveStop = this.resolveStop;
+    this.resolveStop = null;
     if (this.drainTimer !== null) {
       clearTimeout(this.drainTimer);
       this.drainTimer = null;
     }
     this.draining = false;
-    // Commit any in-flight utterance BEFORE teardown. Without this, the text
-    // spoken right before Pause/Stop (a) never reaches history, (b) is missing
-    // from Export, and (c) stays on the board as a stale partial with a
-    // pulsing "live" cursor even though nothing is running.
-    this.finalizeTurn();
+    // Release the old resources before final-caption subscribers can Start.
+    // cleanup does not clear turn text; finalizeTurn snapshots and commits it.
     this.cleanup();
+    this.finalizeTurn();
+    resolveStop?.();
   }
 
-  private async mintToken(): Promise<{ token: string; model: string }> {
-    // Use a pre-warmed token if one is fresh (single-use; reconnects mint fresh).
-    const warm = warmGemini.consume(this.tokenUrl);
-    if (warm) return warm;
-    return postGeminiToken(this.tokenUrl);
+  /** Settles after the existing bounded Stop drain has emitted its final events. */
+  waitForStop(): Promise<void> {
+    return this.stopComplete;
   }
 
-  private connect(token: string, model: string): Promise<void> {
+  private newAttempt(generation: number, label: string): RecoveryAttempt {
+    this.attempt?.cancel(new SetupAbortedError());
+    const attempt = createRecoveryAttempt({
+      generation,
+      isCurrent: (value) => this.isCurrentGeneration(value),
+      label,
+    });
+    this.attempt = attempt;
+    return attempt;
+  }
+
+  private finishAttempt(attempt: RecoveryAttempt): void {
+    attempt.dispose();
+    if (this.attempt === attempt) this.attempt = null;
+  }
+
+  private mintToken(attempt: RecoveryAttempt): Promise<GeminiToken> {
+    return attempt.run((signal) => {
+      assertRecoveryAllowed('gemini', 'translation');
+      const warm = warmGemini.consume(this.tokenUrl);
+      return warm ? Promise.resolve(warm) : postGeminiToken(this.tokenUrl, signal);
+    });
+  }
+
+  private async connectAttempt(generation: number, prepared?: GeminiToken): Promise<void> {
+    const attempt = this.newAttempt(generation, 'Gemini recovery');
+    try {
+      attempt.assertActive();
+      assertRecoveryAllowed('gemini', 'translation');
+      if (this.freshSessionFallback) this.finalizeTurn();
+      const token = prepared ?? (await this.mintToken(attempt));
+      await attempt.run((signal) => this.connect(token.token, token.model, signal));
+    } finally {
+      this.finishAttempt(attempt);
+    }
+  }
+
+  private async connect(token: string, model: string, signal: AbortSignal): Promise<void> {
     assertTranslateModel(model);
+    const resuming = this.resumptionHandle !== null;
 
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(`${GEMINI_WS_BASE}?access_token=${encodeURIComponent(token)}`);
       ws.binaryType = 'arraybuffer';
       this.ws = ws;
+      this.setupReady = false;
 
       let settled = false;
       let setupReady = false;
@@ -448,36 +563,78 @@ export class GeminiLiveProvider implements CaptionProvider {
         if (settled) return;
         settled = true;
         setupReady = true;
-        clearTimeout(timeout);
+        this.setupReady = true;
+        signal.removeEventListener('abort', abort);
         this.settleSetupOnTeardown = null;
         resolve();
       };
       const fail = (error: Error) => {
         if (settled) return;
         settled = true;
-        clearTimeout(timeout);
+        signal.removeEventListener('abort', abort);
         this.settleSetupOnTeardown = null;
+        if (this.ws === ws) {
+          this.ws = null;
+          this.setupReady = false;
+        }
+        try {
+          ws.close();
+        } catch {
+          /* already gone */
+        }
         reject(error);
       };
       // Intentional teardown (Stop / provider switch) while the handshake is
-      // still open: settle now with the sentinel so the 15 s timer dies with it.
+      // still open: settle now with the sentinel so the attempt dies with it.
       this.settleSetupOnTeardown = () => fail(new SetupAbortedError());
       const handleText = (text: string) => {
+        if (this.ws !== ws || (this._status !== 'running' && !this.draining)) return;
         let message: GeminiServerMessage;
         try {
           message = JSON.parse(text) as GeminiServerMessage;
         } catch {
           return;
         }
+        // Stop releases capture immediately, but the current socket still owns
+        // a bounded tail. Only content may flow during that drain; setup,
+        // resumption and GoAway must not revive health or schedule recovery.
+        if (this.draining) {
+          if (message.error) this.finishStop();
+          else if (message.serverContent)
+            this.handleServerObject({ serverContent: message.serverContent });
+          return;
+        }
+        if (message.error) {
+          const kind = protocolRecoveryKind(message.error);
+          const failure = recoveryError(
+            kind,
+            'gemini',
+            'translation',
+            'Gemini Live protocol failure',
+            kind === 'rate-limit' ? performance.now() + 15_000 : undefined,
+          );
+          if (!setupReady) fail(failure);
+          else {
+            this.ws = null;
+            this.setupReady = false;
+            ws.close();
+            this.retryAfterFailure(failure);
+          }
+          return;
+        }
         this.handleServerObject(message);
         if (message.setupComplete !== undefined) succeed();
       };
-      const timeout = setTimeout(() => {
-        fail(new Error('Gemini Live WebSocket setup timed out'));
-        ws.close();
-      }, 15000);
+      const abort = () =>
+        fail(signal.reason instanceof Error ? signal.reason : new SetupAbortedError());
+      signal.addEventListener('abort', abort, { once: true });
+      if (signal.aborted) {
+        abort();
+        return;
+      }
 
       ws.onopen = () => {
+        if (this.ws !== ws || this._status !== 'running') return;
         ws.send(JSON.stringify(this.buildSetup(model)));
         // reconnectAttempts is reset only after setupComplete proves the
         // session is usable. A raw socket open is not readiness.
@@ -506,13 +663,32 @@ export class GeminiLiveProvider implements CaptionProvider {
         if (!setupReady) fail(new Error('Gemini Live WebSocket error before setupComplete'));
       };
 
-      ws.onclose = () => {
+      ws.onclose = (event: CloseEvent) => {
         if (this.ws !== ws) return;
+        this.setupReady = false;
+        this.lastServerContentAt = 0;
+        this.cancelRotation();
         if (!setupReady) {
-          fail(new Error('Gemini Live WebSocket closed before setupComplete'));
+          // A bounded recovery policy, not a claim that this close code proves
+          // the handle invalid. Only actual resumed setup closes count.
+          if (resuming) {
+            this.resumedSetupFailures += 1;
+            if (this.resumedSetupFailures >= 2) {
+              this.resumptionHandle = null;
+              this.freshSessionFallback = true;
+            }
+          }
+          const code = Number.isInteger(event?.code) ? event.code : 1006;
+          fail(new GeminiSocketCloseError(code));
           return;
         }
-        if (this._status === 'running') this.scheduleReconnect();
+        // setupComplete resolves asynchronously: close may arrive before the
+        // attempt promise clears its in-flight flag.
+        this.reconnectInFlight = false;
+        if (this._status === 'running') {
+          const code = Number.isInteger(event?.code) ? event.code : 1006;
+          this.scheduleReconnect(0, `Gemini socket closed (code ${code})`);
+        }
       };
     });
   }
@@ -548,39 +724,35 @@ export class GeminiLiveProvider implements CaptionProvider {
    * via handlers so unit tests can drive it without a live socket.
    */
   handleServerObject(msg: GeminiServerMessage): void {
-    // Any server message proves the upstream is alive — feed the wedge detector.
-    // Only refresh once ARMED (lastServerContentAt > 0, set by setupComplete);
-    // the very first setupComplete arms it just below.
-    if (this.lastServerContentAt > 0) {
+    const generation = this.generation;
+    // Only actual caption progress resets the wedge detector. Resumption/control
+    // frames can continue arriving even while translation is stuck.
+    if (
+      this.lastServerContentAt > 0 &&
+      (msg.serverContent?.inputTranscription?.text?.trim() ||
+        msg.serverContent?.outputTranscription?.text?.trim())
+    ) {
       this.lastServerContentAt = Date.now();
       this.audioActiveSamplesSinceContent = 0;
     }
     if (msg.setupComplete !== undefined) {
-      this.emitHealth('transport', 'connected');
-      // Session is proven live — NOW reset the reconnect attempt counter (see
-      // ws.onopen). Arm the receive-side wedge detector too.
+      const message = this.freshSessionFallback
+        ? 'Connected with a new Gemini session; context may be interrupted'
+        : undefined;
+      this.resumedSetupFailures = 0;
+      this.freshSessionFallback = false;
       this.reconnectAttempts = 0;
-      // The outage is genuinely over (a socket that merely opened proves
-      // nothing — see the connect-then-wedge regression), so retract the
-      // failover offer and let the next outage start its clock from zero.
-      this.disarmFailoverSignal();
       this.lastServerContentAt = Date.now();
       this.audioActiveSamplesSinceContent = 0;
+      // State is committed before subscribers can Stop or replace this session.
+      this.emitHealth('transport', 'connected', message);
       return;
     }
     if (msg.sessionResumptionUpdate?.newHandle && msg.sessionResumptionUpdate.resumable !== false) {
       this.resumptionHandle = msg.sessionResumptionUpdate.newHandle;
     }
     if (msg.goAway) {
-      // Server will close soon — reconnect proactively using the latest handle.
-      // Commit the in-flight utterance first so the rotation doesn't orphan it.
-      this.emitHealth('transport', 'reconnecting', 'Gemini session rotating (GoAway)');
-      this.finalizeTurn();
-      try {
-        this.ws?.close();
-      } catch {
-        /* noop */
-      }
+      this.prepareRotation(msg.goAway.timeLeft);
       return;
     }
 
@@ -594,24 +766,32 @@ export class GeminiLiveProvider implements CaptionProvider {
       this.ensureTurn();
       this.srcText += inTx.text;
       if (inTx.languageCode) this.lastInputLang = inTx.languageCode.toLowerCase();
-      this.handlers.onTranscript(this.transcript('partial', this.srcText));
+      if (this.srcText.trim()) this.handlers.onTranscript(this.transcript('partial', this.srcText));
+      if (generation !== this.generation) return;
       // Source-side check too — covers the echo-silent case where no
       // translation deltas will ever arrive to drive finalization.
       this.maybeFinalizeOnSentence();
+      if (generation !== this.generation) return;
     }
     if (sc.outputTranscription?.text) {
       this.ensureTurn();
       this.tgtText += sc.outputTranscription.text;
-      this.emitLiveAnchor();
-      this.handlers.onTranslation(this.translation('draft', source, target));
+      if (this.tgtText.trim()) {
+        this.emitLiveAnchor();
+        if (generation !== this.generation) return;
+        this.handlers.onTranslation(this.translation('draft', source, target));
+        if (generation !== this.generation) return;
+      }
       // The dedicated translate model streams continuously and never sends
       // turnComplete, so finalize segments ourselves on sentence boundaries —
       // otherwise one live line grows unbounded and history never populates.
       this.maybeFinalizeOnSentence();
+      if (generation !== this.generation) return;
     }
     // Honour explicit turn markers defensively if the service emits them.
     if (sc.turnComplete || sc.generationComplete) {
       this.finalizeTurn();
+      if (generation !== this.generation) return;
       // If we are draining after Stop, that marker IS the flush completing —
       // close out now instead of holding the socket for the rest of the cap.
       if (this.draining) this.finishStop();
@@ -639,11 +819,16 @@ export class GeminiLiveProvider implements CaptionProvider {
     // completion marker), surface the translation text as the transcript too —
     // an imperfect source column beats an invisible caption.
     const srcOut = this.srcText.trim() ? this.srcText : this.tgtText;
-    if (srcOut.trim()) this.handlers.onTranscript(this.transcript('final', srcOut));
-    if (this.tgtText.trim()) this.handlers.onTranslation(this.translation('final', source, target));
+    const transcript = srcOut.trim() ? this.transcript('final', srcOut) : null;
+    const translation = this.tgtText.trim() ? this.translation('final', source, target) : null;
+    const generation = this.generation;
+    // Detach the old turn before callbacks. Nested input belongs to a new turn.
     this.curId = null;
     this.srcText = '';
     this.tgtText = '';
+    if (transcript) this.handlers.onTranscript(transcript);
+    if (generation !== this.generation) return;
+    if (translation) this.handlers.onTranslation(translation);
   }
 
   /** Primary language subtag of the translation target (echo detection). */
@@ -727,115 +912,169 @@ export class GeminiLiveProvider implements CaptionProvider {
     };
   }
 
-  /**
-   * Force-close a wedged-but-OPEN socket so its onclose handler kicks off the
-   * normal reconnect (which resumes the session via resumptionHandle). Used by
-   * the receive-side wedge detector in the level-polling loop.
-   */
-  private forceReconnect(): void {
-    // Commit the in-flight utterance BEFORE tearing the socket down (parity with
-    // OpenAI's flushSegment-before-swap). Otherwise the half-accumulated turn is
-    // neither finalized into history nor cleared: the resumed session keeps
-    // appending into the same stale curId, mixing pre/post-reconnect text or
-    // leaving an orphaned live partial on the board.
-    this.finalizeTurn();
+  /** Retire locally before close: browser close events have no bounded latency. */
+  private retireSocket(): void {
+    const old = this.ws;
+    this.ws = null;
+    this.setupReady = false;
+    this.lastServerContentAt = 0;
+    this.settleSetupOnTeardown?.();
     try {
-      this.ws?.close();
+      old?.close();
     } catch {
-      /* noop */
+      /* already gone */
     }
+    this.finalizeTurn();
   }
 
-  /**
-   * Arm the outage clock. Fires once, FAILOVER_SIGNAL_AFTER_MS after the outage
-   * began, and flips health to 'failed' so the cross-model failover UI can offer
-   * a one-click switch — while the backoff ladder keeps retrying underneath.
-   * A reconnect that reaches setupComplete disarms it, so a transient drop never
-   * reaches the operator.
-   */
-  private armFailoverSignal(): void {
-    if (this.failoverSignalTimer !== null || this.outageSurfaced) return;
-    this.failoverSignalTimer = setTimeout(() => {
-      this.failoverSignalTimer = null;
-      if (this._status !== 'running') return;
-      this.outageSurfaced = true;
-      this.emitHealth(
-        'transport',
-        'failed',
-        `Gemini has been down for ${FAILOVER_SIGNAL_AFTER_MS / 1000}s (still retrying) — you can switch backend`,
+  private cancelRotation(): void {
+    if (!this.rotation) return;
+    clearTimeout(this.rotation.timer);
+    this.rotation = null;
+    this.attempt?.cancel(new SetupAbortedError());
+  }
+
+  private prepareRotation(timeLeft?: string): void {
+    if (this._status !== 'running' || !this.ws || this.rotation) return;
+    const generation = this.generation;
+    const seconds = timeLeft?.match(/^(\d+(?:\.\d+)?)s$/);
+    // Reserve the 12s recovery budget + 2s margin within the announced grace period.
+    // Cap preparation at 30s so a single-use ephemeral token is not held indefinitely.
+    // Invalid/missing durations rotate immediately.
+    const graceMs = seconds ? Number(seconds[1]) * 1000 : 0;
+    const shortGrace = graceMs <= RECOVERY_ATTEMPT_TIMEOUT_MS + 2_000;
+    const remaining = shortGrace
+      ? Math.max(0, graceMs - 1_000)
+      : Math.min(30_000, graceMs - RECOVERY_ATTEMPT_TIMEOUT_MS - 2_000);
+    let prepared: GeminiToken | null = null;
+    const rotate = () => {
+      if (this.rotation !== rotation || !this.isCurrentGeneration(generation)) return;
+      this.cancelRotation();
+      this.retireSocket();
+      if (!this.isCurrentGeneration(generation)) return;
+      this.emitHealth('transport', 'reconnecting', 'Gemini session rotating (GoAway)');
+      if (!this.isCurrentGeneration(generation)) return;
+      if (!prepared) {
+        this.scheduleReconnect();
+        return;
+      }
+      this.reconnectInFlight = true;
+      void this.connectAttempt(generation, prepared).then(
+        () => {
+          if (this.isCurrentGeneration(generation)) this.reconnectInFlight = false;
+        },
+        (error: unknown) => {
+          if (!this.isCurrentGeneration(generation)) return;
+          this.reconnectInFlight = false;
+          if (error instanceof SetupAbortedError) return;
+          this.retryAfterFailure(error);
+        },
       );
-    }, FAILOVER_SIGNAL_AFTER_MS);
+    };
+    const rotation = { timer: setTimeout(rotate, remaining) };
+    this.rotation = rotation;
+    // Pre-mint while the original session continues receiving and sending.
+    // Use its most recent resumption handle only at the planned cutover.
+    const preparation = this.newAttempt(generation, 'Gemini rotation preparation');
+    void this.mintToken(preparation)
+      .then((token) => {
+        if (this.rotation === rotation && this.isCurrentGeneration(generation)) {
+          prepared = token;
+          if (shortGrace) rotate();
+        }
+      })
+      .catch(() => {
+        // The old socket remains useful; the deadline owns eventual recovery.
+      })
+      .finally(() => this.finishAttempt(preparation));
   }
 
-  /** Outage over (or session torn down): stop reporting one. */
-  private disarmFailoverSignal(): void {
-    if (this.failoverSignalTimer !== null) {
-      clearTimeout(this.failoverSignalTimer);
-      this.failoverSignalTimer = null;
-    }
-    this.outageSurfaced = false;
+  private forceReconnect(): void {
+    const generation = this.generation;
+    this.cancelRotation();
+    this.retireSocket();
+    if (this.isCurrentGeneration(generation)) this.scheduleReconnect();
   }
 
-  /**
-   * Persistent reconnect with capped backoff. NEVER gives up — a long meeting
-   * must heal itself even after many consecutive failures. The failover
-   * affordance is driven by the outage clock (armFailoverSignal), not by this
-   * ladder's rung count. The early-return guard prevents a double arm when both
-   * ws.onclose AND a failed mint/connect attempt call us in the same tick.
-   */
-  private scheduleReconnect(): void {
-    if (this.reconnectTimer !== null) return; // already scheduled
-    this.armFailoverSignal();
+  /** Persistent bounded retries; a failed attempt never stops the meeting. */
+  private scheduleReconnect(minimumDelay = 0, reason = 'WS dropped'): void {
+    if (this._status !== 'running' || this.reconnectTimer !== null || this.reconnectInFlight)
+      return;
+    const generation = this.generation;
     const idx = Math.min(this.reconnectAttempts, RECONNECT_BACKOFF_MS.length - 1);
-    const delayMs = RECONNECT_BACKOFF_MS[idx]!;
+    const delayMs = Math.min(2_147_483_647, Math.max(RECONNECT_BACKOFF_MS[idx]!, minimumDelay));
     this.reconnectAttempts += 1;
-    if (this.outageSurfaced) {
-      this.emitHealth(
-        'transport',
-        'failed',
-        `Gemini reconnect attempt ${this.reconnectAttempts} (retrying in ${delayMs / 1000}s) — you can switch backend`,
-      );
-    } else {
+    this.emitHealth(
+      'transport',
+      'reconnecting',
+      `${this.freshSessionFallback ? 'Gemini resumption could not connect; trying a new session (context may be interrupted)' : reason} — retry ${this.reconnectAttempts} in ${delayMs / 1000}s`,
+    );
+    if (!this.isCurrentGeneration(generation)) return;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (!this.isCurrentGeneration(generation)) return;
+      this.reconnectInFlight = true;
       this.emitHealth(
         'transport',
         'reconnecting',
-        `WS dropped — retry ${this.reconnectAttempts} in ${delayMs / 1000}s`,
+        this.freshSessionFallback
+          ? 'Trying a new Gemini session; context may be interrupted'
+          : 'Gemini reconnect handshake in progress',
       );
-    }
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      if (this._status !== 'running') return;
-      // Re-mint a fresh token (uses:1) then reconnect, resuming the session.
-      this.mintToken()
-        .then(({ token, model }) => this.connect(token, model))
-        // Mint/connect failed — continue the backoff. scheduleReconnect emits
-        // the user-facing reconnecting/failed state, so no extra emit here.
-        .catch((err: unknown) => {
-          // Teardown aborted this handshake: re-arming the ladder here would
-          // leak a timer and emit a reconnecting state after Stop.
-          if (err instanceof SetupAbortedError) return;
-          this.scheduleReconnect();
+      if (!this.isCurrentGeneration(generation)) return;
+      this.connectAttempt(generation)
+        .then(() => {
+          if (this.isCurrentGeneration(generation)) this.reconnectInFlight = false;
+        })
+        .catch((error: unknown) => {
+          if (!this.isCurrentGeneration(generation)) return;
+          this.reconnectInFlight = false;
+          if (error instanceof SetupAbortedError) return;
+          this.retryAfterFailure(error);
         });
     }, delayMs);
   }
 
-  private async startAudioCapture(): Promise<void> {
+  private retryAfterFailure(error: unknown): void {
+    const generation = this.generation;
+    if (!this.isCurrentGeneration(generation)) return;
+    const failure = normalizeRecoveryError(error, 'gemini', 'translation');
+    const gate = recoveryFailureFor('gemini', 'translation');
+    const retryDelay = Math.max(0, (gate?.retryNotBeforeMs ?? 0) - performance.now());
+    if (!permanentRecoveryFailure(gate)) this.scheduleReconnect(retryDelay);
+    if (!this.isCurrentGeneration(generation)) return;
+    const detail = this.freshSessionFallback
+      ? 'Gemini resumed setup failed; trying a new session (context may be interrupted)'
+      : error instanceof RecoveryError
+        ? error.message
+        : error instanceof GeminiSocketCloseError
+          ? error.message
+          : 'Gemini reconnect attempt failed';
+    this.emitHealth(
+      'transport',
+      'failed',
+      `${detail} — ${permanentRecoveryFailure(gate) ? '請修正服務設定後手動重試' : 'retry scheduled — you can switch backend'}`,
+      failure.failure,
+    );
+  }
+
+  private isCurrentGeneration(generation: number): boolean {
+    return this._status === 'running' && this.generation === generation;
+  }
+
+  private async startAudioCapture(generation: number, signal: AbortSignal): Promise<void> {
     if (!this.stream) return;
+    // The shared context is engine-owned; a provider must never close it.
+    const ctx = getCaptureContext();
+    if (!ctx) {
+      const error = new Error('AudioContext unavailable — cannot capture audio');
+      this.emitHealth('audio', 'failed', error.message);
+      throw error;
+    }
     try {
-      // Reuse the shared, pre-warmed 16 kHz capture context + worklet module
-      // (the per-start `new AudioContext` + `addModule` rebuild was pure
-      // startup latency). The engine owns the context; we never close it.
-      const ctx = getCaptureContext();
-      if (!ctx) {
-        // 'failed', not 'degraded'. Without a context no audio can EVER be
-        // sent, so the session would sit there looking connected and produce
-        // captions forever — which is the silent failure the reliability rules
-        // exist to forbid. Degraded means worse; this is not worse, it is off.
-        this.emitHealth('audio', 'failed', 'AudioContext unavailable — cannot capture audio');
-        return;
-      }
       this.audioCtx = ctx;
-      await ensureCaptureWorklet(ctx);
+      await ensureCaptureWorklet(ctx, signal);
+      if (!this.isCurrentGeneration(generation) || !this.stream) return;
       this.sourceNode = ctx.createMediaStreamSource(this.stream);
       const source = this.sourceNode;
       this.workletNode = new AudioWorkletNode(ctx, 'pcm-worklet', {
@@ -844,8 +1083,23 @@ export class GeminiLiveProvider implements CaptionProvider {
         channelInterpretation: 'speakers',
         processorOptions: { chunkSize: GEMINI_PCM_CHUNK_SIZE },
       });
+      const captureHealth = (this.captureHealth = monitorCaptureHealth({
+        context: ctx,
+        stream: this.stream,
+        onHealth: (event) => {
+          if (this.isCurrentGeneration(generation)) this.handlers.onHealth(event);
+        },
+      }));
       this.workletNode.port.onmessage = (ev: MessageEvent<ArrayBuffer>) => {
-        if (this._status !== 'running' || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+        if (!this.isCurrentGeneration(generation)) return;
+        captureHealth.frame(ev.data.byteLength / 4);
+        if (
+          !this.isCurrentGeneration(generation) ||
+          !this.setupReady ||
+          !this.ws ||
+          this.ws.readyState !== WebSocket.OPEN
+        )
+          return;
         // Backpressure guard (mirrors OfflineSTTProvider): a stalled-but-OPEN
         // socket would otherwise grow the browser send buffer without bound
         // over a long meeting. Drop frames above the threshold, surface the
@@ -853,9 +1107,12 @@ export class GeminiLiveProvider implements CaptionProvider {
         if (this.ws.bufferedAmount > GeminiLiveProvider.WS_BACKPRESSURE_THRESHOLD) {
           this.wsBackpressureDropCount += 1;
           this.wsBackpressureConsecutiveDrops += 1;
-          if (this.wsBackpressureDropCount % 50 === 0) {
+          if (
+            this.wsBackpressureConsecutiveDrops === 1 ||
+            this.wsBackpressureDropCount % 50 === 0
+          ) {
             this.emitHealth(
-              'audio',
+              'transport',
               'degraded',
               `Gemini link slow — ${this.wsBackpressureDropCount} audio frames dropped`,
             );
@@ -867,32 +1124,38 @@ export class GeminiLiveProvider implements CaptionProvider {
               'Sustained WS backpressure — forcing reconnect',
             );
             this.wsBackpressureConsecutiveDrops = 0;
-            try {
-              this.ws.close();
-            } catch {
-              /* noop */
-            }
+            this.forceReconnect();
           }
           return;
         }
-        this.wsBackpressureConsecutiveDrops = 0;
+        const resumingDelivery = this.wsBackpressureConsecutiveDrops > 0;
         const pcm16 = floatTo16BitPCM(new Float32Array(ev.data));
         const b64 = arrayBufferToBase64(pcm16);
         this.ws.send(
           JSON.stringify({
-            realtimeInput: { audio: { data: b64, mimeType: 'audio/pcm;rate=16000' } },
+            // Live accepts other rates and resamples; never label fallback 48kHz as 16kHz.
+            realtimeInput: { audio: { data: b64, mimeType: `audio/pcm;rate=${ctx.sampleRate}` } },
           }),
         );
+        this.wsBackpressureConsecutiveDrops = 0;
+        if (resumingDelivery)
+          this.emitHealth(
+            'transport',
+            'connected',
+            'Audio delivery resumed; waiting for new content',
+          );
       };
       source.connect(this.workletNode);
       this.workletNode.connect(ctx.destination);
-      await resumeCaptureContext();
+      await resumeCaptureContext(signal);
     } catch (err) {
-      // Same reasoning: the capture graph did not come up, so nothing will be
-      // sent. Report it as the failure it is, and say what went wrong rather
-      // than blaming the worklet for every possible cause.
+      if (!this.isCurrentGeneration(generation)) return;
+      // A live source can outlast a slow/rejected local graph initialization.
+      // Keep automatic meeting recovery eligible; start() reports the failed
+      // attempt and cleans up. Source permission/ended failures remain fatal.
       const detail = err instanceof Error ? err.message : 'unknown error';
-      this.emitHealth('audio', 'failed', `Audio capture could not start — ${detail}`);
+      this.emitHealth('audio', 'degraded', `Audio capture could not start — ${detail}`);
+      throw err;
     }
   }
 
@@ -918,11 +1181,14 @@ export class GeminiLiveProvider implements CaptionProvider {
       }
 
       // Receive-side wedge detection. Count cumulative audio-active ticks since
-      // the last server message; if audio is clearly flowing in but the server
+      // the last caption text; if audio is clearly flowing in but the server
       // has gone silent past the threshold, the session is wedged — force a
       // reconnect. lastServerContentAt === 0 means the detector is disarmed
       // (not yet connected, or already reconnecting), so we skip it then.
-      if (rmsDb > audioActiveDb) this.audioActiveSamplesSinceContent += 1;
+      if (this.captureHealth && !this.captureHealth.healthy) {
+        this.lastServerContentAt = now;
+        this.audioActiveSamplesSinceContent = 0;
+      } else if (rmsDb > audioActiveDb) this.audioActiveSamplesSinceContent += 1;
       if (this.lastServerContentAt > 0) {
         const gap = now - this.lastServerContentAt;
         if (
@@ -933,6 +1199,13 @@ export class GeminiLiveProvider implements CaptionProvider {
             'transport',
             'degraded',
             `Wedged: ${Math.round(gap / 1000)}s no server content while audio active — reconnecting`,
+            {
+              layer: 'provider',
+              kind: 'stalled',
+              provider: 'gemini',
+              purpose: 'translation',
+              attemptId: crypto.randomUUID(),
+            },
           );
           // Disarm until the reconnect re-arms via setupComplete, so this does
           // not double-fire during the reconnect window.
@@ -960,6 +1233,10 @@ export class GeminiLiveProvider implements CaptionProvider {
    * now, not in three seconds. Idempotent: cleanup() calls it again.
    */
   private stopCapture(): void {
+    this.captureHealth?.dispose();
+    this.captureHealth = null;
+    this.captureController?.abort(new SetupAbortedError());
+    this.captureController = null;
     if (this.levelInterval !== null) {
       clearInterval(this.levelInterval);
       this.levelInterval = null;
@@ -984,10 +1261,16 @@ export class GeminiLiveProvider implements CaptionProvider {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
-    // A stopped session has no outage to report; leaving this armed would fire
-    // 'failed' onto whatever session is running by then.
-    this.disarmFailoverSignal();
+    // Cancel pending rotation/token work so it cannot outlive this session.
+    this.cancelRotation();
+    this.attempt?.cancel(new SetupAbortedError());
+    this.attempt = null;
+    this.reconnectInFlight = false;
+    this.setupReady = false;
     this.reconnectAttempts = 0;
+    this.resumedSetupFailures = 0;
+    this.freshSessionFallback = false;
+    this.resumptionHandle = null;
     this.lastServerContentAt = 0;
     this.audioActiveSamplesSinceContent = 0;
     this.wsBackpressureDropCount = 0;
@@ -997,7 +1280,12 @@ export class GeminiLiveProvider implements CaptionProvider {
     this.ws = null;
   }
 
-  private emitHealth(component: string, state: string, message?: string): void {
+  private emitHealth(
+    component: string,
+    state: string,
+    message?: string,
+    recoveryFailure?: HealthEvent['recoveryFailure'],
+  ): void {
     const ev: HealthEvent = {
       kind: 'health',
       component: component as HealthEvent['component'],
@@ -1005,6 +1293,7 @@ export class GeminiLiveProvider implements CaptionProvider {
       timestamp: iso(),
     };
     if (message !== undefined) ev.message = message;
+    if (recoveryFailure !== undefined) ev.recoveryFailure = recoveryFailure;
     this.handlers.onHealth(ev);
   }
 }

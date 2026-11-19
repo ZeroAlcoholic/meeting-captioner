@@ -5,6 +5,8 @@ import { TranscriptEvent } from './transcript-event.js';
 import { TranslationEvent } from './translation-event.js';
 
 export * from './common.js';
+export * from './caption-task.js';
+export * from './glossary.js';
 export * from './transcript-event.js';
 export * from './translation-event.js';
 export * from './health-event.js';
@@ -17,3 +19,4 @@ export const NormalizedEvent = z.discriminatedUnion('kind', [
   AudioLevelEvent,
 ]);
 export type NormalizedEvent = z.infer<typeof NormalizedEvent>;
+export * from './meeting-event.js';

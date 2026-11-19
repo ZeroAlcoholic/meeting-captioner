@@ -275,6 +275,19 @@ Allowed retention:
 - explicit user export
 - later local-only autosave after user opt-in
 
+2026-11-10 phone-build exception (user-approved, see docs/DECISIONS.md D21): the
+static phone page (`apps/web/mobile.html`, `src/mobile/`) has no server, so the
+user's own key is entered on the device and kept only in that browser's
+localStorage. It must never be bundled, committed, logged or sent anywhere but
+the matching provider's token endpoint. Every other build keeps keys server-side.
+
+2026-10-08 task-specific opt-in: the user explicitly requires complete local
+meeting transcript retention. The new pure-transcription workspace therefore
+auto-saves normalized text, revisions and known gaps to local SQLite with an
+independent IndexedDB delivery queue, with visible persistence status. This
+does not enable raw audio recording or cloud summary processing. Existing
+translation retention preferences are not silently changed.
+
 ---
 
 ## Provider Abstraction Requirement

@@ -1,0 +1,174 @@
+{
+  "version": 1,
+  "status": "recording-prompts-not-gold-audio",
+  "cases": [
+    {
+      "id": "mix-01",
+      "scenario": "near-mic-code-switch",
+      "script": "這個 sprint 的 scope 先 freeze，API latency 目標是 p95 300 ms。",
+      "criticalTerms": ["sprint", "scope", "freeze", "API", "p95", "300 ms"],
+      "split": "calibration"
+    },
+    {
+      "id": "mix-02",
+      "scenario": "negation",
+      "script": "不是 approve，是 pending review。",
+      "criticalTerms": ["不是", "approve", "pending review"],
+      "split": "calibration"
+    },
+    {
+      "id": "mix-03",
+      "scenario": "self-correction",
+      "script": "先用版本 2.3，不對，改用 2.3.1，production 先不要 deploy。",
+      "criticalTerms": ["2.3.1", "不要", "production", "deploy"],
+      "split": "calibration"
+    },
+    {
+      "id": "mix-04",
+      "scenario": "date",
+      "script": "截止日是十月二十一日，不是十一月二十日，deadline 不變。",
+      "criticalTerms": ["十月二十一日", "不是", "deadline"],
+      "split": "calibration"
+    },
+    {
+      "id": "mix-05",
+      "scenario": "currency",
+      "script": "預算是新台幣三萬元，USD 一千只是估算，不是核准金額。",
+      "criticalTerms": ["三萬元", "USD", "不是核准"],
+      "split": "calibration"
+    },
+    {
+      "id": "mix-06",
+      "scenario": "url",
+      "script": "請開啟 https://example.com/api/v2，再看 status page。",
+      "criticalTerms": ["example.com", "api/v2", "status page"],
+      "split": "calibration"
+    },
+    {
+      "id": "mix-07",
+      "scenario": "email",
+      "script": "測試信箱是 qa@example.com，subject 請寫 release check。",
+      "criticalTerms": ["qa@example.com", "subject", "release check"],
+      "split": "calibration"
+    },
+    {
+      "id": "mix-08",
+      "scenario": "acronyms",
+      "script": "先確認 SSO、OAuth 和 API key，不能把 token 寫進 log。",
+      "criticalTerms": ["SSO", "OAuth", "API key", "不能", "token", "log"],
+      "split": "calibration"
+    },
+    {
+      "id": "mix-09",
+      "scenario": "english-sentence",
+      "script": "We should keep the original transcript. Do not translate the technical terms.",
+      "criticalTerms": ["original transcript", "Do not translate", "technical terms"],
+      "split": "calibration"
+    },
+    {
+      "id": "mix-10",
+      "scenario": "repetition",
+      "script": "對，對，這一項先保留。保留，等 QA 確認。",
+      "criticalTerms": ["對，對", "保留", "QA"],
+      "split": "calibration"
+    },
+    {
+      "id": "mix-11",
+      "scenario": "proposal-not-decision",
+      "script": "我提議下週上線，但還沒有決議，先列 open question。",
+      "criticalTerms": ["提議", "還沒有決議", "open question"],
+      "split": "calibration"
+    },
+    {
+      "id": "mix-12",
+      "scenario": "long-utterance",
+      "script": "先討論資料備份再看 recovery，服務重啟之後要確認所有已保存的 transcript 都在，而且 export 必須包含整場，不只是目前畫面。",
+      "criticalTerms": ["recovery", "transcript", "export", "整場"],
+      "split": "calibration"
+    },
+    {
+      "id": "mix-13",
+      "scenario": "far-field-code-switch",
+      "script": "今天先做 staging 的 smoke test，正式 production 暫時不動。",
+      "criticalTerms": ["staging", "smoke test", "production", "不動"],
+      "split": "holdout"
+    },
+    {
+      "id": "mix-14",
+      "scenario": "two-speaker-turns",
+      "script": "甲：這個 issue 已經 close 了嗎？乙：還沒，目前是 blocked。",
+      "criticalTerms": ["issue", "close", "還沒", "blocked"],
+      "split": "holdout"
+    },
+    {
+      "id": "mix-15",
+      "scenario": "quiet-speaker",
+      "script": "我補充一下，cache invalidation 還沒有測完。",
+      "criticalTerms": ["cache invalidation", "還沒有"],
+      "split": "holdout"
+    },
+    {
+      "id": "mix-16",
+      "scenario": "interrupt-correction",
+      "script": "甲：可以直接 merge。乙：等一下，先不要 merge，test 還是 failed。",
+      "criticalTerms": ["不要 merge", "test", "failed"],
+      "split": "holdout"
+    },
+    {
+      "id": "mix-17",
+      "scenario": "percentage",
+      "script": "成功率是百分之九十九點九，不是百分之九十九，SLA 要分清楚。",
+      "criticalTerms": ["九十九點九", "不是", "SLA"],
+      "split": "holdout"
+    },
+    {
+      "id": "mix-18",
+      "scenario": "product-name",
+      "script": "Chrome 的 WebRTC 和 WebSocket 都要驗證，但這一版只上線其中一條。",
+      "criticalTerms": ["Chrome", "WebRTC", "WebSocket", "只"],
+      "split": "holdout"
+    },
+    {
+      "id": "mix-19",
+      "scenario": "units",
+      "script": "音訊 sample rate 是二十四 kHz，buffer 上限十六 MiB。",
+      "criticalTerms": ["sample rate", "二十四", "kHz", "十六", "MiB"],
+      "split": "holdout"
+    },
+    {
+      "id": "mix-20",
+      "scenario": "english-to-mandarin",
+      "script": "The release is postponed. 我們先修 storage，再確認資料沒有遺失。",
+      "criticalTerms": ["postponed", "storage", "沒有遺失"],
+      "split": "holdout"
+    },
+    {
+      "id": "mix-21",
+      "scenario": "short-utterance",
+      "script": "不行。Retry。",
+      "criticalTerms": ["不行", "Retry"],
+      "split": "holdout"
+    },
+    {
+      "id": "mix-22",
+      "scenario": "topic-return",
+      "script": "回到剛才 backup 的議題，原本每小時一次改成每天一次，這還只是 proposal。",
+      "criticalTerms": ["backup", "每天一次", "proposal"],
+      "split": "holdout"
+    },
+    {
+      "id": "mix-23",
+      "scenario": "silence",
+      "script": "",
+      "criticalTerms": [],
+      "split": "holdout"
+    },
+    {
+      "id": "mix-24",
+      "scenario": "stop-tail",
+      "script": "最後確認，這筆款項不能付款。",
+      "criticalTerms": ["不能付款"],
+      "split": "holdout"
+    }
+  ]
+}

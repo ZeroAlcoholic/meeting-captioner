@@ -1,4 +1,4 @@
-import type { AudioLevelEvent, HealthEvent } from '@meeting-audio/contracts';
+import type { AudioLevelEvent, CaptionTask, HealthEvent } from '@meeting-audio/contracts';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createSettingsStore, MODE_OPTIONS, SCENARIO_OPTIONS } from './settings-store.js';
 
@@ -51,11 +51,28 @@ describe('settingsStore — defaults', () => {
 });
 
 describe('settingsStore — setters', () => {
-  it('setScenario updates scenarioId', () => {
+  it('routes supported scenarios to their actual single capture source', () => {
     const store = createSettingsStore();
-    store.getState().setScenario('hybrid');
-    expect(store.getState().scenarioId).toBe('hybrid');
+    store.getState().setScenario('online_meeting_box');
+    expect(store.getState().scenarioId).toBe('online_meeting_box');
+    expect(store.getState().audioSource).toBe('system');
+    store.getState().setScenario('physical');
+    expect(store.getState().audioSource).toBe('mic');
   });
+
+  it.each(['hybrid', 'advanced'] as const)(
+    'rejects unavailable %s without changing capture',
+    (id) => {
+      const store = createSettingsStore();
+      store.getState().setScenario('online_meeting_box');
+      store.getState().setScenario(id);
+      expect(store.getState().scenarioId).toBe('online_meeting_box');
+      expect(store.getState().audioSource).toBe('system');
+      expect(store.getState().scenarioNotice).toBeTruthy();
+      store.getState().setScenario('physical');
+      expect(store.getState().scenarioNotice).toBeNull();
+    },
+  );
 
   it('setMode updates modeId', () => {
     const store = createSettingsStore();
@@ -65,6 +82,21 @@ describe('settingsStore — setters', () => {
 });
 
 describe('settingsStore — applyHealth', () => {
+  it('keeps capture faults above stale silence or connected reports until fresh capture resumes', () => {
+    const store = createSettingsStore();
+    store
+      .getState()
+      .applyHealth({ ...health('audio', 'degraded', 'stalled'), reason: 'capture_stalled' });
+    store.getState().applyHealth(health('transport', 'connected'));
+    store.getState().applyHealth(health('audio', 'silence_detected'));
+    store.getState().applyHealth(health('audio', 'connected'));
+    expect(store.getState().health.audio.state).toBe('degraded');
+    expect(store.getState().health.audio.reason).toBe('capture_stalled');
+    store.getState().applyHealth({ ...health('audio', 'connected'), reason: 'capture_resumed' });
+    expect(store.getState().health.audio.state).toBe('connected');
+    store.getState().applyHealth(health('audio', 'stopped'));
+    expect(store.getState().health.audio.reason).toBeUndefined();
+  });
   it('updates a single component without touching the others', () => {
     const store = createSettingsStore();
     store.getState().applyHealth(health('audio', 'connecting'));
@@ -111,7 +143,8 @@ describe('settingsStore — reset', () => {
   it('returns scenarioId, modeId and audioLevel to defaults', () => {
     const store = createSettingsStore();
     const api = store.getState();
-    api.setScenario('hybrid');
+    api.setScenario('online_meeting_box');
+    expect(store.getState().scenarioId).toBe('online_meeting_box');
     api.setMode('full_offline');
     api.applyAudioLevel(level(-30, -10));
     api.reset();
@@ -252,6 +285,100 @@ describe('settingsStore — micDistance + persistence', () => {
     expect(store.getState().micDistance).toBe('meeting');
   });
 
+  it('persists selected mic identity, keeps default explicit and rejects changes while running', () => {
+    expect(store.getState().micDeviceId).toBe('');
+    store.getState().setMicDeviceId('usb-mic');
+    expect(createSettingsStore().getState().micDeviceId).toBe('usb-mic');
+    store.getState().startSession();
+    store.getState().setMicDeviceId('another');
+    expect(store.getState().micDeviceId).toBe('usb-mic');
+    store.getState().stopSession();
+    store.getState().setMicDeviceId('');
+    expect(createSettingsStore().getState().micDeviceId).toBe('');
+  });
+
+  const transcription: CaptionTask = {
+    purpose: 'transcription',
+    inputLanguages: ['zh-tw', 'en'],
+    textPolicy: 'zh-TW-preserve-original',
+  };
+
+  it('defaults to the existing translation purpose without a notice', () => {
+    expect(store.getState().captionTask).toEqual({ purpose: 'translation', langPair: 'en→zh-TW' });
+    expect(store.getState().captionTaskNotice).toBeNull();
+  });
+
+  it.each(['en→zh-TW', 'zh-TW→en'])('migrates legacy direction %s', (langPair) => {
+    memLs.set('meeting-audio:settings:v1', JSON.stringify({ v: 1, langPair }));
+    expect(createSettingsStore().getState().captionTask).toEqual({
+      purpose: 'translation',
+      langPair,
+    });
+  });
+
+  it('persists and reloads pure captions without losing the previous translation direction', () => {
+    store.getState().setLangPair('zh-TW→en');
+    expect(store.getState().setCaptionTask(transcription)).toBe(true);
+    const fresh = createSettingsStore().getState();
+    expect(fresh.captionTask).toEqual(transcription);
+    expect(fresh.langPair).toBe('zh-TW→en');
+  });
+
+  it('keeps translation task and legacy direction aligned in both setter directions', () => {
+    store.getState().setLangPair('zh-TW→en');
+    expect(store.getState().captionTask).toEqual({ purpose: 'translation', langPair: 'zh-TW→en' });
+    store.getState().setCaptionTask({ purpose: 'translation', langPair: 'en→zh-TW' });
+    expect(store.getState().langPair).toBe('en→zh-TW');
+    store.getState().setCaptionTask(transcription);
+    store.getState().setLangPair('zh-TW→en');
+    expect(store.getState().captionTask).toEqual(transcription);
+  });
+
+  it.each([
+    '{bad json',
+    JSON.stringify({ v: 1, langPair: 'unsupported' }),
+    JSON.stringify({
+      v: 1,
+      captionTask: {
+        purpose: 'transcription',
+        inputLanguages: ['ja'],
+        textPolicy: 'zh-TW-preserve-original',
+      },
+    }),
+    JSON.stringify({ v: 1, captionTask: null }),
+  ])('uses a safe default with an explanation for malformed prefs %s', (raw) => {
+    memLs.set('meeting-audio:settings:v1', raw);
+    const fresh = createSettingsStore().getState();
+    expect(fresh.captionTask).toEqual({ purpose: 'translation', langPair: 'en→zh-TW' });
+    expect(fresh.captionTaskNotice).toBeTruthy();
+  });
+
+  it('rejects runtime-invalid tasks without replacing the selected purpose', () => {
+    store.getState().setCaptionTask(transcription);
+    expect(store.getState().setCaptionTask({ purpose: 'unknown' } as unknown as CaptionTask)).toBe(
+      false,
+    );
+    expect(store.getState().captionTask).toEqual(transcription);
+    expect(store.getState().captionTaskNotice).toBeTruthy();
+  });
+
+  it('locks task changes during a session and permits them after stopping', () => {
+    store.getState().startSession();
+    expect(store.getState().setCaptionTask(transcription)).toBe(false);
+    expect(store.getState().captionTask.purpose).toBe('translation');
+    expect(store.getState().captionTaskNotice).toBeTruthy();
+    store.getState().stopSession();
+    expect(store.getState().setCaptionTask(transcription)).toBe(true);
+    expect(store.getState().captionTaskNotice).toBeNull();
+  });
+
+  it('reset restores default task and clears task notices', () => {
+    store.getState().setCaptionTask(transcription);
+    store.getState().reset();
+    expect(store.getState().captionTask).toEqual({ purpose: 'translation', langPair: 'en→zh-TW' });
+    expect(store.getState().captionTaskNotice).toBeNull();
+  });
+
   it('defaults transcript retention to off and persists explicit opt-in', () => {
     expect(store.getState().transcriptRetentionEnabled).toBe(false);
 
@@ -329,6 +456,21 @@ describe('settingsStore — micDistance + persistence', () => {
     expect(fresh.translateMinutesAccum).toBe(0);
   });
 
+  it.each(['mic', 'system'] as const)(
+    'restores an unavailable hybrid preset honestly, retaining %s',
+    (audioSource) => {
+      memLs.set(
+        'meeting-audio:settings:v1',
+        JSON.stringify({ v: 1, scenarioId: 'hybrid', audioSource }),
+      );
+      const fresh = createSettingsStore().getState();
+      expect(fresh.scenarioId).toBe(audioSource === 'system' ? 'online_meeting_box' : 'physical');
+      expect(fresh.audioSource).toBe(audioSource);
+      expect(fresh.scenarioNotice).toContain('雙軌');
+      expect(fresh.sessionStartAt).toBeNull();
+    },
+  );
+
   it('ignores stored prefs with a stale version', () => {
     memLs.set('meeting-audio:settings:v1', JSON.stringify({ v: 999, langPair: 'zh-TW→en' }));
     const fresh = createSettingsStore().getState();
@@ -350,6 +492,12 @@ describe('SCENARIO_OPTIONS / MODE_OPTIONS', () => {
     const adv = SCENARIO_OPTIONS.find((s) => s.id === 'advanced');
     expect(adv?.enabled).toBe(false);
     expect(adv?.hint).toBeTruthy();
+  });
+
+  it('keeps hybrid meeting unavailable until dual capture exists, independently of Hybrid Privacy', () => {
+    expect(SCENARIO_OPTIONS.find((s) => s.id === 'hybrid')?.enabled).toBe(false);
+    expect(SCENARIO_OPTIONS.find((s) => s.id === 'hybrid')?.hint).toContain('雙軌');
+    expect(MODE_OPTIONS.find((m) => m.id === 'hybrid_privacy')?.enabled).toBe(true);
   });
 
   it('exposes the three modes from CLAUDE.md', () => {

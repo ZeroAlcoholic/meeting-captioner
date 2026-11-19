@@ -80,6 +80,25 @@ export function hasAnyOpenAIKey(): boolean {
   return configuredKeys().length > 0;
 }
 
+/** Names only. Duplicate credential values are not an independent alternate. */
+export function alternateOpenAIKeySlot(slot: OpenAIKeySlot): OpenAIKeySlot | undefined {
+  const keys = configuredKeys();
+  const failed = keys.find((entry) => entry.slot === slot);
+  return failed
+    ? keys.find((entry) => entry.slot !== slot && entry.key !== failed.key)?.slot
+    : undefined;
+}
+
+/** A bounded downstream probe must never bounce back to the slot that failed. */
+export async function fetchWithOpenAIKeySlot(
+  makeRequest: (apiKey: string) => Promise<Response>,
+  slot: OpenAIKeySlot,
+): Promise<KeyedFetchResult> {
+  const entry = configuredKeys().find((key) => key.slot === slot);
+  if (!entry) throw new Error('Requested OpenAI key slot is not configured');
+  return { res: await makeRequest(entry.key), slot };
+}
+
 /**
  * The slot the next mint will use: the primary unless it is currently
  * demoted by a proven rejection. Diagnostics only — the mint path resolves

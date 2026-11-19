@@ -106,10 +106,13 @@ const INIT_SCRIPT = `
 
   // ── getUserMedia / getDisplayMedia ──────────────────────────────────────────
   function fakeStream(kind) {
+    var endedListeners = [];
     var audioTrack = {
       kind: 'audio', enabled: true, readyState: 'live', id: 'fake-track',
       stop: function () { this.readyState = 'ended'; },
-      addEventListener: function () {}, removeEventListener: function () {},
+      addEventListener: function (type, listener) { if (type === 'ended') endedListeners.push(listener); },
+      removeEventListener: function (type, listener) { if (type === 'ended') endedListeners = endedListeners.filter(function (x) { return x !== listener; }); },
+      dispatchEvent: function (event) { if (event.type === 'ended') { this.readyState = 'ended'; endedListeners.slice().forEach(function (fn) { fn(event); }); } return true; },
       getSettings: function () { return {}; },
     };
     var videoTrack = {
@@ -171,16 +174,47 @@ const INIT_SCRIPT = `
   window.AudioContext = FakeAudioContext;
   window.webkitAudioContext = FakeAudioContext;
 
-  function FakeAudioWorkletNode() {
-    this.port = { onmessage: null, postMessage: function () {}, close: function () {}, start: function () {} };
+  function FakeAudioWorkletNode(context, name, options) {
+    this.context = context;
+    this.options = (options && options.processorOptions) || {};
+    this.timer = null;
+    var self = this;
+    this.port = {
+      onmessage: null, postMessage: function () {}, start: function () {},
+      close: function () { self.disconnect(); },
+    };
   }
-  FakeAudioWorkletNode.prototype.connect = function () {};
-  FakeAudioWorkletNode.prototype.disconnect = function () {};
+  FakeAudioWorkletNode.prototype.connect = function () {
+    if (this.timer !== null) return;
+    var self = this;
+    var samples = this.options.chunkSize || 4096;
+    // The fixture models a live source, so it must deliver progress as well
+    // as RMS. Otherwise capture-stalled correctly prevents cloud failover.
+    this.timer = setInterval(function () {
+      if (self.context.state !== 'running' || !self.port.onmessage) return;
+      var data = self.options.progressOnly
+        ? { type: 'capture_progress', samples: samples }
+        : new Float32Array(samples).fill(mock.audioAmplitude).buffer;
+      self.port.onmessage({ data: data });
+    }, samples / this.context.sampleRate * 1000);
+  };
+  FakeAudioWorkletNode.prototype.disconnect = function () {
+    clearInterval(this.timer);
+    this.timer = null;
+  };
   window.AudioWorkletNode = FakeAudioWorkletNode;
 
   // ── RTCPeerConnection / RTCDataChannel ──────────────────────────────────────
   function FakeDC() { this.readyState = 'open'; this.onmessage = null; this.onopen = null; this.onclose = null; }
-  FakeDC.prototype.send = function () {};
+  FakeDC.prototype.send = function (data) {
+    if (JSON.parse(data).type !== 'session.close') return;
+    var self = this;
+    setTimeout(function () {
+      if (self.readyState === 'open' && self.onmessage) {
+        self.onmessage({ data: JSON.stringify({ type: 'session.closed' }) });
+      }
+    }, 0);
+  };
   FakeDC.prototype.close = function () { this.readyState = 'closed'; };
   FakeDC.prototype.addEventListener = function () {};
   FakeDC.prototype.removeEventListener = function () {};
@@ -194,6 +228,7 @@ const INIT_SCRIPT = `
     this.onconnectionstatechange = null;
     this.onicecandidate = null;
     this._dc = null;
+    this._senders = [];
     mock.oai.pcs.push(this);
   }
   FakePC.prototype.createDataChannel = function () {
@@ -201,10 +236,28 @@ const INIT_SCRIPT = `
     mock.oai.dcs.push(this._dc);
     return this._dc;
   };
-  FakePC.prototype.addTrack = function (track) { mock.oai.addedTrackKinds.push(track && track.kind); return {}; };
+  FakePC.prototype.addTrack = function (track) {
+    mock.oai.addedTrackKinds.push(track && track.kind);
+    var sender = { track: track, replaceTrack: function (next) { this.track = next; return Promise.resolve(); } };
+    this._senders.push(sender);
+    return sender;
+  };
+  FakePC.prototype.addTransceiver = function () {
+    var sender = { track: null, replaceTrack: function (next) { this.track = next; return Promise.resolve(); } };
+    this._senders.push(sender);
+    return { sender: sender };
+  };
+  FakePC.prototype.getSenders = function () { return this._senders; };
   FakePC.prototype.createOffer = function () { return Promise.resolve({ type: 'offer', sdp: 'mock-offer-sdp' }); };
   FakePC.prototype.setLocalDescription = function () { this.iceConnectionState = 'checking'; return Promise.resolve(); };
-  FakePC.prototype.setRemoteDescription = function () { this.connectionState = 'connected'; this.iceConnectionState = 'connected'; return Promise.resolve(); };
+  FakePC.prototype.setRemoteDescription = function () {
+    this.connectionState = 'connected';
+    this.iceConnectionState = 'connected';
+    if (this._dc && this._dc.onmessage) {
+      this._dc.onmessage({ data: JSON.stringify({ type: 'session.created', session: { id: 'mock-session' } }) });
+    }
+    return Promise.resolve();
+  };
   FakePC.prototype.restartIce = function () {};
   FakePC.prototype.addEventListener = function () {};
   FakePC.prototype.removeEventListener = function () {};

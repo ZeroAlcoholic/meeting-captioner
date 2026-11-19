@@ -1,7 +1,9 @@
-import type { TranscriptEvent, TranslationEvent } from '@meeting-audio/contracts';
+import type { CaptionTask, TranscriptEvent, TranslationEvent } from '@meeting-audio/contracts';
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   createCaptionStore,
+  resumeCaptionSession,
+  restoreCaptionSession,
   mergeSnapshots,
   tailPayload,
   type HydratedSnapshot,
@@ -40,6 +42,272 @@ function installDomShims(): void {
 }
 
 installDomShims();
+
+const pureTask: CaptionTask = {
+  purpose: 'transcription',
+  inputLanguages: ['zh-tw', 'en'],
+  textPolicy: 'zh-TW-preserve-original',
+};
+const translatedTask: CaptionTask = { purpose: 'translation', langPair: 'en→zh-TW' };
+
+describe('separate track live state', () => {
+  it('orders equal-time dual-source finals by segment ID like the SQLite archive', () => {
+    const store = createCaptionStore({ persistKey: null });
+    store.getState().beginSession('real', translatedTask, true);
+    store
+      .getState()
+      .applyTranscript(
+        transcript({
+          segmentId: 'z-remote',
+          source: 'browser_system',
+          status: 'final',
+          text: 'remote',
+          startMs: 100,
+        }),
+      );
+    store
+      .getState()
+      .applyTranscript(
+        transcript({
+          segmentId: 'a-mic',
+          source: 'microphone',
+          status: 'final',
+          text: 'mic',
+          startMs: 100,
+        }),
+      );
+    expect(store.getState().segments.map((segment) => segment.segmentId)).toEqual([
+      'a-mic',
+      'z-remote',
+    ]);
+  });
+  it('keeps two partials without changing history and finalizes only its own track', () => {
+    const store = createCaptionStore({ persistKey: null });
+    store.getState().beginSession('real', translatedTask, true);
+    const history = store.getState().segments;
+    store.getState().applyTranscript(
+      transcript({
+        segmentId: 'local',
+        source: 'microphone',
+        status: 'partial',
+        text: 'local',
+        startMs: 0,
+      }),
+    );
+    store.getState().applyTranscript(
+      transcript({
+        segmentId: 'remote',
+        source: 'browser_system',
+        status: 'partial',
+        text: 'remote',
+        startMs: 1,
+      }),
+    );
+    expect(store.getState().segments).toBe(history);
+    expect(Object.values(store.getState().liveTracks).map((track) => track.partial.text)).toEqual([
+      'local',
+      'remote',
+    ]);
+    store.getState().applyTranscript(
+      transcript({
+        segmentId: 'remote',
+        source: 'browser_system',
+        status: 'final',
+        text: 'remote final',
+        startMs: 1,
+      }),
+    );
+    expect(store.getState().liveTracks.mic?.partial.text).toBe('local');
+    expect(store.getState().liveTracks.remote).toBeUndefined();
+    expect(store.getState().livePartial?.text).toBe('local');
+    store.getState().clear();
+    expect(store.getState().liveTracks).toEqual({});
+    store.getState().beginSession('real', translatedTask);
+    store.getState().applyTranscript(
+      transcript({
+        segmentId: 'single-mic',
+        source: 'microphone',
+        status: 'partial',
+        text: 'mic',
+        startMs: 0,
+      }),
+    );
+    store.getState().applyTranscript(
+      transcript({
+        segmentId: 'single-remote',
+        source: 'browser_system',
+        status: 'partial',
+        text: 'remote',
+        startMs: 1,
+      }),
+    );
+    expect(Object.keys(store.getState().liveTracks)).toEqual(['remote']);
+  });
+
+  it('preserves each live translation when the other track receives updates', () => {
+    const store = createCaptionStore({ persistKey: null });
+    store.getState().beginSession('real', translatedTask, true);
+    for (const [segmentId, source] of [
+      ['local', 'microphone'],
+      ['remote', 'browser_system'],
+    ] as const) {
+      store
+        .getState()
+        .applyTranscript(
+          transcript({ segmentId, source, status: 'partial', text: segmentId, startMs: 0 }),
+        );
+      store.getState().applyTranslation({
+        kind: 'translation',
+        provider: 'test',
+        mode: 'online_full',
+        sourceSegmentId: segmentId,
+        sourceText: segmentId,
+        targetText: segmentId + '譯文',
+        status: 'draft',
+        sourceLanguage: 'en',
+        targetLanguage: 'zh-TW',
+        updatedAt: new Date().toISOString(),
+      });
+    }
+    expect(store.getState().liveTracks.mic?.translation?.targetText).toBe('local譯文');
+    expect(store.getState().liveTracks.remote?.translation?.targetText).toBe('remote譯文');
+    store.getState().applyTranscript(
+      transcript({
+        segmentId: 'local',
+        source: 'microphone',
+        status: 'final',
+        text: 'local',
+        startMs: 0,
+      }),
+    );
+    expect(store.getState().translations.local?.targetText).toBe('local譯文');
+    expect(store.getState().liveTracks.remote?.translation?.targetText).toBe('remote譯文');
+  });
+});
+
+describe('caption purpose and transcript provenance', () => {
+  it('restores dual-source archive ownership and defaults legacy metadata to single-source', () => {
+    const store = createCaptionStore({ persistKey: null });
+    const input = { meetingId: 'dual-archive', captionTask: pureTask, segments: [] };
+    restoreCaptionSession(store, { ...input, separateTracks: true });
+    expect(store.getState().separateTracks).toBe(true);
+    restoreCaptionSession(store, input);
+    expect(store.getState().separateTracks).toBe(false);
+  });
+  it('restores an archive tail under its meeting identity without merging the visible prior meeting', () => {
+    const store = createCaptionStore({ persistKey: null });
+    store.getState().beginSession('gemini', translatedTask);
+    store
+      .getState()
+      .applyTranscript(transcript({ segmentId: 'old', status: 'final', text: 'old', startMs: 1 }));
+    restoreCaptionSession(store, {
+      meetingId: 'archive-meeting',
+      captionTask: pureTask,
+      sessionMode: 'real',
+      segments: [
+        transcript({
+          segmentId: 'archive',
+          status: 'final',
+          text: '原始 API',
+          startMs: 100,
+          rawText: '原始 API',
+        }),
+      ],
+    });
+    expect(store.getState()).toMatchObject({
+      sessionId: 'archive-meeting',
+      captionTask: pureTask,
+      sessionPhase: 'paused',
+      segments: [{ segmentId: 'archive', rawText: '原始 API' }],
+    });
+    expect(store.getState().segments).toHaveLength(1);
+    expect(resumeCaptionSession(store, pureTask, 'real')).toBe(true);
+    expect(store.getState().sessionId).toBe('archive-meeting');
+  });
+  it('keeps normalization provenance in partial, final and saved snapshots', () => {
+    const key = 'meeting-audio:captions:test-purpose-provenance';
+    const store = createCaptionStore({ persistKey: key });
+    store.getState().beginSession('real', pureTask);
+    const event = transcript({
+      segmentId: 'raw',
+      status: 'partial',
+      text: '這個 API',
+      startMs: 10,
+      rawText: '这个 API',
+      textNormalization: 'opencc-cn-tw-v1',
+      timingBasis: 'capture-estimated',
+    });
+    store.getState().applyTranscript(event);
+    expect(store.getState().livePartial).toMatchObject({
+      rawText: '这个 API',
+      textNormalization: 'opencc-cn-tw-v1',
+      timingBasis: 'capture-estimated',
+    });
+    store.getState().applyTranscript({ ...event, status: 'final' });
+    store.getState().flushNow();
+    const restored = createCaptionStore({ persistKey: key, captionTask: pureTask });
+    expect(restored.getState().captionTask).toEqual(pureTask);
+    expect(restored.getState().segments[0]).toMatchObject({
+      rawText: '这个 API',
+      textNormalization: 'opencc-cn-tw-v1',
+      timingBasis: 'capture-estimated',
+    });
+    store.getState().clear();
+  });
+  it('rejects resuming a different purpose without deleting the current history', () => {
+    const store = createCaptionStore({ persistKey: null });
+    store.getState().beginSession('real', translatedTask);
+    store
+      .getState()
+      .applyTranscript(transcript({ segmentId: 'old', status: 'final', text: 'old', startMs: 1 }));
+    const id = store.getState().sessionId;
+    expect(resumeCaptionSession(store, pureTask, 'real')).toBe(false);
+    expect(store.getState().sessionId).toBe(id);
+    expect(store.getState().segments).toHaveLength(1);
+    expect(resumeCaptionSession(store, translatedTask, 'gemini')).toBe(true);
+    expect(store.getState().sessionMode).toBe('gemini');
+  });
+  it('a fresh transcription session rejects stale translation events', () => {
+    const store = createCaptionStore({ persistKey: null });
+    store.getState().beginSession('real', pureTask);
+    store.getState().applyTranslation(translation('late', 'final', '舊翻譯'));
+    expect(store.getState().translations).toEqual({});
+  });
+  it('does not treat an untagged legacy snapshot as an opted-in transcription session', () => {
+    const key = 'meeting-audio:captions:test-legacy-purpose';
+    localStorage.setItem(
+      key,
+      JSON.stringify({
+        v: 4,
+        segments: [transcript({ segmentId: 'legacy', status: 'final', text: 'old', startMs: 0 })],
+        translations: {},
+        sessionId: 'legacy',
+        savedAt: new Date().toISOString(),
+      }),
+    );
+    const store = createCaptionStore({ persistKey: key, captionTask: pureTask });
+    expect(store.getState().segments).toEqual([]);
+    expect(resumeCaptionSession(store, pureTask)).toBe(false);
+    expect(localStorage.getItem(key)).not.toBeNull();
+  });
+});
+
+it('preserves continuation metadata through live and final storage without duplicating text', () => {
+  const store = createCaptionStore({ persistKey: null });
+  const event = {
+    ...baseTranscript,
+    segmentId: 'tail',
+    status: 'partial' as const,
+    text: '日',
+    startMs: 12_000,
+    continuationOf: 'before',
+  };
+  store.getState().applyTranscript(event);
+  expect(store.getState().livePartial).toMatchObject({ text: '日', continuationOf: 'before' });
+  store.getState().applyTranscript({ ...event, status: 'final' });
+  expect(store.getState().segments).toHaveLength(1);
+  expect(store.getState().segments[0]).toMatchObject({ text: '日', continuationOf: 'before' });
+});
 beforeEach(() => {
   localStorage.clear();
 });

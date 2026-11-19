@@ -63,11 +63,13 @@ export function HealthRow() {
               className={styles.item}
               data-bucket={bucket}
               data-state={snap.state}
+              data-reason={snap.reason}
               data-testid={`health-${component}`}
               title={tooltip}
             >
               <span className={styles.dot} aria-hidden="true" />
               <span className={styles.label}>{LABEL[component]}</span>
+              {snap.reason && snap.reason !== 'capture_resumed' && <span>{snap.message}</span>}
             </div>
           );
         })}

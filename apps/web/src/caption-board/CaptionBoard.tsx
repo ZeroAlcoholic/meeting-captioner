@@ -1,7 +1,7 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useSettingsStore } from '../settings/use-settings-store.js';
 import { useCaptionStore, captionStore } from '../store/use-caption-store.js';
-import type { CaptionSegment, CaptionTranslation } from '../store/caption-store.js';
+import type { CaptionTranslation } from '../store/caption-store.js';
 import type { LangPair } from '../settings/settings-store.js';
 import {
   formatElapsedFromStart,
@@ -11,9 +11,12 @@ import {
   type Paragraph,
 } from './paragraph-grouping.js';
 import styles from './CaptionBoard.module.css';
+import { computeDisplayed, type DisplayedLive } from './displayed-live.js';
+import { downloadArchivedTranslation } from '../export/download.js';
 
 // ─── Export ──────────────────────────────────────────────────────────────────
-function downloadTranscript(): void {
+async function downloadTranscript(): Promise<void> {
+  if (await downloadArchivedTranslation('txt')) return;
   const { segments, translations, sessionStartMs } = captionStore.getState();
   if (segments.length === 0) return;
   const anchorMs = segments[0]?.startMs ?? 0;
@@ -103,14 +106,32 @@ const HistoryStream = memo(function HistoryStream({ langPair }: HistoryStreamPro
   //     from the entire board for the 1–3 s the next sentence streams (the
   //     dominant pattern on the continuous Gemini translate path).
   const hasLive = useCaptionStore((s) => s.livePartial !== null);
+  const separateTracks = useCaptionStore((s) => s.separateTracks);
+  const micLive = useCaptionStore((s) => !!s.liveTracks.mic);
+  const remoteLive = useCaptionStore((s) => !!s.liveTracks.remote);
   const historySegments = useMemo(() => {
     // Exclude the last final only when LiveCaption is already showing it big
     // (no partial in flight) — see the note above.
-    const base = hasLive || segments.length === 0 ? segments : segments.slice(0, -1);
+    let base = hasLive || segments.length === 0 ? segments : segments.slice(0, -1);
+    if (separateTracks) {
+      const hidden = new Set<string>();
+      let micFound = micLive,
+        remoteFound = remoteLive;
+      for (let i = segments.length - 1; i >= 0 && (!micFound || !remoteFound); i--) {
+        const segment = segments[i]!;
+        const mic = segment.source === 'microphone' || segment.source === 'fake_replay';
+        if (mic ? !micFound : !remoteFound) {
+          hidden.add(segment.segmentId);
+          if (mic) micFound = true;
+          else remoteFound = true;
+        }
+      }
+      base = segments.filter((segment) => !hidden.has(segment.segmentId));
+    }
     // Cap the RENDERED tail so DOM + paragraph-grouping cost stay flat on a
     // multi-hour meeting. The store keeps the full history; Export reads it.
     return tailSegments(base, HISTORY_RENDER_SEGMENTS);
-  }, [segments, hasLive]);
+  }, [segments, hasLive, separateTracks, micLive, remoteLive]);
 
   const isZhTarget = langPair === 'en→zh-TW';
 
@@ -278,42 +299,7 @@ const HistoryStream = memo(function HistoryStream({ langPair }: HistoryStreamPro
 interface LiveCaptionProps {
   frozen: boolean;
   langPair: LangPair;
-}
-
-interface DisplayedLive {
-  target: string;
-  source: string;
-  /** 'partial' = current utterance in flight; 'final' = last finalized; 'paused' = Space-freeze snapshot. */
-  status: 'partial' | 'final' | 'paused';
-}
-
-function computeDisplayed(
-  live: CaptionSegment | null,
-  lastFinal: CaptionSegment | undefined,
-  liveTranslation: CaptionTranslation | undefined,
-  lastFinalTranslation: CaptionTranslation | undefined,
-): DisplayedLive | null {
-  if (!live && !lastFinal) return null;
-
-  // Active utterance: the user expects to see what is being said RIGHT NOW
-  // in the big text — not the previous final in big text and the current
-  // partial as a tiny hint below it. Source updates char-by-char (throttled
-  // to 20 Hz by the coalescing handler). Target updates as soon as the
-  // first translation draft chunk lands; until then it's a placeholder.
-  if (live) {
-    return {
-      source: live.text,
-      target: liveTranslation?.targetText ?? '',
-      status: 'partial',
-    };
-  }
-
-  // Idle (no in-flight partial): show the most recent finalized utterance.
-  return {
-    source: lastFinal!.text,
-    target: lastFinalTranslation?.targetText ?? '',
-    status: 'final',
-  };
+  track?: 'mic' | 'remote';
 }
 
 /**
@@ -331,7 +317,7 @@ function startupCue(
   if (audio === 'requesting_permission') {
     return { phase: 'permission', label: '請允許麥克風存取…', sub: '瀏覽器正在詢問權限' };
   }
-  if (transport === 'connecting' || audio === 'connecting') {
+  if (transport === 'connecting' || transport === 'reconnecting' || audio === 'connecting') {
     return { phase: 'connecting', label: '連線中…', sub: '正在建立即時翻譯連線' };
   }
   if (transport === 'connected') {
@@ -341,25 +327,51 @@ function startupCue(
   return { phase: 'idle', label: 'Waiting for captions…' };
 }
 
-const LiveCaption = memo(function LiveCaption({ frozen, langPair }: LiveCaptionProps) {
-  const live = useCaptionStore((s) => s.livePartial);
-  const lastFinal = useCaptionStore((s) => s.segments.at(-1));
+const LiveCaption = memo(function LiveCaption({ frozen, langPair, track }: LiveCaptionProps) {
+  const live = useCaptionStore((s) =>
+    track ? (s.liveTracks[track]?.partial ?? null) : s.livePartial,
+  );
+  const finals = useCaptionStore((s) => s.segments);
+  const trackFinals = useMemo(
+    () =>
+      track
+        ? finals.filter(
+            (segment) =>
+              (segment.source === 'microphone' || segment.source === 'fake_replay') ===
+              (track === 'mic'),
+          )
+        : finals,
+    [finals, track],
+  );
+  const lastFinal = trackFinals.at(-1);
+  const previousFinal = trackFinals.at(-2);
   const bilingual = useSettingsStore((s) => s.includeSourceTranscript);
   // Health drives the staged startup cue rendered in the empty state below.
   const transportState = useSettingsStore((s) => s.health.transport.state);
   const audioState = useSettingsStore((s) => s.health.audio.state);
   // Live translation is kept in its own slot — see CaptionState.liveTranslation.
-  const liveTranslation = useCaptionStore((s): CaptionTranslation | undefined =>
-    s.liveTranslation && live && s.liveTranslation.sourceSegmentId === live.segmentId
-      ? s.liveTranslation
-      : undefined,
-  );
+  const liveTranslation = useCaptionStore((s): CaptionTranslation | undefined => {
+    const translation = track ? s.liveTracks[track]?.translation : s.liveTranslation;
+    return translation && live && translation.sourceSegmentId === live.segmentId
+      ? translation
+      : undefined;
+  });
   const lastFinalTranslation = useCaptionStore((s) =>
     lastFinal ? s.translations[lastFinal.segmentId] : undefined,
   );
+  const previousFinalTranslation = useCaptionStore((s) =>
+    previousFinal ? s.translations[previousFinal.segmentId] : undefined,
+  );
 
   const frozenSnapshotRef = useRef<DisplayedLive | null>(null);
-  const liveDisplayed = computeDisplayed(live, lastFinal, liveTranslation, lastFinalTranslation);
+  const liveDisplayed = computeDisplayed(
+    live,
+    lastFinal,
+    liveTranslation,
+    lastFinalTranslation,
+    previousFinal,
+    previousFinalTranslation,
+  );
 
   if (frozen && frozenSnapshotRef.current === null && liveDisplayed) {
     frozenSnapshotRef.current = { ...liveDisplayed, status: 'paused' };
@@ -485,6 +497,8 @@ const ReconnectingIndicator = memo(function ReconnectingIndicator() {
 // ─── CaptionBoard (shell) ────────────────────────────────────────────────────
 
 export function CaptionBoard() {
+  const separateTracks = useCaptionStore((s) => s.separateTracks);
+  const [exportError, setExportError] = useState<string | null>(null);
   const langPair = useSettingsStore((s) => s.langPair);
   const boardRef = useRef<HTMLDivElement>(null);
   const [confirmingClear, setConfirmingClear] = useState(false);
@@ -608,10 +622,16 @@ export function CaptionBoard() {
       data-fullscreen={isFullscreen || undefined}
     >
       <div className={styles.boardActions}>
+        {exportError && <p role="alert">{exportError}</p>}
         <button
           type="button"
           className={styles.actionBtn}
-          onClick={downloadTranscript}
+          onClick={() => {
+            setExportError(null);
+            void downloadTranscript().catch(() =>
+              setExportError('完整匯出失敗或仍有待保存資料，請重試。'),
+            );
+          }}
           title="Download full transcript as .txt"
           data-testid="export-transcript"
         >
@@ -633,7 +653,22 @@ export function CaptionBoard() {
 
       <HistoryStream langPair={langPair} />
 
-      <LiveCaption frozen={frozen} langPair={langPair} />
+      {separateTracks ? (
+        <div className={styles.trackPair}>
+          {(['mic', 'remote'] as const).map((track) => (
+            <section
+              key={track}
+              className={styles.track}
+              aria-label={track === 'mic' ? '麥克風' : '遠端'}
+            >
+              <div className={styles.trackLabel}>{track === 'mic' ? '麥克風' : '遠端'}</div>
+              <LiveCaption frozen={frozen} langPair={langPair} track={track} />
+            </section>
+          ))}
+        </div>
+      ) : (
+        <LiveCaption frozen={frozen} langPair={langPair} />
+      )}
     </div>
   );
 }

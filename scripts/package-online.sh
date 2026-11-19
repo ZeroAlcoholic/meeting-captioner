@@ -15,10 +15,10 @@ mkdir -p "$RELEASE_ROOT"
 echo "==> Preparing $STAGE_DIR"
 mkdir -p "$STAGE_DIR"
 
-echo "==> Building apps/web (VITE_DEPLOYMENT_MODE=online)"
+echo "==> Building apps/web (online profile)"
 (
   cd "$REPO_ROOT/apps/web"
-  VITE_DEPLOYMENT_MODE=online pnpm run build
+  pnpm run build:online
 )
 
 echo "==> Bundling services/online (esbuild)"

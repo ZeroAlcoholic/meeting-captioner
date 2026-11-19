@@ -3,6 +3,7 @@ node_modules/
 .pnpm-store/
 *.tsbuildinfo
 dist/
+dist-mobile/
 build/
 coverage/
 .vite/

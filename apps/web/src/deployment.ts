@@ -1,10 +1,9 @@
 /**
  * Single source of truth for the build-time deployment mode.
  *
- * - `online`  — slim distribution: OpenAI Realtime only. Offline provider
- *               code, opencc-js (already used by online), and the offline
- *               PCM worklet path are excluded from the bundle via the Vite
- *               alias swap (see `vite.config.ts`).
+ * - `online`  — cloud distribution: OpenAI/Gemini. Local STT and Hybrid
+ *               implementations are excluded through Vite/TypeScript aliases.
+ *               Shared PCM, VAD and Traditional Chinese processing remain.
  * - `full`    — default: includes both online and offline paths.
  *
  * Override with `VITE_DEPLOYMENT_MODE=online` at build time. The flag is

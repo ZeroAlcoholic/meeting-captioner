@@ -4,6 +4,7 @@ import asyncio
 import json
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.main import app
@@ -249,3 +250,88 @@ async def test_probe_loop_resets_flag_when_whl_restarts() -> None:
             pass
 
     assert main_mod._whl_model_ready is False
+
+
+@pytest.mark.parametrize("failure", ["closed", "timeout", "connection_error"])
+async def test_probe_loop_recovers_without_tcp_restart(failure: str) -> None:
+    """A failed readiness handshake must not strand a reachable engine in loading."""
+    import app.main as main_mod
+
+    cycles = 0
+    observed = asyncio.Event()
+
+    async def reachable() -> bool:
+        nonlocal cycles
+        cycles += 1
+        if cycles >= 5:
+            observed.set()
+        return True
+
+    first = (
+        _FakeWhlWs([json.dumps({"message": "WAIT"})])
+        if failure == "closed"
+        else TimeoutError() if failure == "timeout" else OSError("temporary refusal")
+    )
+    ready = _FakeWhlWs([json.dumps({"message": "SERVER_READY"})])
+    with (
+        patch("app.main._whl_model_ready", False),
+        patch("app.main._probe_whl_once", reachable),
+        patch("app.main._WHL_PROBE_INTERVAL", 0.001),
+        patch("app.main.websockets.connect", side_effect=[first, ready]) as connect,
+    ):
+        task = asyncio.create_task(main_mod._whl_probe_loop())
+        try:
+            await asyncio.wait_for(observed.wait(), timeout=2)
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                response = await client.get("/healthz")
+            assert response.json()["whisper_status"] == "ready"
+            # Once confirmed, readiness must not reconnect/load a model every tick.
+            assert connect.call_count == 2
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+
+async def test_probe_loop_does_not_overlap_pending_readiness_checks() -> None:
+    """Slow model loading keeps one handshake alive instead of spawning one per tick."""
+    import app.main as main_mod
+
+    started = asyncio.Event()
+    observed = asyncio.Event()
+    attempts = 0
+    cycles = 0
+
+    async def pending_probe() -> None:
+        nonlocal attempts
+        attempts += 1
+        started.set()
+        await asyncio.Event().wait()
+
+    async def reachable() -> bool:
+        nonlocal cycles
+        cycles += 1
+        if cycles >= 5:
+            observed.set()
+        return True
+
+    with (
+        patch("app.main._whl_model_ready", False),
+        patch("app.main._probe_whl_once", reachable),
+        patch("app.main._WHL_PROBE_INTERVAL", 0.001),
+        patch("app.main._run_model_ready_probe", pending_probe),
+    ):
+        task = asyncio.create_task(main_mod._whl_probe_loop())
+        try:
+            await asyncio.wait_for(started.wait(), timeout=2)
+            await asyncio.wait_for(observed.wait(), timeout=2)
+            assert attempts == 1
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass

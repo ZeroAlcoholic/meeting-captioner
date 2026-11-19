@@ -1,5 +1,125 @@
 # RUNBOOK.md
 
+## 純字幕同廠續期資格（W03.2 施工中）
+
+預設仍採串行續期並標記待確認缺口。只有部署者完成該帳號／模型／金鑰的同時連線資格驗證後，才可在服務程序環境設定對應項目為 `true`：
+
+- `OPENAI_TRANSCRIPTION_CONCURRENT_RENEWAL_ALLOWED`
+- `GEMINI_TRANSCRIPTION_CONCURRENT_RENEWAL_ALLOWED`
+
+兩項只接受 `true`／`false`，未設定為 `false`，錯字會拒絕啟動。設定是部署者的資格宣告，不是服務自行探測成功的證據；兩家可獨立開啟，Gemini 不需要第二把金鑰。更換帳號、模型或可用金鑰後須重新確認；OpenAI 有 alternate key 時，資格須涵蓋可能採用的 key。
+
+資格隨該次 mint 回應交給 adapter，session 依目前主線取得的資格決定續期方式；不是即時撤銷控制。變更設定須依現有服務所有權流程重啟，正在進行的會議先完成停止／保存，不直接殺程序。未取得資格不開旗標，也不以本機受控測試取代 W12.2 真服務驗證。
+
+即使啟用候選續期，切換送音仍標記音訊完整性待確認；W04 補送／區間對齊未完成前不得宣稱零漏音。候選的本機 VAD 成本及完整場域驗收仍依主清單追蹤。
+
+## 純字幕與地端逐字稿（2026-10-08，真雲端品質待驗收）
+
+日常仍只用 `pnpm service:status`／`pnpm service:start`／`pnpm service:stop`；網址取 status，
+不要另開固定 8787／8000。此版本的 SQLite worker 與 Web VAD 資產都隨同一份 managed build 發布。
+本輪驗證 runtime 為 Node 24.14.0；原生 `node:sqlite` 為必要條件，不支援的 runtime 會顯示保存不可用，不能當成已保存。
+
+1. 在「工作目的」選「純字幕（繁中＋原文）」，選 OpenAI 或 Gemini、音源與收音環境。
+2. 開始後中文轉為繁體字形，英文／術語保留；兩家皆為專用轉寫模型，沒有翻譯音訊輸出。
+3. 以「停止並保存」等待尾段與持久確認。已保存但有缺口／未完成片段仍需人工核對；ASR final 不等於人工確認正確。
+4. 完整會議紀錄從 SQLite 讀取，畫面最近 200 段不限制完整匯出。校訂會新增修訂，原始辨識不覆寫。
+5. 意外關閉後由會議清單「繼續此會議」。前一分頁的 writer lease 最長 15 秒過期；若唯讀，先關閉其他寫入分頁，再按「重新檢查寫入權限」。不會自動搶正在使用的分頁。
+
+OpenAI 沿用伺服器環境變數 `OPENAI_API_KEY`（主槽，通常是內網受限 key）及
+`OPENAI_API_KEY_AUDIO`（備援槽，可供外網使用）。兩者目前都呼叫官方 OpenAI endpoint。
+Mint 的 401/403 與明確 auth/IP rejection 可切到備援；pre-ready 1006 只做一次探測，
+不能據此斷言是權限問題。429 不用換 key 規避。若「內網」另有代理位址，需先確認位址與認證規格；不能直接把備援金鑰送給未知代理。
+Gemini 使用 server-only `GEMINI_API_KEY`。瀏覽器只取得短效憑證；不要在瀏覽器貼長效 key。
+
+資料預設 `%LOCALAPPDATA%\MeetingAudio`；非 Windows 為 `~/.local/share/MeetingAudio`。
+測試可用 `MEETING_DATA_DIR` 隔離，路徑在每個服務建立時固定，更新工作目錄／build 不搬動資料。
+API 診斷的 POST 必須使用 JSON，例如 `Invoke-RestMethod -Method Post -ContentType 'application/json' -Body '{}' -Uri "$url/local/bootstrap"`；不要輸出或轉貼回應中的本機 token。不支援的表單格式回傳 415，不能當成 SQLite 故障。
+一般 online `build/start` 已改用既有 bundle 及伴隨 worker；日常仍優先使用 managed 入口，不同時重複啟動兩者。
+主檔 `meetings.sqlite`；逐字稿衍生匯出每 30 秒及結案更新。單一檔案原子替換，SQLite 才是權威來源。
+`/meetings/backup` 需本機 token＋writer lease，產生一致性 SQLite 備份；復原時先停止本工作區服務，
+保留原資料，再用驗證過的備份置換主檔，重新啟動核對會議／事件／匯出。不得直接覆寫運作中的 DB。
+目前不保存原始錄音，也沒有自動語者或摘要功能；缺少音訊時不能保證修復漏辨區間。
+
+## 手機網頁版（2026-11-10）
+
+- 開發：`pnpm -F web dev:mobile`；建置：`pnpm -F web build:mobile`，產物在 `apps/web/dist-mobile/`（純靜態，可放任何 HTTPS 靜態主機）。
+- 發佈到 GitHub Pages：把 `dist-mobile/` 內容（加一個空的 `.nojekyll`）推到本 repo 的 `gh-pages` 分支，於 Settings → Pages 選 `gh-pages` 分支根目錄。網址為 `https://zeroalcoholic.github.io/meeting-captioner/`。
+- 使用：手機開網址 → 貼上 Gemini（或 OpenAI）金鑰 → 儲存後自動測試 → 開始。可「加入主畫面」。麥克風需要 HTTPS。
+- 限制：只支援麥克風；螢幕關閉或切到背景時瀏覽器會停止收音；字幕不存檔，關閉分頁即清除；有 IP 白名單的 OpenAI 金鑰在行動網路會被拒絕。
+
+## Managed Windows service (2026-10-06)
+
+Windows／Node 22+ 的日常入口為 `pnpm service:start`（或根目錄
+`start-service.cmd`）。`pnpm service:status` 查詢現有實例、`pnpm service:stop`
+停止它；更新程式使用 stop → start，不在會議中自動換版。
+
+- 同一 canonical workspace path 對應同一 named pipe。OS bind 成功的 owner
+  才能建置與啟動；同時 start 也只會有一個 owner。Windows 在程序結束／崩潰後
+  自動釋放 pipe，殘留 `.cache/meeting-service/runtime.json` 不被當成活服務。
+- 首次啟動優先 `127.0.0.1:43871`；首次遇占用／禁止綁定時由 OS 選埠，實際網址以
+  status 的 `url` 為準。成功後在既有 `runtime.json` 保存 `originPort`，往後重啟固定使用，
+  不因占用而另開網址。舊版狀態檔會採用同 workspace 最後一次的合法 `127.0.0.1` 網址。
+  既有網址被占用時明確啟動失敗，保留埠與資料；查看 `service.log`，由使用者處理占用後
+  再 start。服務不連線至占用者，也不終止外部程序。
+- `node scripts/service.mjs start --port=43872`／`--port=0` 僅供首次選埠；已有固定網址時，
+  不同的明確參數會報 `Origin migration required`，不實際變更。已運行時仍重用既有實例。
+  不要刪除／重寫 `runtime.json` 來強迫換埠；損壞檔案會保留並拒絕啟動。
+- 待存救援優先恢復原網址，以原 Chrome profile 開啟並讓既有 outbox 重送，取得 ACK、
+  待存歸零並核對全文後才視為完成。新埠、`localhost` 別名、另一個 Chrome profile
+  看不到原 IndexedDB，不代表沒有待存資料；無法恢復原網址時應記為「待救援未知」。
+  系統不枚舉其他瀏覽器 profile，也不自動連線至未知舊網址或向占用者送逐字稿。
+- 網頁與 API 同來源，managed 模式停用跨來源 CORS 授權；fallback 後不會繼續
+  信任原候選埠上的異物網站。只綁 IPv4 loopback，不提供 LAN 分享。
+- 工作區 owner 管理一個 Node HTTP 子程序提供線上正式版，不背景啟動 5173／8000／9090。
+  OpenAI／Gemini 能否使用仍以設定與實際上游狀態為準，不以 `phase:ready`
+  代替上游可用性；沒有 key 時 UI 仍應如實顯示不可用。
+- 每次啟動建置到 `.cache/meeting-service/builds/<instanceId>/`，不改目前服務
+  的資產。status 與 `/_meeting-audio/instance` 提供 workspaceId、instanceId、
+  PID、buildId、url；不公開絕對工作區路徑或 key。HTTP 沒有 stop 入口。
+- Stop 透過本機 pipe 並核對 instanceId，不使用 taskkill／依 PID 檔終止。
+  啟動／重啟期間也接受同 instance 的 Stop；取消建置並等持有的建置子程序 close 後才釋放 owner，晚完成的初始化不再 listen。建置各步有 60 秒期限，start 等待最多 180 秒。
+  逾時看 status 與 `service.log`，不要另開相同服務。記錄檔只供診斷。
+- W08.1 子程序復原已完成本機驗收；真雲端／場域與 W08.2 仍待驗：自動復原沿同 build/origin，每 60 秒最多 3 次重啟；`restartCount` 是本次 owner 累計，`childInstanceId` 區分子程序。超限回報 failed，查明原因後明確 stop → start 重試。此操作會重新建置，應先停止會議；不自動升級使用中的會議。
+- managed 服務的 archive bootstrap 提供 workspaceId/buildId；原頁重取權限時若身分變更或消失，會停止自動補存並保留待存資料。請保留分頁、核對原工作區與版本後重試，勿清除瀏覽器資料。舊版非 managed 入口沒有這項身分資訊，不宣稱有相同的版本核對保證。
+- 此管理工具目前只支援 Windows named pipe；其他 OS 保留既有入口，沒有假設
+  POSIX filesystem socket 在 crash 後也能自動回收。
+
+驗證：`pnpm test:service` 執行實際 IPC／HTTP 測試，涵蓋同時啟動、異物占埠、
+身分不符拒停、殘留狀態檔、建置失敗、異常 IPC 輸入及 crash 後重啟。
+正式 app 的受控占埠／Chrome 結果保存在 `.cache/meeting-service/verification.json`。
+
+`pnpm dev` 及舊 ZIP 的 start.bat/start.sh 仍是獨立開發／發行入口，不在此工具
+管理範圍；日常請固定使用上述入口，避免另起平行服務。不要手動修改 runtime.json
+冒充服務所有權，也不要把 fallback 配置成自動停止陌生程序。
+
+## Online environment and key switching (2026-09-11)
+
+- The service reads process environment at startup; it does not load `.env`.
+  Restart from a newly initialized terminal after changing persistent keys.
+- `OPENAI_API_KEY` is preferred; `OPENAI_API_KEY_AUDIO` is the alternate.
+  Either one alone supports OpenAI. `GEMINI_API_KEY` alone supports Gemini.
+  Configure both providers for automatic cross-provider recovery.
+- OpenAI tries WebRTC then same-key WebSocket. Only explicit auth rejection
+  advances to the other key. Ordinary network/timeout/audio/policy failures
+  retain the account. A rejected slot is demoted for 30 minutes; after expiry,
+  the next mint tries the preferred slot again. This is not immediate network
+  change detection. Restart also clears this in-memory preference.
+- `/session/info` exposes available provider names, next OpenAI key slot and
+  demotion reason, never key values. Presence does not prove provider reachability.
+- Both release launchers accept primary-only, audio-only and Gemini-only
+  environments; no-key environments fail before starting the server.
+- Gemini uses v1beta token mint and constrained WebSocket together; its model
+  remains `gemini-3.5-live-translate-preview`.
+
+Current-network real-audio checks passed through OpenAI WebRTC/WS, Gemini and an
+audio-only-key process, with synthetic English. Pause/resume, provider switching,
+socket reconnection and Stop release were also exercised. Translation errors
+still occurred; see the diagnostic for the exact scope and output evidence.
+
+When rebuilding a running bundled distribution, stop it before replacing web
+assets, then restart. Static asset routes are registered at service startup;
+replacing hashed assets under a running process can otherwise return 404.
+
 > Day-to-day commands, troubleshooting, and operational notes.
 
 ---
@@ -486,3 +606,60 @@ before changing chunk size; the client audio chunk is already 32 ms.
 
 - Recommended Node version manager (volta? nvm-windows?) — to be decided
   based on team preference.
+
+## 公司網路與代理（W09，本機路由已驗、公司環境待驗）
+
+目前兩家 broker 的 token/文字請求皆使用 Node 原生 `fetch`。本機 Node 24.14.0 已驗 CONNECT、NO_PROXY、額外 CA 信任、未信任憑證拒絕與代理 407 拒絕；不用另裝 proxy 套件。這不代表公司網路或瀏覽器音訊傳輸已合格。
+
+需要公司代理時，在啟動 Node **之前**於同一個 PowerShell 設定（位址與 CA 檔案須由公司提供）：
+
+```powershell
+$env:NODE_USE_ENV_PROXY = '1'
+$env:HTTPS_PROXY = 'http://company-proxy.example:8080'
+$env:NO_PROXY = 'localhost,127.0.0.1,::1'
+$env:NODE_EXTRA_CA_CERTS = 'C:\company\approved-ca.pem'
+pnpm service:start
+```
+
+上述是替換用範例，不能直接當公司設定。保留既有 NO_PROXY 的公司清單並加入 loopback；啟動中的 owner/child 不會讀取新 shell 環境，設定變更須等會議保存完成後 stop/start。專案不自動讀 `.env`。不要把代理帳密貼入診斷輸出，也不要關閉 TLS 驗證。這份本機資格限 Node 24.14.0；舊 runtime 不能只因設定環境變數就視為可用。原生設定說明見 [Node 官方企業網路文件](https://nodejs.org/learn/http/enterprise-network-configuration)。
+
+三條路徑要分開驗收：
+
+| 路徑 | 設定與成功證據 |
+| --- | --- |
+| Node → provider HTTPS | Node 代理與 CA；兩家的實際 token mint 各自成功才算該路徑可達 |
+| Chrome → provider WSS | 由 Chrome/系統的網路與憑證設定決定；Node 代理不會替瀏覽器轉送音訊 |
+| Chrome → OpenAI WebRTC media | 另驗實際媒體傳輸與有效字幕；既有 WebSocket fallback 成功也只證明那條替代路徑 |
+
+token 成功但無新字幕時，不能回報整體網路正常；一家不可達由既有雙向備援處理，兩家都受阻則保留內容並顯示失敗/重試。無法從瀏覽器確定 DNS、TLS、代理或防火牆細因時，不猜測。公司/VPN 實測與雙向切換仍待授權環境驗收。
+
+本機原始證據：`.cache/w09-network/result.json`，探針 `.cache/w09-network/probe.mjs`；只使用隔離自簽測試憑證與 loopback，沒有呼叫雲端、外送內容或變更系統信任庫。
+
+原生 Chrome WSS 證據另見 `.cache/w09-network/browser-wss-result.json`。預設 Chrome 拒絕 Node 已信任的測試憑證；成功往返只使用隔離測試瀏覽器的單一 SPKI 例外，不能作為正式部署的憑證設定方式或公司 CA 已驗收的證明。瀏覽器代理的目標 CONNECT 407 另測且拒絕連線。W09.1 本機工程驗收完成，W09.2 公司網路及真服務資格仍待驗。
+
+後端 token 請求的日誌只記固定診斷代碼；不輸出原始例外或上游正文。`UPSTREAM_DNS` 請查 DNS/代理名稱，`UPSTREAM_TLS` 請查憑證與授權 CA，`UPSTREAM_CONNECTION_REFUSED`/`UPSTREAM_CONNECTION_RESET` 請查代理或出口連線，`UPSTREAM_NETWORK_UNREACHABLE` 請查目前網路，`UPSTREAM_TIMEOUT` 表示期限已到。`CLIENT_ABORTED` 是請求端取消；`UPSTREAM_REQUEST_FAILED` 表示無法由已知代碼判定，不能直接推論為防火牆或代理認證。HTTP 回覆另記狀態碼；實測 Node 對 CONNECT 407 未提供可安全判定的專用 cause，需由公司代理端確認。瀏覽器連線錯誤同樣不猜測細因。
+
+
+## 資料備份與還原（W07，本機操作已驗）
+
+1. 在工作目的列下方展開「資料備份」，按「建立完整備份」。它先嘗試保存本分頁待存內容，再建立所有已保存會議的一致性快照；會議後續新內容繼續保存，但不會回寫這份舊快照。
+2. 分別按「下載備份資料庫」及「下載驗證清單」，保留相同 backup-ID 前綴的 `.sqlite` 與 `.manifest.json` 兩個檔案，放在同一資料夾。下載位置依瀏覽器設定，可在瀏覽器設定為每次詢問位置。畫面「已送出下載」不代表磁碟保存已確認，請核對兩個檔案均存在。
+3. 請另外保存到外接磁碟等位置；同磁碟副本無法防止磁碟故障。服務端 `backup-UUID/meetings.sqlite` 與 `manifest.json` 會保留，系統不自動刪除舊備份。備份不含錄音。
+4. 失敗可重試，原資料不會因建立備份而被替換；若服務版本過舊不支援下載，請更新本機服務後再操作。
+
+還原核心已驗證原稿/譯文/校訂/缺口與安全副本，HTTP/UI 與舊 outbox 隔離已接線；操作步驟見下方。請勿直接覆寫使用中的資料庫。
+
+切換前會保存 `restore-pending.json`；此檔存在代表切換未完成，writer 啟動先驗證所指安全副本並恢復原資料，失敗則拒絕啟動。不可手動刪除紀錄來強迫繼續。`.partial` 目錄不是已發布備份，程序中斷可能留下暫存目錄。成功切換後但回應遺失屬結果未確認，不等同切換未完成。
+
+一致性快照沿用 [SQLite VACUUM INTO](https://www.sqlite.org/lang_vacuum.html)。已驗真 SQLite、Chrome 下載、Windows 占檔、受控重開/回復寫入失敗及切換前後 worker 退出；未驗實體斷電或真雲端辨識負載。證據見 `.cache/w07-backup-verification.json`。
+
+還原核心會將切換副本升為 SQLite schema 2，建立新的資料世代；正常 schema 1 會議不因此升版，備份讀取支援 schema 1/2。已驗上一版 writer 以 `ARCHIVE_SCHEMA_TOO_NEW` 拒寫且不修改 DB。不要降低 user_version 繞過保護。本機 API 的世代不符會回報 `ARCHIVE_GENERATION_MISMATCH`；瀏覽器 outbox 遇世代不符會保留舊資料、停止重試並顯示唯讀原因；勿清除瀏覽器資料。舊快照世代不符時保留內容並拒絕匯入；本機切換須 pending=0，舊 loss 紀錄保留。測試 worker 恢復時須先重建 online，避免新 routes 配到舊 dist worker。
+
+### 從兩個備份檔案還原（本機工程驗證）
+
+1. 停止會議，等保存與結案完成後再開啟「資料備份」。進行中或暫停時停用還原。
+2. 選取同一備份的 `.sqlite` 與 `.manifest.json`，按「匯入並驗證備份」。上限 512 MiB；匯入不變更目前 DB。
+3. 驗證成功後勾選取代確認，按「確認還原備份」。系統先保存待存內容並建立目前 DB 的安全副本，再切換。
+4. 成功訊息列出安全副本位置；按「重新載入還原後資料」。這是同磁碟副本，不取代異碟備份。重載後選「純字幕（繁中＋原文）」，在「完整會議紀錄」按「重新整理紀錄」並點會議名稱；此清單也包含翻譯會議。可按「匯出完整原始紀錄 JSON」下載原文、譯文及原始事件。
+5. 若還原回覆遺失，開啟「資料備份」並按「核對並完成上次還原」。重新開頁仍可讀取待核對紀錄。已套用時不再還原；尚未送達時以同一 ID 重試。剛重新載入而原 lease 未到期，依提示等 15 秒再核對；不會搶其他分頁的權限。
+6. 若仍有待存/RAM 晚到內容、其他還原已改變世代或持續儲存錯誤，保留分頁，勿清除瀏覽器資料。晚到內容不會自動刪除或送進新世代；若確認還原已套用，可勾選「若還原已套用，將晚到內容另存於此瀏覽器的舊世代保留區後完成還原」，再按核對。只有已套用才允許此操作；交易失敗會保留原待存資料。成功後重新載入，按「下載舊世代保留紀錄」，確認 JSONL 檔已存好。檔案逐行保留舊世代鍵、會議資訊、原事件及缺口，可用文字編輯器讀取；不會自動匯回新資料庫，下載也不刪除瀏覽器內副本。若確認要放棄尚未套用的還原，按「取消待核對的還原」；成功時保留目前資料與待存內容。已套用或寫入權限未取得時會拒絕取消，請保留資料並核對結果。舊字幕快照不會自動灌回還原後資料庫。

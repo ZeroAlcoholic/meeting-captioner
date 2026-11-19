@@ -28,16 +28,59 @@ class PcmWorkletProcessor extends AudioWorkletProcessor {
     // Guard: must be a positive integer; fall back to the default otherwise so a
     // malformed option can never wedge the audio thread with a 0/NaN-size buffer.
     this._chunkSize = Number.isInteger(requested) && requested > 0 ? requested : DEFAULT_CHUNK_SIZE;
-    this._buf = new Float32Array(this._chunkSize);
+    this._progressOnly = options?.processorOptions?.progressOnly === true;
+    // Opt-in source positions use the shared AudioContext's native sample clock,
+    // never main-thread delivery time or a provider-local counter.
+    this._frameMetadata = options?.processorOptions?.frameMetadata === true;
+    this._startFrame = 0;
+    this._nextFrame = null;
+    this._buf = this._progressOnly ? null : new Float32Array(this._chunkSize);
     this._writePos = 0;
+    // Optional stop handshake. Existing consumers receive only ArrayBuffers
+    // unless they request this protocol; residual audio precedes the ACK.
+    this.port.onmessage = (event) => {
+      if (event.data?.type !== 'flush') return;
+      if (this._progressOnly) return;
+      if (this._writePos > 0) {
+        const tail = this._buf.slice(0, this._writePos).buffer;
+        this._writePos = 0;
+        this._postPcm(tail);
+      }
+      this.port.postMessage({ type: 'flushed' });
+    };
+  }
+
+  _postPcm(pcm) {
+    this.port.postMessage(
+      this._frameMetadata ? { type: 'pcm', startFrame: this._startFrame, pcm } : pcm,
+      [pcm],
+    );
   }
 
   process(inputs) {
     const channel = inputs[0]?.[0]; // mono channel, 128 samples per call
     if (!channel || channel.length === 0) return true;
+    if (this._progressOnly) {
+      this._writePos += channel.length;
+      if (this._writePos >= this._chunkSize) {
+        this.port.postMessage({ type: 'capture_progress', samples: this._writePos });
+        this._writePos = 0;
+      }
+      return true;
+    }
 
+    if (this._frameMetadata) {
+      // A disconnected input can resume on a later render quantum. Preserve
+      // both real ranges rather than joining their PCM across the missing time.
+      if (this._writePos > 0 && this._nextFrame !== currentFrame) {
+        this._postPcm(this._buf.slice(0, this._writePos).buffer);
+        this._writePos = 0;
+      }
+      this._nextFrame = currentFrame + channel.length;
+    }
     let frameOff = 0;
     while (frameOff < channel.length) {
+      if (this._frameMetadata && this._writePos === 0) this._startFrame = currentFrame + frameOff;
       const space = this._chunkSize - this._writePos;
       const toCopy = Math.min(space, channel.length - frameOff);
       this._buf.set(channel.subarray(frameOff, frameOff + toCopy), this._writePos);
@@ -51,7 +94,7 @@ class PcmWorkletProcessor extends AudioWorkletProcessor {
         const sendBuf = this._buf.buffer;
         this._buf = new Float32Array(this._chunkSize);
         this._writePos = 0;
-        this.port.postMessage(sendBuf, [sendBuf]);
+        this._postPcm(sendBuf);
       }
     }
 

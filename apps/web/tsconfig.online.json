@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.app.json",
+  "compilerOptions": {
+    "paths": {
+      "@meeting-audio/offline-stt": ["./src/providers/local-mode-unavailable.ts"],
+      "@meeting-audio/hybrid": ["./src/providers/local-mode-unavailable.ts"]
+    }
+  },
+  "exclude": [
+    "src/**/*.test.ts",
+    "src/**/*.test.tsx",
+    "src/test-setup.ts",
+    "src/providers/offline/**",
+    "src/providers/hybrid/**"
+  ]
+}

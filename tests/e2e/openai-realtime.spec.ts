@@ -1,87 +1,16 @@
 import { expect, test } from '@playwright/test';
-
-const MOCK_CLIENT_SECRET = 'mock-ephemeral-token-xyz';
-
-// Injected before each page load to mock browser APIs that OpenAIRealtimeProvider uses
-const INIT_SCRIPT = `
-(function () {
-  // Mock getUserMedia
-  Object.defineProperty(navigator, 'mediaDevices', {
-    configurable: true,
-    writable: true,
-    value: {
-      getUserMedia: () => {
-        // Keep parity with what the provider actually touches: getAudioTracks()
-        // feeds pc.addTrack (video excluded from the SDP), getTracks() feeds
-        // release/stop paths.
-        const audioTrack = { kind: 'audio', stop: () => {} };
-        return Promise.resolve({
-          getTracks: () => [audioTrack],
-          getAudioTracks: () => [audioTrack],
-        });
-      },
-    },
-  });
-
-  // Mock AudioContext
-  window.AudioContext = class MockAudioContext {
-    createMediaStreamSource() { return { connect() {} }; }
-    createAnalyser() {
-      const buf = new Float32Array(2048).fill(0.05);
-      return {
-        fftSize: 2048,
-        getFloatTimeDomainData(out) { out.set(buf); },
-        connect() {},
-      };
-    }
-    close() { return Promise.resolve(); }
-  };
-
-  // Data channel reference — allows the test page to fire events via window.__fireDCMessage
-  let _dcOnMessage = null;
-  window.__fireDCMessage = (data) => {
-    if (_dcOnMessage) _dcOnMessage({ data: typeof data === 'string' ? data : JSON.stringify(data) });
-  };
-
-  // Mock RTCPeerConnection
-  window.RTCPeerConnection = class MockRTCPeerConnection {
-    constructor() {
-      this.oniceconnectionstatechange = null;
-    }
-    get iceConnectionState() { return 'connected'; }
-    createDataChannel() {
-      const dc = { onmessage: null };
-      _dcOnMessage = (e) => dc.onmessage && dc.onmessage(e);
-      return dc;
-    }
-    addTrack() {}
-    async createOffer() { return { type: 'offer', sdp: 'mock-sdp' }; }
-    async setLocalDescription() {}
-    async setRemoteDescription() {}
-    restartIce() {}
-    close() {}
-  };
-
-  // Intercept fetch to api.openai.com (covers both /translations/calls and any other endpoint)
-  const _origFetch = window.fetch.bind(window);
-  window.fetch = async function (url, opts) {
-    if (typeof url === 'string' && url.includes('api.openai.com')) {
-      return new Response('mock-answer-sdp', { status: 200 });
-    }
-    return _origFetch(url, opts);
-  };
-})();
-`;
+import { installOnlineMocks } from './online-mock.js';
 
 test.describe('OpenAI Realtime provider (mocked WebRTC)', () => {
   test.beforeEach(async ({ page }) => {
-    await page.route('**/session/info', (route) => route.fulfill({ json: { hasApiKey: true } }));
-    await page.route('**/session', (route) =>
-      route.fulfill({
-        json: { client_secret: { value: MOCK_CLIENT_SECRET, expires_at: 9999999999 } },
-      }),
-    );
-    await page.addInitScript(INIT_SCRIPT);
+    await installOnlineMocks(page);
+    await page.addInitScript(() => {
+      (window as Window & { __fireDCMessage?: (data: string) => void }).__fireDCMessage = (
+        data,
+      ) => {
+        window.__mock.oai.emit(JSON.parse(data));
+      };
+    });
   });
 
   test('"Start Real" button visible when online_full mode is active', async ({ page }) => {

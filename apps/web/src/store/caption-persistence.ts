@@ -1,4 +1,5 @@
 import { idbClear, idbLoad, idbSave } from './idb-persistence.js';
+import { CaptionTask } from '@meeting-audio/contracts';
 import type {
   CaptionSegment,
   CaptionState,
@@ -13,14 +14,15 @@ export const LEGACY_PERSIST_KEYS = [
   'meeting-audio:captions:v2',
 ] as const;
 
-const PERSIST_VERSION = 4;
-const ACCEPTED_PERSIST_VERSIONS = new Set([2, 3, 4]);
+const PERSIST_VERSION = 5;
+const ACCEPTED_PERSIST_VERSIONS = new Set([2, 3, 4, 5]);
 const LS_TAIL_SEGMENTS = 2_000;
 const PERSIST_DEBOUNCE_MS = 800;
 const PERSIST_MAX_INTERVAL_MS = 5_000;
 const IDB_SAVE_MIN_INTERVAL_MS = 8_000;
 
 export interface PersistedState {
+  separateTracks?: boolean;
   v: number;
   segments: CaptionSegment[];
   translations: Record<string, CaptionTranslation>;
@@ -29,10 +31,13 @@ export interface PersistedState {
   sessionEndedAt?: number | null;
   sessionMode?: SessionMode | null;
   sessionPhase?: SessionPhase | null;
+  captionTask?: CaptionTask | null;
+  archiveGeneration?: string | null;
   savedAt: string;
 }
 
 export interface HydratedSnapshot {
+  separateTracks?: boolean;
   segments: CaptionSegment[];
   translations: Record<string, CaptionTranslation>;
   sessionStartMs: number | null;
@@ -40,6 +45,8 @@ export interface HydratedSnapshot {
   sessionEndedAt: number | null;
   sessionMode: SessionMode | null;
   sessionPhase: SessionPhase | null;
+  captionTask?: CaptionTask | null;
+  archiveGeneration?: string | null;
   savedAtMs: number;
 }
 
@@ -57,6 +64,7 @@ export interface CaptionPersistenceOptions {
   enabled: boolean;
   key?: string | null;
   maxSegments?: number;
+  captionTask?: CaptionTask;
   storage?: Storage | null;
   indexedDbAvailable?: boolean;
   idbLoad?: () => Promise<PersistedState | null>;
@@ -64,10 +72,46 @@ export interface CaptionPersistenceOptions {
   idbClear?: () => Promise<void>;
 }
 
-function snapshotFromPersisted(parsed: PersistedState): HydratedSnapshot {
+export function captionTasksMatch(
+  a: CaptionTask | null | undefined,
+  b: CaptionTask | null | undefined,
+): boolean {
+  if (!a || !b) return (a ?? null) === (b ?? null);
+  if (a.purpose !== b.purpose) return false;
+  if (a.purpose === 'translation' && b.purpose === 'translation') return a.langPair === b.langPair;
+  if (a.purpose === 'transcription' && b.purpose === 'transcription') {
+    return (
+      a.textPolicy === b.textPolicy &&
+      [...new Set(a.inputLanguages)].sort().join(',') ===
+        [...new Set(b.inputLanguages)].sort().join(',')
+    );
+  }
+  return false;
+}
+
+function snapshotFromPersisted(parsed: PersistedState): HydratedSnapshot | null {
+  if (!ACCEPTED_PERSIST_VERSIONS.has(parsed.v)) return null;
+  let captionTask: CaptionTask | null;
+  if (parsed.captionTask === undefined || (parsed.v < 5 && parsed.captionTask === null)) {
+    // Untagged history came from the translation UI. Preserve it under that
+    // purpose; missing language evidence uses that UI's historical default.
+    const languageEvidence = Object.values(parsed.translations ?? {}).find((t) => t.targetLanguage);
+    captionTask = {
+      purpose: 'translation',
+      langPair: languageEvidence?.targetLanguage.toLowerCase().startsWith('en')
+        ? 'zh-TW→en'
+        : 'en→zh-TW',
+    };
+  } else if (parsed.captionTask === null) captionTask = null;
+  else {
+    const task = CaptionTask.safeParse(parsed.captionTask);
+    if (!task.success) return null;
+    captionTask = task.data;
+  }
   const savedAtMs = parsed.savedAt ? Date.parse(parsed.savedAt) : NaN;
   return {
     segments: parsed.segments ?? [],
+    separateTracks: parsed.separateTracks === true,
     translations: parsed.translations ?? {},
     sessionStartMs: parsed.sessionStartMs ?? null,
     sessionId: parsed.sessionId ?? null,
@@ -76,6 +120,8 @@ function snapshotFromPersisted(parsed: PersistedState): HydratedSnapshot {
     // v2/v3 did not record a lifecycle phase. Treat migrated history as ended
     // so it can be exported without presenting an unsafe Continue action.
     sessionPhase: parsed.sessionPhase ?? 'ended',
+    captionTask,
+    archiveGeneration: parsed.archiveGeneration ?? null,
     savedAtMs: Number.isFinite(savedAtMs) ? savedAtMs : 0,
   };
 }
@@ -93,20 +139,25 @@ function decodePersisted(raw: string): HydratedSnapshot | null {
 function buildPersistPayload(state: CaptionState, includeLive: boolean): PersistedState {
   let segments = state.segments;
   let translations = state.translations;
-  if (includeLive && state.livePartial) {
-    const live = state.livePartial;
+  const liveTracks = Object.values(state.liveTracks ?? {});
+  // Legacy callers may supply only the single-live compatibility fields.
+  if (!liveTracks.length && state.livePartial)
+    liveTracks.push({ partial: state.livePartial, translation: state.liveTranslation });
+  for (const track of includeLive ? liveTracks : []) {
+    const live = track.partial;
     if (!segments.some((segment) => segment.segmentId === live.segmentId)) {
       segments = [...segments, live];
     }
-    if (state.liveTranslation) {
+    if (track.translation) {
       translations = {
         ...translations,
-        [live.segmentId]: { ...state.liveTranslation, sourceSegmentId: live.segmentId },
+        [live.segmentId]: { ...track.translation, sourceSegmentId: live.segmentId },
       };
     }
   }
   return {
     v: PERSIST_VERSION,
+    separateTracks: state.separateTracks,
     segments,
     translations,
     sessionStartMs: state.sessionStartMs,
@@ -114,6 +165,8 @@ function buildPersistPayload(state: CaptionState, includeLive: boolean): Persist
     sessionEndedAt: state.sessionEndedAt,
     sessionMode: state.sessionMode,
     sessionPhase: state.sessionPhase,
+    captionTask: state.captionTask,
+    archiveGeneration: state.archiveGeneration ?? null,
     savedAt: new Date().toISOString(),
   };
 }
@@ -137,6 +190,21 @@ export function mergeSnapshots(
 ): HydratedSnapshot {
   const base = a.savedAtMs >= b.savedAtMs ? a : b;
   const other = base === a ? b : a;
+  if (
+    base.sessionId !== other.sessionId ||
+    (base.archiveGeneration ?? null) !== (other.archiveGeneration ?? null) ||
+    !captionTasksMatch(base.captionTask, other.captionTask)
+  ) {
+    const segments = base.segments.slice(-maxSegments);
+    const keep = new Set(segments.map((segment) => segment.segmentId));
+    return {
+      ...base,
+      segments,
+      translations: Object.fromEntries(
+        Object.entries(base.translations).filter(([id]) => keep.has(id)),
+      ),
+    };
+  }
   const byId = new Map<string, CaptionSegment>();
   for (const segment of base.segments) byId.set(segment.segmentId, segment);
   for (const segment of other.segments) {
@@ -155,11 +223,14 @@ export function mergeSnapshots(
   return {
     segments,
     translations,
-    sessionStartMs: base.sessionStartMs ?? other.sessionStartMs,
-    sessionId: base.sessionId ?? other.sessionId,
-    sessionEndedAt: base.sessionEndedAt ?? other.sessionEndedAt,
-    sessionMode: base.sessionMode ?? other.sessionMode,
-    sessionPhase: base.sessionPhase ?? other.sessionPhase,
+    sessionStartMs: base.sessionStartMs,
+    separateTracks: base.separateTracks === true,
+    sessionId: base.sessionId,
+    sessionEndedAt: base.sessionEndedAt,
+    sessionMode: base.sessionMode,
+    sessionPhase: base.sessionPhase,
+    captionTask: base.captionTask ?? null,
+    archiveGeneration: base.archiveGeneration ?? null,
     savedAtMs: Math.max(a.savedAtMs, b.savedAtMs),
   };
 }
@@ -224,6 +295,8 @@ export function createCaptionPersistenceController(
   let lastSessionEndedAt: number | null | undefined;
   let lastSessionMode: SessionMode | null | undefined;
   let lastSessionPhase: SessionPhase | null | undefined;
+  let lastCaptionTask: CaptionTask | null | undefined;
+  let lastArchiveGeneration: string | null | undefined;
   let lastFlushAt = 0;
   let lastIdbSaveAt = 0;
   let idbChain: Promise<void> = Promise.resolve();
@@ -276,14 +349,22 @@ export function createCaptionPersistenceController(
       const raw = storage.getItem(key);
       if (raw) {
         const decoded = decodePersisted(raw);
-        if (decoded) return decoded;
+        if (
+          decoded &&
+          (!options.captionTask || captionTasksMatch(decoded.captionTask, options.captionTask))
+        )
+          return decoded;
       }
       if (key === DEFAULT_PERSIST_KEY) {
         for (const legacy of LEGACY_PERSIST_KEYS) {
           const legacyRaw = storage.getItem(legacy);
           if (!legacyRaw) continue;
           const decoded = decodePersisted(legacyRaw);
-          if (decoded) return decoded;
+          if (
+            decoded &&
+            (!options.captionTask || captionTasksMatch(decoded.captionTask, options.captionTask))
+          )
+            return decoded;
         }
       }
     } catch {
@@ -302,6 +383,12 @@ export function createCaptionPersistenceController(
           if (!record || !enabled) return loadSync();
           const idbSnapshot = snapshotFromPersisted(record);
           const localSnapshot = loadSync();
+          if (
+            !idbSnapshot ||
+            (options.captionTask &&
+              !captionTasksMatch(idbSnapshot.captionTask, options.captionTask))
+          )
+            return localSnapshot;
           return localSnapshot
             ? mergeSnapshots(localSnapshot, idbSnapshot, maxSegments)
             : idbSnapshot;
@@ -379,7 +466,9 @@ export function createCaptionPersistenceController(
       snapshot.sessionId !== lastSessionId ||
       snapshot.sessionEndedAt !== lastSessionEndedAt ||
       snapshot.sessionMode !== lastSessionMode ||
-      snapshot.sessionPhase !== lastSessionPhase;
+      snapshot.sessionPhase !== lastSessionPhase ||
+      snapshot.captionTask !== lastCaptionTask ||
+      snapshot.archiveGeneration !== lastArchiveGeneration;
     if (!changed) return;
     lastSegmentsRef = snapshot.segments;
     lastTranslationsRef = snapshot.translations;
@@ -388,6 +477,8 @@ export function createCaptionPersistenceController(
     lastSessionEndedAt = snapshot.sessionEndedAt;
     lastSessionMode = snapshot.sessionMode;
     lastSessionPhase = snapshot.sessionPhase;
+    lastCaptionTask = snapshot.captionTask;
+    lastArchiveGeneration = snapshot.archiveGeneration;
 
     const doFlush = () => {
       timer = null;

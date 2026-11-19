@@ -144,10 +144,15 @@ async def _whl_probe_loop() -> None:
                     # Reset model-ready so the new process must confirm via
                     # SERVER_READY before we report 'ready' to the UI.
                     _whl_model_ready = False
-                    if _model_probe_task is None or _model_probe_task.done():
-                        _model_probe_task = asyncio.create_task(
-                            _run_model_ready_probe()
-                        )
+                # A timeout/WAIT/temporary refusal does not imply TCP went down.
+                # Retry completed unsuccessful handshakes on the next probe tick,
+                # while keeping at most one model-loading handshake in flight.
+                if not _whl_model_ready and (
+                    _model_probe_task is None or _model_probe_task.done()
+                ):
+                    _model_probe_task = asyncio.create_task(
+                        _run_model_ready_probe()
+                    )
                 _whisper_status = "ready"
                 _whisper_error = None
             else:

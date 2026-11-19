@@ -67,6 +67,7 @@ function audioConstraints(micDistance: MicDistance): MediaTrackConstraints {
 
 export class MicrophoneAudioProvider implements AudioSource {
   private stream: MediaStream | null = null;
+  private capture: AbortController | null = null;
   // The shared capture AudioContext (owned by audio-engine, NOT closed here).
   private audioCtx: AudioContext | null = null;
   // This acquisition's source node — disconnected on release so the next
@@ -79,9 +80,16 @@ export class MicrophoneAudioProvider implements AudioSource {
   private visibilityHandler: (() => void) | null = null;
   private trackEndedHandler: (() => void) | null = null;
 
-  constructor(private readonly micDistance: MicDistance = 'meeting') {}
+  constructor(
+    private readonly micDistance: MicDistance = 'meeting',
+    private readonly deviceId = '',
+  ) {}
 
   async acquire(onHealth: (e: HealthEvent) => void): Promise<MediaStream> {
+    this.release();
+    const capture = new AbortController();
+    this.capture = capture;
+    const { signal } = capture;
     onHealth({
       kind: 'health',
       component: 'audio',
@@ -89,14 +97,24 @@ export class MicrophoneAudioProvider implements AudioSource {
       timestamp: now(),
     });
     try {
-      this.stream = await navigator.mediaDevices.getUserMedia({
-        audio: audioConstraints(this.micDistance),
+      signal.throwIfAborted();
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          ...audioConstraints(this.micDistance),
+          ...(this.deviceId ? { deviceId: { exact: this.deviceId } } : {}),
+        },
         video: false,
       });
+      if (signal.aborted) {
+        stream.getTracks().forEach((track) => track.stop());
+        signal.throwIfAborted();
+      }
+      this.stream = stream;
       // Reuse the shared, pre-warmed capture context instead of constructing a
       // fresh one per acquisition (the per-start AudioContext rebuild was pure
       // startup latency). The engine owns its lifecycle; we never close it here.
       this.audioCtx = getCaptureContext();
+      if (!this.audioCtx) throw new Error('AudioContext unavailable');
       if (this.audioCtx) {
         this.sourceNode = this.audioCtx.createMediaStreamSource(this.stream);
         this.analyser = this.audioCtx.createAnalyser();
@@ -104,12 +122,23 @@ export class MicrophoneAudioProvider implements AudioSource {
         this.sourceNode.connect(this.analyser);
         // The context may have been pre-warmed (created suspended) before any
         // user gesture — resume it now (acquire runs inside the Start click).
-        void resumeCaptureContext();
+        await resumeCaptureContext(signal);
+        signal.throwIfAborted();
       }
 
       this.visibilityHandler = () => {
         if (!document.hidden && this.audioCtx?.state === 'suspended') {
-          void this.audioCtx.resume();
+          void resumeCaptureContext(signal).catch((error: unknown) => {
+            if (signal.aborted || this.capture !== capture) return;
+            this.release();
+            onHealth({
+              kind: 'health',
+              component: 'audio',
+              state: 'failed',
+              message: error instanceof Error ? error.message : 'AudioContext resume failed',
+              timestamp: now(),
+            });
+          });
         }
       };
       document.addEventListener('visibilitychange', this.visibilityHandler);
@@ -125,11 +154,13 @@ export class MicrophoneAudioProvider implements AudioSource {
       const audioTrack = this.stream.getTracks()[0];
       if (audioTrack && typeof audioTrack.addEventListener === 'function') {
         this.trackEndedHandler = () => {
+          if (signal.aborted) return;
           onHealth({
             kind: 'health',
             component: 'audio',
             state: 'failed',
             message: 'Microphone disconnected — check device and restart',
+            reason: 'track_ended',
             timestamp: now(),
           });
         };
@@ -137,8 +168,12 @@ export class MicrophoneAudioProvider implements AudioSource {
       }
 
       onHealth({ kind: 'health', component: 'audio', state: 'connected', timestamp: now() });
-      return this.stream;
+      signal.throwIfAborted();
+      return stream;
     } catch (err) {
+      const owned = this.capture === capture && !signal.aborted;
+      if (!owned) throw err;
+      this.release();
       const message = err instanceof Error ? err.message : 'Microphone permission denied';
       onHealth({ kind: 'health', component: 'audio', state: 'failed', message, timestamp: now() });
       throw err;
@@ -146,6 +181,8 @@ export class MicrophoneAudioProvider implements AudioSource {
   }
 
   release(): void {
+    this.capture?.abort(new DOMException('Audio capture released', 'AbortError'));
+    this.capture = null;
     if (this.visibilityHandler) {
       document.removeEventListener('visibilitychange', this.visibilityHandler);
       this.visibilityHandler = null;

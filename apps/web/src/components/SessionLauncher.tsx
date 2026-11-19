@@ -58,7 +58,7 @@ export function SessionLauncher({ options }: SessionLauncherProps) {
 
 export interface ContinueBannerProps {
   /** Restored-but-unfinished session waiting to be resumed. */
-  resumable: { count: number; label: string };
+  resumable: { count: number; label: string; unavailableReason?: string };
   onContinue: () => void;
 }
 
@@ -75,11 +75,13 @@ export function ContinueBanner({ resumable, onContinue }: ContinueBannerProps) {
         <span>
           {resumable.count} 段字幕已保留 · {resumable.label}
         </span>
+        {resumable.unavailableReason && <span>{resumable.unavailableReason}</span>}
       </div>
       <button
         type="button"
         className="launcher-continue-btn"
         onClick={onContinue}
+        disabled={Boolean(resumable.unavailableReason)}
         data-testid="continue-session"
       >
         ▶ 繼續上次會議
@@ -105,21 +107,20 @@ export interface AutoSwitchNoticeProps {
  * different cost. So the switch is always visible.
  *
  * It is a notice, not an alert: no role="alert", nothing to act on, dismissible.
- * The captions are already back; interrupting the meeting to announce that would
- * be its own kind of failure.
+ * This confirms transport readiness, not the arrival of translated captions.
  */
 export function AutoSwitchNotice({ fromLabel, toLabel, onDismiss }: AutoSwitchNoticeProps) {
   return (
     <div className="continue-bar autoswitch-bar" data-testid="autoswitch-notice">
       <div className="launcher-continue-text">
         <strong>
-          {fromLabel} 中斷，已自動改用 {toLabel} 繼續
+          {fromLabel} 中斷，已自動連線至 {toLabel}
         </strong>
         {/* It used to say the failed backend was still retrying in the
             background. It is not: the handoff stops it, which cancels its retry
             loop. Switching back is a manual choice, so the notice says that
             instead of describing recovery that will not happen. */}
-        <span>字幕記錄完整保留；{fromLabel} 已停止，可於設定中手動切回</span>
+        <span>既有字幕保留；翻譯是否恢復請以新字幕為準</span>
       </div>
       <button
         type="button"

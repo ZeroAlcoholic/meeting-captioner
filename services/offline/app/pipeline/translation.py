@@ -103,6 +103,9 @@ def _translate_sync(source_text: str, direction: str) -> str:
     if direction == "en":
         # Prepend target-language token to steer decoder toward Traditional Chinese.
         tokens = [ZH_HANT_TOKEN] + tokens
+    # Transformers-converted Marian models expect source EOS. SentencePiece
+    # EncodeAsPieces omits it, and CT2's add_source_eos is false for these models.
+    tokens.append("</s>")
     results = translator.translate_batch([tokens])
     out_tokens = results[0].hypotheses[0]
     text = tgt_sp.DecodePieces(out_tokens)
@@ -113,11 +116,12 @@ _TRANSLATE_TIMEOUT_S = 5.0
 
 
 async def _run_in_executor_with_timeout(loop, fn, *args):
-    """Run a blocking translation step under a hard timeout.
+    """Bound the caller's wait for a blocking translation step.
 
     The MT executor is single-threaded; if a call hangs (CT2 deadlock or pathological
-    input) the entire pipeline blocks forever. wait_for guarantees the executor slot
-    is released within _TRANSLATE_TIMEOUT_S — caller treats timeout as None (skip).
+    input), wait_for cannot terminate it or release the occupied executor slot.
+    A timeout returns control to the caller, which treats it as None (skip), but
+    worker recovery remains unresolved; subsequent work can also time out.
     """
     return await asyncio.wait_for(
         loop.run_in_executor(_executor, fn, *args), timeout=_TRANSLATE_TIMEOUT_S

@@ -31,6 +31,35 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('online service', () => {
+  it('managed same-origin mode grants no CORS access to the preferred-port occupant', async () => {
+    const app = await buildApp({ sameOriginOnly: true });
+    for (const origin of ['http://127.0.0.1:43871', mockConfig.ONLINE_CORS_ORIGIN]) {
+      const response = await app.inject({
+        method: 'OPTIONS',
+        url: '/session',
+        headers: { origin, 'access-control-request-method': 'POST' },
+      });
+      expect(response.headers['access-control-allow-origin']).toBeUndefined();
+    }
+    const local = await app.inject({ method: 'GET', url: '/session/info' });
+    expect(local.statusCode).toBe(200);
+    await app.close();
+  });
+
+  it('exposes Retry-After to the approved cross-origin web client', async () => {
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/session/gemini',
+      headers: { origin: 'http://localhost:5173' },
+    });
+    expect(res.headers['access-control-allow-origin']).toBe('http://localhost:5173');
+    expect(String(res.headers['access-control-expose-headers']).toLowerCase().split(',')).toContain(
+      'retry-after',
+    );
+    await app.close();
+  });
+
   it('GET /healthz reports structured components when key present', async () => {
     mockConfig.OPENAI_API_KEY = 'sk-test';
     const app = await buildApp();

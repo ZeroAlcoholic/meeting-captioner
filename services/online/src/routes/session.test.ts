@@ -68,6 +68,40 @@ describe('GET /session/info', () => {
 });
 
 describe('POST /session', () => {
+  it.each(['12', 'Wed, 21 Oct 2026 07:28:00 GMT'])(
+    'preserves upstream Retry-After %s',
+    async (retryAfter) => {
+      mockConfig.OPENAI_API_KEY = 'sk-test';
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          async () =>
+            new Response('private detail', {
+              status: 429,
+              headers: { 'Retry-After': retryAfter },
+            }),
+        ),
+      );
+      const app = Fastify({ logger: false });
+      await registerSession(app);
+      const res = await app.inject({ method: 'POST', url: '/session' });
+      expect(res.statusCode).toBe(429);
+      expect(res.headers['retry-after']).toBe(retryAfter);
+      expect(res.body).not.toContain('private detail');
+      await app.close();
+    },
+  );
+
+  it('returns a cooldown for the local session limiter', async () => {
+    mockConfig.OPENAI_API_KEY = 'sk-test';
+    mockConfig.SESSION_RATE_LIMIT_PER_MIN = 0;
+    const app = Fastify({ logger: false });
+    await registerSession(app);
+    const res = await app.inject({ method: 'POST', url: '/session' });
+    expect(res.statusCode).toBe(429);
+    expect(res.headers['retry-after']).toBe('60');
+    await app.close();
+  });
   it('returns 503 when no API key configured', async () => {
     const app = Fastify({ logger: false });
     await registerSession(app);

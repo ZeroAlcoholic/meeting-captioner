@@ -20,10 +20,11 @@ if [ "$NODE_MAJOR" -lt 22 ]; then
   exit 1
 fi
 
-# ── OPENAI_API_KEY check (system env only — no .env file support) ──────
-if [ -z "${OPENAI_API_KEY:-}" ]; then
+# Any configured online backend can start this distribution.
+if ! node -e "process.exit(['OPENAI_API_KEY','OPENAI_API_KEY_AUDIO','GEMINI_API_KEY'].some(name => process.env[name]?.trim()) ? 0 : 1)"; then
   echo ""
-  echo "  [error] OPENAI_API_KEY is not set in your environment."
+  echo "  [error] No online API key is configured in this process."
+  echo "  Set OPENAI_API_KEY, OPENAI_API_KEY_AUDIO, or GEMINI_API_KEY."
   echo ""
   echo "  This release reads the key from the system/user environment ONLY."
   echo "  Pick one of the methods below, then re-run start.sh:"
@@ -55,7 +56,7 @@ cd "$ROOT"
 echo ""
 echo "  meeting-audio (online)"
 echo "  ----------------------"
-echo "   Open in browser: http://localhost:8787"
+echo "   Open in browser: http://localhost:${ONLINE_PORT:-8787}"
 echo "   Press Ctrl+C to stop."
 echo ""
 

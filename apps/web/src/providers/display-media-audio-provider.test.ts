@@ -169,3 +169,136 @@ describe('DisplayMediaAudioProvider', () => {
     expect(lastEvent.message).toMatch(/System audio capture stopped/i);
   });
 });
+
+describe('DisplayMediaAudioProvider resume ownership', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+  function setup(resume: () => Promise<void>) {
+    const stop = vi.fn();
+    const track = { stop, addEventListener: vi.fn(), removeEventListener: vi.fn() };
+    const stream = {
+      getTracks: () => [track],
+      getAudioTracks: () => [track],
+      getVideoTracks: () => [],
+    } as unknown as MediaStream;
+    const context = {
+      state: 'suspended',
+      resume,
+      close: vi.fn().mockResolvedValue(undefined),
+      createMediaStreamSource: () => ({ connect() {}, disconnect() {} }),
+      createAnalyser: () => ({ fftSize: 2048, disconnect() {} }),
+    };
+    vi.stubGlobal('AudioContext', vi.fn().mockReturnValue(context));
+    vi.stubGlobal('navigator', {
+      mediaDevices: {
+        getUserMedia: vi.fn().mockResolvedValue(stream),
+        getDisplayMedia: vi.fn().mockResolvedValue(stream),
+      },
+    });
+    vi.stubGlobal('document', {
+      hidden: false,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    });
+    return { stop, context };
+  }
+
+  it('does not report connected until resume actually completes', async () => {
+    let resume!: () => void;
+    const native = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    const { context } = setup(() => native);
+    const provider = new DisplayMediaAudioProvider();
+    const events: HealthEvent[] = [];
+    let finished = false;
+    const starting = provider
+      .acquire((event) => events.push(event))
+      .then(() => {
+        finished = true;
+      });
+    await Promise.resolve();
+    await Promise.resolve();
+    const finishedBeforeResume = finished;
+    const connectedBeforeResume = events.some((event) => event.state === 'connected');
+    context.state = 'running';
+    resume();
+    await starting;
+    expect(events.at(-1)?.state).toBe('connected');
+    provider.release();
+    expect(finishedBeforeResume).toBe(false);
+    expect(connectedBeforeResume).toBe(false);
+  });
+
+  it('releases tracks and reports failure when native resume rejects', async () => {
+    const { stop } = setup(() => Promise.reject(new Error('resume denied')));
+    const provider = new DisplayMediaAudioProvider();
+    const events: HealthEvent[] = [];
+    await expect(provider.acquire((event) => events.push(event))).rejects.toThrow('resume denied');
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(provider.analyser).toBeNull();
+    expect(events.at(-1)?.state).toBe('failed');
+    expect(events.some((event) => event.state === 'connected')).toBe(false);
+  });
+
+  it.each([false, true])(
+    'visibility resume failure respects released ownership: %s',
+    async (released) => {
+      vi.useFakeTimers();
+      let rejectResume!: (error: Error) => void;
+      const native = new Promise<void>((_resolve, reject) => {
+        rejectResume = reject;
+      });
+      const { context, stop } = setup(() => native);
+      context.state = 'running';
+      const provider = new DisplayMediaAudioProvider();
+      const events: HealthEvent[] = [];
+      await provider.acquire((event) => events.push(event));
+      context.state = 'suspended';
+      const visibility = vi
+        .mocked(document.addEventListener)
+        .mock.calls.find((call) => call[0] === 'visibilitychange')?.[1] as EventListener;
+      visibility(new Event('visibilitychange'));
+      if (released) provider.release();
+      rejectResume(new Error('visibility resume denied'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(events.filter((event) => event.state === 'failed')).toHaveLength(released ? 0 : 1);
+      expect(stop).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it('release cancels a pending resume and suppresses late connected', async () => {
+    vi.useFakeTimers();
+    let resume!: () => void;
+    const native = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    const { context, stop } = setup(() => native);
+    const provider = new DisplayMediaAudioProvider();
+    const events: HealthEvent[] = [];
+    let finished = false;
+    const starting = provider
+      .acquire((event) => events.push(event))
+      .then(
+        () => {
+          finished = true;
+        },
+        () => {
+          finished = true;
+        },
+      );
+    await vi.advanceTimersByTimeAsync(1);
+    provider.release();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(finished).toBe(true);
+    expect(stop).toHaveBeenCalledTimes(1);
+    context.state = 'running';
+    resume();
+    await starting;
+    expect(events.some((event) => event.state === 'connected')).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});

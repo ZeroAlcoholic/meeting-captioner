@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { config } from '../config.js';
+import { upstreamErrorCode } from '../upstream-error.js';
 import {
   activeOpenAIKeySlot,
   demoteOpenAIKeySlot,
@@ -70,7 +71,7 @@ interface ClientSecretResponse {
 // Single-process only; for multi-instance deployments swap for Redis.
 const rateState = new Map<string, number[]>();
 
-function isRateLimited(ip: string, limitPerMin: number, nowMs = Date.now()): boolean {
+export function isRateLimited(ip: string, limitPerMin: number, nowMs = Date.now()): boolean {
   const windowStart = nowMs - 60_000;
   const hits = (rateState.get(ip) ?? []).filter((t) => t > windowStart);
   if (hits.length >= limitPerMin) {
@@ -113,6 +114,32 @@ export async function registerSession(app: FastifyInstance): Promise<void> {
       hasApiKey: hasAnyOpenAIKey(),
       hasGeminiKey: Boolean(config.GEMINI_API_KEY),
       availableProviders,
+      taskCapabilities: [
+        {
+          provider: 'openai',
+          purpose: 'translation',
+          configured: hasAnyOpenAIKey(),
+          verified: false,
+        },
+        {
+          provider: 'openai',
+          purpose: 'transcription',
+          configured: hasAnyOpenAIKey(),
+          verified: false,
+        },
+        {
+          provider: 'gemini',
+          purpose: 'translation',
+          configured: Boolean(config.GEMINI_API_KEY),
+          verified: false,
+        },
+        {
+          provider: 'gemini',
+          purpose: 'transcription',
+          configured: Boolean(config.GEMINI_API_KEY),
+          verified: false,
+        },
+      ],
       // Which OpenAI key the next mint will use, and why the preferred one is
       // not in play if it isn't. Slot NAMES only — never key material.
       openaiKeySlot: activeOpenAIKeySlot(),
@@ -128,7 +155,10 @@ export async function registerSession(app: FastifyInstance): Promise<void> {
     }
 
     if (isRateLimited(req.ip, config.SESSION_RATE_LIMIT_PER_MIN)) {
-      return reply.status(429).send({ error: 'Too many session requests; retry in a minute' });
+      return reply
+        .header('Retry-After', '60')
+        .status(429)
+        .send({ error: 'Too many session requests; retry in a minute' });
     }
 
     // Parse body permissively — empty body is allowed and means defaults.
@@ -207,8 +237,7 @@ export async function registerSession(app: FastifyInstance): Promise<void> {
       keySlot = outcome.slot;
     } catch (err) {
       const isAbort = err instanceof Error && err.name === 'TimeoutError';
-      const message = err instanceof Error ? err.message : String(err);
-      req.log.warn({ err: message }, 'OpenAI client_secrets fetch failed');
+      req.log.warn({ code: upstreamErrorCode(err) }, 'OpenAI client_secrets fetch failed');
       recordOpenAIReachability('degraded');
       if (isAbort) {
         return reply.status(504).send({ error: 'OpenAI session bring-up timed out' });
@@ -217,11 +246,14 @@ export async function registerSession(app: FastifyInstance): Promise<void> {
     }
 
     if (!res.ok) {
-      // Log full upstream body server-side for diagnosis but never forward it
-      // to the browser — it can carry org id, billing detail, or quota numbers.
-      const bodyText = await res.text().catch(() => '<unreadable>');
+      const retryAfter = res.headers.get('Retry-After');
+      if (retryAfter && (/^\d+$/.test(retryAfter) || Number.isFinite(Date.parse(retryAfter)))) {
+        reply.header('Retry-After', retryAfter);
+      }
+      // Proxy/provider bodies can contain credentials or tenant details.
+      await res.body?.cancel().catch(() => {});
       req.log.warn(
-        { upstream_status: res.status, upstream_body: bodyText.slice(0, 2_000), key_slot: keySlot },
+        { upstream_status: res.status, key_slot: keySlot },
         'OpenAI client_secrets non-2xx',
       );
       recordOpenAIReachability('degraded');
