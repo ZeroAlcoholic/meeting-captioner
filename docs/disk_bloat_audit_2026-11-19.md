@@ -102,6 +102,47 @@
 - 要恢復：第 6 步（需同意）——`.npmrc` 加 `store-dir=.pnpm-store`，再 `pnpm install --offline --frozen-lockfile`，已實驗證實不需連外。注意 pnpm 可能再觸發上面的版本下載，執行前要先處理。
 - 地端要用時才重建 `.venv`（`uv sync`，需連外）。
 
+## 0.2 校準後第二次清理（2026-11-20）
+
+使用者要求：「最後校準，以資深系統專家身份，提出可以怎麼刪[確保不會影響專案]的最佳化建議」。由使用者親自執行刪除指令。
+
+### 校準時更正的誤判
+
+- `w04-clock-range-load-20261019/`（181 MB）原本被列為「被引用證據」。實際上文件引用的是同名的 `.log`；這個目錄是被熱更新中斷的失敗那一輪（`.last-run.json` 為 `failed`，`PROJECT_STATE.md:15` 寫明不計驗收）。原因是第 2 節的引用比對只比對名稱開頭。
+- 被引用的證據目錄裡，文件只引用摘要 JSON 和 log。`trace.zip` 只出現在 Playwright 自己的執行 log 中。
+- `release/` 已展開的目錄和同名 zip 不是同一份內容：其中 3 個目錄裡 contracts 的 5 個檔案比 zip 新。原因是當機前這些目錄和原始碼共用同一份檔案（硬連結），原始碼後來改了，目錄也跟著變。所以 zip 才是當時打包的原貌。
+- 檔案總管顯示的大小（約 2.9 GB）會把 `node_modules` 的硬連結重複計算，實際佔用是 1,459 MB。
+
+### 刪除項目
+
+腳本：`.tmp/disk_audit/delete_calibrated.py`。預設只乾跑，加 `--execute` 才刪除。清單寫死了每一項的檔數和位元組。預檢內容：路徑在專案內、不是 `.git`、沒有連結點、被 git 忽略、0 個版控檔、檔數與位元組相符、`release` 目錄有同名 zip、不是目前在用的服務建置、沒有使用本專案的程序在執行。反例測試：把 `apps/web/src`、目前在用的建置、`release/meeting-audio-online` 加進清單並帶 `--execute`，預檢擋下 6 個問題，三者都沒被刪。
+
+| 批次 | 內容                                                                                                          |   檔數 |     大小 |
+| ---- | ------------------------------------------------------------------------------------------------------------- | -----: | -------: |
+| 1    | 失敗那一輪的 trace 目錄、12 個已展開的 `release` 目錄、4 份只有 `service.log` 提到的舊建置、`.pnpm-store/v11` | 18,507 | 370.0 MB |
+| 2    | `.cache` 底下全部 55 個 `trace.zip`（截圖、`error-context.md`、log、JSON 保留）                               |     55 | 345.4 MB |
+
+### 前後讀數與驗證
+
+| 項目               |   刪除前 |     刪除後 |
+| ------------------ | -------: | ---------: |
+| 實際佔用           | 1,459 MB | **744 MB** |
+| 檔案總管顯示的大小 | 2,932 MB |   2,217 MB |
+
+- 專案自有 454 檔的 SHA256、HEAD、refs、`git status`：與刪除前快照逐位元組相同（`protected_pre_calibrated.json` 與 `protected_post_calibrated.json`）。
+- `git fsck --full` 通過。
+- 保留項目都在：15 個 `release` zip、`release/meeting-audio-online/`、6 份服務建置（含目前在用的 `4bec17b6`）、`.pnpm-store/v3`（`.modules.yaml` 指向它）、被引用的 log／JSON、74 張失敗截圖。`react`、`fastify` 仍能解析。
+- 刪除紀錄：`.tmp/disk_audit/delete_calibrated_log.json`。
+
+剩下的空間是：套件庫 `v3` 約 305 MB（建置要用）、地端模型 157 MB（離線模式要用）、被引用的證據與目前在用的服務建置、`release` zip、原始碼與 `.git`。
+
+預防（2026-11-20 同日完成）：
+
+- R6：`scripts/release-retention.mjs`，由 `package-online.ps1` 在打包成功後呼叫。只處理有標記的新打包，保留最新 3 份 zip 和目前的展開目錄。
+- R7：`scripts/workspace-capacity.mjs`，`pnpm test` 最後執行。`.cache` 400 MB、`.tmp` 1 GB、`release` 200 MB，超過就失敗。
+- trace：機制是 `retain-on-failure` 加上 `--output=.cache/<新名稱>`，Playwright 只清空這次指定的目錄，所以舊目錄的 trace 會一直累積。保存設定不改（失敗時的 trace 有查錯價值），累積由 R7 抓；處理方式寫在 `docs/RUNBOOK.md` 的 Workspace capacity。
+- 引用比對：處理規則已寫進同一節；診斷腳本 `.tmp/disk_audit/classify.py` 本身沒有修改。
+
 ## 結論（第一輪，數字已由第 0 節取代）
 
 - 工作區現況：**6,851.6 MB、96,364 檔**（磁碟實際佔用 7,102.6 MB；叢集 4 KB）。讀取錯誤 0、連結點 0、硬連結 0。

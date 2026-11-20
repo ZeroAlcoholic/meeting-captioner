@@ -285,6 +285,18 @@ pnpm test:e2e             # Playwright
 cd services/offline && uv run pytest
 ```
 
+### Workspace capacity
+
+`pnpm test` 最後一步是 `pnpm check:capacity`（`scripts/workspace-capacity.mjs`）。`.cache` 上限 400 MB、`.tmp` 1 GB、`release` 200 MB；超過就失敗，並列出最大的項目。不跟隨連結點。
+
+超過時改做這些，不要調高上限：
+
+- `.cache`：驗收結論已寫進文件後，刪掉該輪的 `trace.zip`，保留 log、JSON、截圖。用 `--output=.cache/<名稱>` 跑的驗收，每個失敗案例會留下 10–25 MB 的 trace，Playwright 只清空這次指定的輸出目錄。
+- `.tmp`：E2E 只保留最近一輪（`tests/e2e/e2e-temp.mjs`）；其他暫存用完就刪。
+- `release`：`scripts/package-online.ps1` 打包成功後會呼叫 `scripts/release-retention.mjs`，只保留最新 3 份 zip 和目前的展開目錄。沒有 `<名稱>.release.json` 標記的舊打包永遠不會被自動刪，因為文件可能引用它們；要刪就先確認沒有被引用。
+
+刪除任何路徑前，先確認文件沒有引用**這個完整路徑**。只比對開頭名稱會誤判，例如引用 `x.log` 不代表引用了同名目錄 `x/`。
+
 ---
 
 ## Lint / Format / Typecheck

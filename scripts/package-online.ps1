@@ -103,6 +103,14 @@ try {
   Write-Host "  (could not refresh meeting-audio-online junction — zip is the authoritative artifact)"
 }
 $ErrorActionPreference = $prev
+
+# 8. Retention: mark this package, keep the newest zips and only the current
+#    stage directory (scripts/release-retention.mjs). A failure is reported
+#    but does not fail the build: the new zip is already complete.
+node (Join-Path $RepoRoot 'scripts/release-retention.mjs') $ReleaseRoot "meeting-audio-online-$Stamp"
+if ($LASTEXITCODE -ne 0) {
+  Write-Warning 'Release retention failed; old packages were kept. See the message above.'
+}
 $global:LASTEXITCODE = 0
 
 Write-Host ""

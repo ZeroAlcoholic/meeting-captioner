@@ -4,6 +4,8 @@
 
 E2E fixture 的暫存資料夾一律經 `tests/e2e/e2e-temp.mjs` 建在 `.tmp/e2e/run-<runner pid>/`（runner 與 workers 共用同一個 run）。下一輪開始時，自動刪除 runner 已結束的 run 資料夾：保留最近一輪供事後查錯，不再無限累積（舊做法在 `.cache/` 留下 629 個資料夾、1.8 GB，見 `docs/disk_bloat_audit_2026-11-19.md`）。`pnpm test:e2e-helpers` 驗清理規則兩側。`native-audio.config.ts` 的固定資料夾每次 setup 會清掉上一輪的 `meeting-data`；需要保存會議資料庫時，下次執行前自行複製出來。
 
+容量上限與打包保留（2026-11-20）：`pnpm test` 最後跑 `pnpm check:capacity`，`.cache`／`.tmp`／`release` 超過上限就失敗（規則見 `docs/RUNBOOK.md` 的 Workspace capacity）。`pnpm test:workspace` 驗兩側：上限內通過、超過失敗並列出最大項目、不存在算 0、不跟隨 junction、上限無效或路徑不可讀就報錯；打包保留只刪有標記的舊打包、保留最新 3 份 zip 與目前展開目錄、不碰舊打包與 `meeting-audio-online`、標記不可信時一個都不刪。
+
 ## 模組／部署邊界（2026-11-03）
 
 `pnpm test:boundaries` 在 compiler host／Vite loader 虛擬注入地端失敗，驗 online 不載入實作、full 仍驗地端型別，以及錯誤直接引用會被 build 拒絕；不破壞工作中的原始檔。前端地端／Hybrid 單元跟實作放各自目錄，跨模式 capture 與 provider conformance 留共用層。Chrome 的 `deployment-boundaries.spec.ts` 驗 online 下舊地端會議保留／匯出、禁續用、零收音與地端請求；使用 pure-captions fixture，可指定 `PURE_TEST_WEB_DIST`／`PURE_TEST_SERVER_BUNDLE` 核對既有正式產物，不必重建。證據與沿用規則見[架構檢閱](evals/2026-11-03-module-boundary-review.md)；一般啟動不跑測試。
