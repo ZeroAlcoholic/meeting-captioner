@@ -12,7 +12,14 @@ import type {
   ProviderStatus,
 } from './types.js';
 import { MicrophoneAudioProvider } from './microphone-audio-provider.js';
-import { getCaptureContext, ensureCaptureWorklet, resumeCaptureContext } from './audio-engine.js';
+import {
+  getCaptureContext,
+  ensureCaptureWorklet,
+  pcmChunkSizeForRate,
+  resamplePcm,
+  resumeCaptureContext,
+  type ResampleState,
+} from './audio-engine.js';
 import { monitorCaptureHealth } from './capture-health.js';
 import { WarmTokenCache } from './token-prewarm.js';
 import { serviceFetch } from './service-fetch.js';
@@ -1077,11 +1084,13 @@ export class GeminiLiveProvider implements CaptionProvider {
       if (!this.isCurrentGeneration(generation) || !this.stream) return;
       this.sourceNode = ctx.createMediaStreamSource(this.stream);
       const source = this.sourceNode;
+      const targetSampleRate = ctx.sampleRate > 16_000 ? 16_000 : ctx.sampleRate;
+      const resampleState: ResampleState = { pos: 0, last: 0 };
       this.workletNode = new AudioWorkletNode(ctx, 'pcm-worklet', {
         channelCount: 1,
         channelCountMode: 'explicit',
         channelInterpretation: 'speakers',
-        processorOptions: { chunkSize: GEMINI_PCM_CHUNK_SIZE },
+        processorOptions: { chunkSize: pcmChunkSizeForRate(ctx.sampleRate, GEMINI_PCM_CHUNK_SIZE) },
       });
       const captureHealth = (this.captureHealth = monitorCaptureHealth({
         context: ctx,
@@ -1129,12 +1138,17 @@ export class GeminiLiveProvider implements CaptionProvider {
           return;
         }
         const resumingDelivery = this.wsBackpressureConsecutiveDrops > 0;
-        const pcm16 = floatTo16BitPCM(new Float32Array(ev.data));
+        const rawSamples = new Float32Array(ev.data);
+        const samples =
+          ctx.sampleRate > 16_000
+            ? resamplePcm(rawSamples, ctx.sampleRate, targetSampleRate, resampleState)
+            : rawSamples;
+        if (samples.length === 0) return;
+        const pcm16 = floatTo16BitPCM(samples);
         const b64 = arrayBufferToBase64(pcm16);
         this.ws.send(
           JSON.stringify({
-            // Live accepts other rates and resamples; never label fallback 48kHz as 16kHz.
-            realtimeInput: { audio: { data: b64, mimeType: `audio/pcm;rate=${ctx.sampleRate}` } },
+            realtimeInput: { audio: { data: b64, mimeType: `audio/pcm;rate=${targetSampleRate}` } },
           }),
         );
         this.wsBackpressureConsecutiveDrops = 0;

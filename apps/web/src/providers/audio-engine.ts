@@ -7,6 +7,67 @@ export interface CapturedPcmChunk {
   pcm: ArrayBuffer;
 }
 
+/** Interpolation state carried between PCM chunks so seams stay continuous. */
+export interface ResampleState {
+  /** Fractional read position, relative to the start of the next chunk. */
+  pos: number;
+  /** Final sample of the previous chunk — the left anchor across the seam. */
+  last: number;
+}
+
+/**
+ * Linear-interpolate `input` (at `inputRate`) to `targetRate`, carrying `state`
+ * so consecutive chunks join without a step discontinuity (no seam clicks).
+ */
+export function resamplePcm(
+  input: Float32Array,
+  inputRate: number,
+  targetRate: number,
+  state: ResampleState,
+): Float32Array {
+  if (input.length === 0) return input;
+  if (inputRate === targetRate) {
+    state.pos = 0;
+    state.last = input[input.length - 1] ?? state.last;
+    return input;
+  }
+  const ratio = inputRate / targetRate;
+  const out = new Float32Array(Math.max(1, Math.ceil((input.length - state.pos) / ratio)));
+  let pos = state.pos;
+  let n = 0;
+  while (pos < input.length) {
+    const i = Math.floor(pos);
+    const frac = pos - i;
+    const a = i < 0 ? state.last : (input[i] ?? 0);
+    if (frac === 0) {
+      out[n++] = a;
+    } else {
+      const next = input[i + 1];
+      if (next === undefined) break;
+      out[n++] = a + (next - a) * frac;
+    }
+    pos += ratio;
+  }
+  state.pos = pos - input.length;
+  state.last = input[input.length - 1] ?? state.last;
+  return out.subarray(0, n);
+}
+
+/**
+ * True when an AudioContext is paused by the OS/browser. Covers standard
+ * 'suspended' as well as iOS Safari's WebKit-specific 'interrupted' state
+ * (triggered by lock screen, phone calls, or app switching).
+ */
+export function isAudioContextPaused(state: AudioContextState | string | undefined): boolean {
+  return state === 'suspended' || state === 'interrupted';
+}
+
+/** Compute a ~32 ms PCM worklet chunk size for the actual AudioContext rate. */
+export function pcmChunkSizeForRate(sampleRate: number, minSamples = 512): number {
+  if (!Number.isFinite(sampleRate) || sampleRate <= 0) return minSamples;
+  return Math.max(minSamples, Math.round(sampleRate * 0.032));
+}
+
 // ─── Shared audio-capture engine ─────────────────────────────────────────────
 //
 // A single long-lived AudioContext + compiled AudioWorklet module, reused across

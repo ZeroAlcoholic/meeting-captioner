@@ -3,7 +3,10 @@ import {
   __resetAudioEngineForTests,
   ensureCaptureWorklet,
   getCaptureContext,
+  isAudioContextPaused,
+  pcmChunkSizeForRate,
   prewarmCapture,
+  resamplePcm,
   resumeCaptureContext,
   resumeAudioContext,
 } from './audio-engine.js';
@@ -263,5 +266,32 @@ describe('audio-engine', () => {
     ]);
     expect(getCaptureContext()).toBe(ctx);
     expect(constructed).toBe(1);
+  });
+
+  it('recognizes both suspended and iOS interrupted states as paused', () => {
+    expect(isAudioContextPaused('suspended')).toBe(true);
+    expect(isAudioContextPaused('interrupted')).toBe(true);
+    expect(isAudioContextPaused('running')).toBe(false);
+    expect(isAudioContextPaused('closed')).toBe(false);
+    expect(isAudioContextPaused(undefined)).toBe(false);
+  });
+
+  it('scales PCM chunk size proportionally to sample rate (~32 ms)', () => {
+    expect(pcmChunkSizeForRate(16_000)).toBe(512);
+    expect(pcmChunkSizeForRate(48_000)).toBe(1536);
+    expect(pcmChunkSizeForRate(44_100)).toBe(1411);
+    expect(pcmChunkSizeForRate(0)).toBe(512);
+  });
+
+  it('downsamples 48kHz PCM to 16kHz seamlessly across chunks', () => {
+    const state = { pos: 0, last: 0 };
+    const chunkA = new Float32Array(1536).fill(0.5);
+    const chunkB = new Float32Array(1536).fill(-0.25);
+    const outA = resamplePcm(chunkA, 48_000, 16_000, state);
+    const outB = resamplePcm(chunkB, 48_000, 16_000, state);
+    expect(outA).toHaveLength(512);
+    expect(outB).toHaveLength(512);
+    expect(outA[0]).toBeCloseTo(0.5, 5);
+    expect(outB[511]).toBeCloseTo(-0.25, 5);
   });
 });

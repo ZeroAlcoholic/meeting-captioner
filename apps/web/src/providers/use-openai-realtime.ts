@@ -12,6 +12,7 @@ import { startSessionInfoPolling } from './session-info-polling.js';
 import { leaseCapture } from './capture-lease.js';
 import { createStoreBoundHandlers, type CoalescingHandlersOptions } from './coalesce-handlers.js';
 import { translationReadiness } from './translation-readiness.js';
+import type { UseOnlineProviderOptions } from './use-gemini-live.js';
 import type { AudioSource, ProviderStatus, TranslationTrackScope } from './types.js';
 
 const SESSION_URL = `${ONLINE_SERVICE_URL}/session`;
@@ -57,8 +58,13 @@ export interface UseOpenAIRealtime {
   getTransport: () => HealthState;
 }
 
-export function useOpenAIRealtime(track?: TranslationTrackScope): UseOpenAIRealtime {
+export function useOpenAIRealtime(
+  track?: TranslationTrackScope,
+  options?: UseOnlineProviderOptions,
+): UseOpenAIRealtime {
   const trackRef = useRef(track);
+  const optionsRef = useRef(options);
+  optionsRef.current = options;
   const providerRef = useRef<OpenAIRealtimeProvider | null>(null);
   const healthRef = useRef(new Map<HealthEvent['component'], HealthEvent>());
   const handlersRef = useRef<ReturnType<typeof createStoreBoundHandlers> | null>(null);
@@ -81,13 +87,15 @@ export function useOpenAIRealtime(track?: TranslationTrackScope): UseOpenAIRealt
 
   // ── /session/info polling with backoff ───────────────────────────────────────
   useEffect(() => {
-    const stopPolling = startSessionInfoPolling(
-      SESSION_INFO_URL,
-      (info) => {
-        setApiKeyStatus(info.hasApiKey ? 'present' : 'no-key');
-      },
-      () => setApiKeyStatus('service-down'),
-    );
+    const stopPolling = optionsRef.current?.disablePolling
+      ? () => {}
+      : startSessionInfoPolling(
+          SESSION_INFO_URL,
+          (info) => {
+            setApiKeyStatus(info.hasApiKey ? 'present' : 'no-key');
+          },
+          () => setApiKeyStatus('service-down'),
+        );
     return () => {
       stopPolling();
       acceptingHealthRef.current = false;
@@ -122,7 +130,7 @@ export function useOpenAIRealtime(track?: TranslationTrackScope): UseOpenAIRealt
   }, []);
 
   useEffect(() => {
-    if (trackRef.current) return;
+    if (trackRef.current || optionsRef.current?.disableAutoPrewarm) return;
     if (modeId !== 'online_full') {
       if (!trackRef.current) cancelOpenAIPrewarm();
       return;
@@ -255,6 +263,9 @@ export function useOpenAIRealtime(track?: TranslationTrackScope): UseOpenAIRealt
           kind: isSystemAudio ? 'system' : 'mic',
           micDistance: effectiveMicDistance,
           deviceId: settingsStore.getState().micDeviceId,
+          ...(optionsRef.current?.retainAudio !== undefined
+            ? { retainAudio: optionsRef.current.retainAudio }
+            : {}),
         });
       const provider = new OpenAIRealtimeProvider(
         SESSION_URL,

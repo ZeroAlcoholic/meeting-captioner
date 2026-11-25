@@ -30,6 +30,12 @@ export interface CaptureSpec {
   micDistance: MicDistance;
   /** Empty or omitted uses the OS default only for the initial acquisition. */
   deviceId?: string | undefined;
+  /**
+   * Keep a 60s 16kHz PCM ring buffer for archive gap accounting. Defaults to
+   * true; the stateless phone build sets false to avoid a second worklet,
+   * main-thread resampling, and 3.84 MB RAM overhead.
+   */
+  retainAudio?: boolean | undefined;
 }
 
 /**
@@ -44,7 +50,7 @@ const HANDOFF_WINDOW_MS = 2_000;
 interface LiveCapture {
   parkedFrom: number | null;
   parkedGap: { id: string; reportedTo: number } | null;
-  retention: Awaited<ReturnType<typeof createCaptureAudioRetention>>;
+  retention: Awaited<ReturnType<typeof createCaptureAudioRetention>> | null;
   retentionAbort: AbortController;
   spec: CaptureSpec;
   source: AudioSource;
@@ -120,6 +126,7 @@ export function createCaptureLeaseOwner() {
     // time, so a different profile genuinely needs a different capture. System
     // capture ignores it — the signal is already mixed by the OS.
     if (a.kind !== b.kind) return false;
+    if ((a.retainAudio ?? true) !== (b.retainAudio ?? true)) return false;
     return (
       a.kind === 'system' ||
       (a.micDistance === b.micDistance && (a.deviceId ?? '') === (b.deviceId ?? ''))
@@ -148,7 +155,7 @@ export function createCaptureLeaseOwner() {
   }
 
   function reportParkedGap(capture: LiveCapture, flush = false): void {
-    if (capture.parkedFrom !== null) {
+    if (capture.parkedFrom !== null && capture.retention) {
       const from = capture.parkedFrom;
       const range = capture.retention.buffer.retainedRange;
       if (range && from < range.from) {
@@ -199,10 +206,10 @@ export function createCaptureLeaseOwner() {
 
   /** Read-only access for the active capture; stale streams cannot read a new epoch. */
   function retainedCaptureRange(stream: MediaStream): SampleRange | null {
-    return live?.stream === stream ? live.retention.buffer.retainedRange : null;
+    return live?.stream === stream ? (live.retention?.buffer.retainedRange ?? null) : null;
   }
   function readCapturedAudio(stream: MediaStream, range: SampleRange): BufferRead {
-    return live?.stream === stream
+    return live?.stream === stream && live.retention
       ? live.retention.buffer.read(range)
       : { frames: [], missing: range.to > range.from ? [{ ...range }] : [] };
   }
@@ -213,7 +220,9 @@ export function createCaptureLeaseOwner() {
     from: number,
     to: number,
   ): SampleRange | null {
-    return live?.stream === stream ? live.retention.rangeForNativeFrames(context, from, to) : null;
+    return live?.stream === stream
+      ? (live.retention?.rangeForNativeFrames(context, from, to) ?? null)
+      : null;
   }
 
   /** The running meeting, not a cloud attempt, owns capture during recovery. */
@@ -361,7 +370,7 @@ export function createCaptureLeaseOwner() {
           // Releasing a lease removes its listener; a handoff attaches the new owner.
           let capture: LiveCapture | null = null;
           let stream: MediaStream;
-          let retention: Awaited<ReturnType<typeof createCaptureAudioRetention>>;
+          let retention: Awaited<ReturnType<typeof createCaptureAudioRetention>> | null = null;
           try {
             stream = await source.acquire((event) => {
               // Observe before provider callbacks: a pure-caption failure can
@@ -397,24 +406,26 @@ export function createCaptureLeaseOwner() {
                 notifyMeeting(event);
               }
             });
-            retention = await createCaptureAudioRetention(
-              stream,
-              spec.kind,
-              retentionAbort.signal,
-              () => {
-                if (capture) reportParkedGap(capture);
-              },
-              () => {
-                const event: HealthEvent = {
-                  kind: 'health',
-                  component: 'audio',
-                  state: 'degraded',
-                  timestamp: new Date().toISOString(),
-                  message: '音訊模組載入逾時，正在原音源重試一次；尚未開始送音。',
-                };
-                for (const listener of [...healthListeners.values()]) listener(event);
-              },
-            );
+            if (spec.retainAudio !== false) {
+              retention = await createCaptureAudioRetention(
+                stream,
+                spec.kind,
+                retentionAbort.signal,
+                () => {
+                  if (capture) reportParkedGap(capture);
+                },
+                () => {
+                  const event: HealthEvent = {
+                    kind: 'health',
+                    component: 'audio',
+                    state: 'degraded',
+                    timestamp: new Date().toISOString(),
+                    message: '音訊模組載入逾時，正在原音源重試一次；尚未開始送音。',
+                  };
+                  for (const listener of [...healthListeners.values()]) listener(event);
+                },
+              );
+            }
             retentionAbort.signal.throwIfAborted();
           } catch (error) {
             if (
@@ -463,7 +474,7 @@ export function createCaptureLeaseOwner() {
       },
 
       captureRangeForNativeFrames(context, from, to) {
-        return heldCapture?.retention.rangeForNativeFrames(context, from, to) ?? null;
+        return heldCapture?.retention?.rangeForNativeFrames(context, from, to) ?? null;
       },
       release(): void {
         generation += 1;
@@ -490,7 +501,7 @@ export function createCaptureLeaseOwner() {
           return;
         }
         if (recoveryHealth && captureIsLive(capture)) {
-          capture.parkedFrom ??= capture.retention.buffer.retainedRange?.to ?? 0;
+          capture.parkedFrom ??= capture.retention?.buffer.retainedRange?.to ?? 0;
           cancelHandoffTimer();
           return;
         }

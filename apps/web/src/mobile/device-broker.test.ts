@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { deviceBrokerFetch } from './device-broker.js';
 import { __resetDeviceKeysForTests, getDeviceKeys, maskKey, setDeviceKey } from './device-keys.js';
-import { friendlyError, transcriptText } from './MobileApp.js';
+import { friendlyError, resolveStartOrder, transcriptText } from './MobileApp.js';
 import type { CaptionSegment, CaptionTranslation } from '../store/caption-store.js';
 
 const OPENAI_KEY = 'sk-test-openai-device-key';
@@ -248,6 +248,7 @@ describe('transcriptText', () => {
 
 describe('friendlyError', () => {
   it('turns log-style failures into what to do next', () => {
+    expect(friendlyError('OpenAI SDP exchange failed (401 ip_not_authorized)')).toContain('白名單');
     expect(friendlyError('gemini: unsupported; automatic retry unavailable')).toContain('金鑰');
     expect(friendlyError('openai translation: auth (HTTP 401)')).toContain('金鑰');
     expect(friendlyError('gemini: rate-limit (HTTP 429); automatic retry unavailable')).toContain(
@@ -256,5 +257,20 @@ describe('friendlyError', () => {
     expect(friendlyError('NotAllowedError: Permission denied')).toContain('麥克風權限');
     expect(friendlyError('gemini translation: network (HTTP 502)')).toContain('網路');
     expect(friendlyError('something new')).toBe('無法開始：something new');
+  });
+});
+
+describe('resolveStartOrder', () => {
+  it('tries preferred provider first and falls back to the other saved key', () => {
+    expect(resolveStartOrder('openai', { openai: OPENAI_KEY, gemini: GEMINI_KEY })).toEqual([
+      'openai',
+      'gemini',
+    ]);
+    expect(resolveStartOrder('gemini', { openai: OPENAI_KEY, gemini: GEMINI_KEY })).toEqual([
+      'gemini',
+      'openai',
+    ]);
+    expect(resolveStartOrder('openai', { gemini: GEMINI_KEY })).toEqual(['gemini']);
+    expect(resolveStartOrder('gemini', {})).toEqual([]);
   });
 });

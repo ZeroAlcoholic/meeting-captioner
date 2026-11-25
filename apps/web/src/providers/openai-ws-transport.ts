@@ -20,10 +20,19 @@
 // ourselves — the shared AudioWorklet, resampled to 24 kHz, into base64
 // `session.input_audio_buffer.append` frames.
 
-import { ensureCaptureWorklet, getCaptureContext, resumeCaptureContext } from './audio-engine.js';
+import {
+  ensureCaptureWorklet,
+  getCaptureContext,
+  pcmChunkSizeForRate,
+  resamplePcm,
+  resumeCaptureContext,
+  type ResampleState,
+} from './audio-engine.js';
 import type { HealthEvent } from '@meeting-audio/contracts';
 import { monitorCaptureHealth } from './capture-health.js';
 import { arrayBufferToBase64, floatTo16BitPCM } from './gemini-live-provider.js';
+
+export type { ResampleState };
 
 const OPENAI_TRANSLATION_WS_URL = 'wss://api.openai.com/v1/realtime/translations';
 
@@ -42,59 +51,16 @@ const OPENAI_TRANSLATION_WS_URL = 'wss://api.openai.com/v1/realtime/translations
 // explicitly instead, from whatever rate the context actually gave us.
 const TARGET_SAMPLE_RATE = 24_000;
 
-/** Interpolation state carried BETWEEN chunks so the seams stay continuous. */
-export interface ResampleState {
-  /** Fractional read position, relative to the start of the next chunk. */
-  pos: number;
-  /** Final sample of the previous chunk — the left anchor across the seam. */
-  last: number;
-}
-
 /**
  * Linear-interpolate `input` (at `inputRate`) to 24 kHz, carrying `state` so
- * consecutive chunks join without a step discontinuity. Resetting the position
- * every chunk would inject a click at each 32 ms boundary — ~31 clicks per
- * second straight into the ASR front-end.
- *
- * Linear is the right tool here: the payload is speech that has already been
- * band-limited by the capture context, and the alternative (a polyphase FIR)
- * costs main-thread time in a hard-realtime path to fix aliasing the model
- * never hears. Exported for tests.
+ * consecutive chunks join without a step discontinuity. Exported for tests.
  */
 export function resampleTo24kHz(
   input: Float32Array,
   inputRate: number,
   state: ResampleState,
 ): Float32Array {
-  if (input.length === 0) return input;
-  if (inputRate === TARGET_SAMPLE_RATE) {
-    state.pos = 0;
-    state.last = input[input.length - 1] ?? state.last;
-    return input;
-  }
-  const ratio = inputRate / TARGET_SAMPLE_RATE;
-  const out = new Float32Array(Math.max(1, Math.ceil((input.length - state.pos) / ratio)));
-  let pos = state.pos;
-  let n = 0;
-  while (pos < input.length) {
-    const i = Math.floor(pos);
-    const frac = pos - i;
-    // i < 0 means this output sample falls between the previous chunk's last
-    // sample and this chunk's first — that is the seam the state exists for.
-    const a = i < 0 ? state.last : (input[i] ?? 0);
-    if (frac === 0) {
-      out[n++] = a;
-    } else {
-      const next = input[i + 1];
-      // The right anchor lives in the NEXT chunk; stop and resume there.
-      if (next === undefined) break;
-      out[n++] = a + (next - a) * frac;
-    }
-    pos += ratio;
-  }
-  state.pos = pos - input.length;
-  state.last = input[input.length - 1] ?? state.last;
-  return out.subarray(0, n);
+  return resamplePcm(input, inputRate, TARGET_SAMPLE_RATE, state);
 }
 
 // 512 samples @ 16 kHz = 32 ms of front-of-pipe latency, matching the Gemini
@@ -433,7 +399,7 @@ export class OpenAIWsTransport {
       channelCount: 1,
       channelCountMode: 'explicit',
       channelInterpretation: 'speakers',
-      processorOptions: { chunkSize: PCM_CHUNK_SIZE },
+      processorOptions: { chunkSize: pcmChunkSizeForRate(ctx.sampleRate, PCM_CHUNK_SIZE) },
     });
     const captureHealth = (this.captureHealth = monitorCaptureHealth({
       context: ctx,

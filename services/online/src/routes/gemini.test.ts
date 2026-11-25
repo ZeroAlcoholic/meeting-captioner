@@ -103,11 +103,16 @@ describe('POST /session/gemini', () => {
     expect(body.token).toBe('auth_tokens/abc123');
     expect(body.model).toBe('models/gemini-3.5-live-translate-preview');
 
-    // Upstream request used the key in the URL and minted a single-use,
-    // unconstrained token (locking the model caused a Live WS 1011 — verified).
-    const [url, init] = fetchMock.mock.calls[0] as [string, { body: string }];
-    expect(url).toContain('/v1beta/auth_tokens');
-    expect(url).toContain('key=gk-test');
+    // Upstream request used the x-goog-api-key header (never in URL query) and
+    // minted a single-use, unconstrained token (locking the model caused a Live
+    // WS 1011 — verified).
+    const [url, init] = fetchMock.mock.calls[0] as [
+      string,
+      { body: string; headers: Record<string, string> },
+    ];
+    expect(url).toBe('https://generativelanguage.googleapis.com/v1beta/auth_tokens');
+    expect(url).not.toContain('gk-test');
+    expect(init.headers['x-goog-api-key']).toBe('gk-test');
     const sentBody = JSON.parse(init.body) as Record<string, unknown>;
     expect(sentBody.uses).toBe(1);
     expect(sentBody.expireTime).toBeTruthy();

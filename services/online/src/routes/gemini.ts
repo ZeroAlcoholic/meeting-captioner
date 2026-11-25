@@ -84,15 +84,16 @@ export async function registerGemini(app: FastifyInstance): Promise<void> {
 
     let res: Response;
     try {
-      res = await fetch(
-        `${GEMINI_AUTH_TOKENS_URL}?key=${encodeURIComponent(config.GEMINI_API_KEY)}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-          signal: AbortSignal.timeout(config.OPENAI_TIMEOUT_MS),
+      res = await fetch(GEMINI_AUTH_TOKENS_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          // Header, not ?key=: keeps the key out of proxy access logs and URLs.
+          'x-goog-api-key': config.GEMINI_API_KEY,
         },
-      );
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(config.OPENAI_TIMEOUT_MS),
+      });
     } catch (err) {
       const isAbort = err instanceof Error && err.name === 'TimeoutError';
       req.log.warn({ code: upstreamErrorCode(err) }, 'Gemini auth_tokens fetch failed');

@@ -354,8 +354,10 @@ class FakeAudioWorkletNode {
   static instances: FakeAudioWorkletNode[] = [];
 
   port = { onmessage: null as ((e: MessageEvent) => void) | null, close: vi.fn() };
+  options: AudioWorkletNodeOptions | undefined;
 
-  constructor() {
+  constructor(_ctx?: AudioContext, _name?: string, options?: AudioWorkletNodeOptions) {
+    this.options = options;
     FakeAudioWorkletNode.instances.push(this);
   }
 
@@ -1077,7 +1079,7 @@ describe('GeminiLiveProvider — reconnect + wedge detection (#16)', () => {
     provider.stop();
   });
 
-  it('advertises the actual 48kHz capture rate when the engine rejects an explicit 16kHz context', async () => {
+  it('downsamples 48kHz fallback capture to 16kHz and scales worklet chunkSize', async () => {
     __resetAudioEngineForTests();
     const requestedRates: Array<number | undefined> = [];
     vi.stubGlobal(
@@ -1106,12 +1108,14 @@ describe('GeminiLiveProvider — reconnect + wedge detection (#16)', () => {
     const { provider } = makeHarness();
     try {
       await provider.start();
-      FakeAudioWorkletNode.instances.at(-1)!.port.onmessage?.({
-        data: new Float32Array(512).fill(0.25).buffer,
+      const worklet = FakeAudioWorkletNode.instances.at(-1)!;
+      expect(worklet.options?.processorOptions?.chunkSize).toBe(1536);
+      worklet.port.onmessage?.({
+        data: new Float32Array(1536).fill(0.25).buffer,
       } as MessageEvent);
       const audio = JSON.parse(FakeWebSocket.instances.at(-1)!.sent.at(-1)!).realtimeInput.audio;
       expect(requestedRates).toEqual([16_000, undefined]);
-      expect(audio.mimeType).toBe('audio/pcm;rate=48000');
+      expect(audio.mimeType).toBe('audio/pcm;rate=16000');
       expect(atob(audio.data)).toHaveLength(512 * 2);
     } finally {
       provider.stop();

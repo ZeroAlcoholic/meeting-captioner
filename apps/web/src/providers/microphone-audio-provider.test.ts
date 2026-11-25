@@ -225,6 +225,34 @@ describe('MicrophoneAudioProvider resume ownership', () => {
     },
   );
 
+  it('iOS interrupted state emits degraded without releasing tracks when visibility resume rejects', async () => {
+    vi.useFakeTimers();
+    let rejectResume!: (error: Error) => void;
+    const native = new Promise<void>((_resolve, reject) => {
+      rejectResume = reject;
+    });
+    const { context, stop } = setup(() => native);
+    context.state = 'running';
+    const provider = new MicrophoneAudioProvider();
+    const events: HealthEvent[] = [];
+    await provider.acquire((event) => events.push(event));
+    context.state = 'interrupted';
+    const visibility = vi
+      .mocked(document.addEventListener)
+      .mock.calls.find((call) => call[0] === 'visibilitychange')?.[1] as EventListener;
+    visibility(new Event('visibilitychange'));
+    rejectResume(new Error('gesture required'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(events.at(-1)).toMatchObject({
+      component: 'audio',
+      state: 'degraded',
+      reason: 'context_suspended',
+    });
+    expect(stop).not.toHaveBeenCalled();
+    provider.release();
+    expect(stop).toHaveBeenCalledTimes(1);
+  });
+
   it('release cancels a pending resume and suppresses late connected', async () => {
     vi.useFakeTimers();
     let resume!: () => void;

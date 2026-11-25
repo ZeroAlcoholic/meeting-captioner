@@ -9,7 +9,8 @@ import {
 } from 'react';
 import { useGeminiLive } from '../providers/use-gemini-live.js';
 import { useOpenAIRealtime } from '../providers/use-openai-realtime.js';
-import { clearRecoveryRefusal } from '../providers/recovery-attempt.js';
+import { resumeCaptureContext } from '../providers/audio-engine.js';
+import { clearRecoveryRefusal, permanentRecoveryFailure } from '../providers/recovery-attempt.js';
 import { settingsStore, useSettingsStore } from '../settings/use-settings-store.js';
 import type { LangPair, MicDistance, OnlineProvider } from '../settings/settings-store.js';
 import { captionStore, useCaptionStore } from '../store/use-caption-store.js';
@@ -21,7 +22,35 @@ import {
   setDeviceKey,
   subscribeDeviceKeys,
   type DeviceKeyProvider,
+  type DeviceKeys,
 } from './device-keys.js';
+
+/**
+ * Phone build skips server /session/info polling, idle auto-prewarm (avoids
+ * double-minting right after key test), and the 60s PCM retention ring buffer
+ * (no archive or backfill on mobile).
+ */
+const MOBILE_PROVIDER_OPTIONS = {
+  disablePolling: true,
+  disableAutoPrewarm: true,
+  retainAudio: false,
+} as const;
+
+/**
+ * Determine provider start order from saved keys and current selection.
+ * If both keys are present, try the selected provider first (e.g. OpenAI inside
+ * an allowed Wi-Fi domain), then fall back to the other on startup failure.
+ */
+export function resolveStartOrder(
+  preferred: OnlineProvider,
+  keys: DeviceKeys,
+): DeviceKeyProvider[] {
+  const other: DeviceKeyProvider = preferred === 'openai' ? 'gemini' : 'openai';
+  const order: DeviceKeyProvider[] = [];
+  if (keys[preferred]) order.push(preferred);
+  if (keys[other]) order.push(other);
+  return order;
+}
 
 /** Rendered tail. The store is bounded too; this keeps scrolling light on a phone. */
 const RENDERED_SEGMENTS = 150;
@@ -141,14 +170,40 @@ function LiveLine({ bilingual }: { bilingual: boolean }) {
   );
 }
 
-function statusLabel(running: boolean, transport: string, audio: string): [string, string] {
+function statusLabel(
+  running: boolean,
+  transport: string,
+  audio: string,
+  offline: boolean,
+): [string, string] {
   if (!running) return ['idle', '未開始'];
+  if (offline) return ['bad', '無網路連線'];
   if (audio === 'requesting_permission') return ['wait', '請允許麥克風'];
   if (audio === 'failed' || audio === 'no_audio_track') return ['bad', '收不到麥克風'];
+  if (audio === 'degraded') return ['wait', '收音已暫停'];
   if (transport === 'reconnecting') return ['wait', '重新連線中'];
   if (transport === 'failed' || transport === 'api_error') return ['bad', '連線中斷，重試中'];
+  if (audio === 'silence_detected') return ['ok', '現場安靜中'];
   if (transport === 'connected') return ['ok', '聆聽中'];
   return ['wait', '連線中'];
+}
+
+/** Isolated subscriber so 10 Hz audio level updates never re-render the reader. */
+function AudioPulse({ active }: { active: boolean }) {
+  const rmsDb = useSettingsStore((s) => s.audioLevel?.rmsDb ?? -60);
+  if (!active) return null;
+  const level = Math.max(0.15, Math.min(1, (rmsDb + 55) / 40));
+  return (
+    <span
+      className="m-meter"
+      aria-hidden="true"
+      style={{ '--m-level': level.toFixed(2) } as React.CSSProperties}
+    >
+      <i />
+      <i />
+      <i />
+    </span>
+  );
 }
 
 function Reader({ running, fontStep }: { running: boolean; fontStep: number }) {
@@ -221,6 +276,8 @@ function Reader({ running, fontStep }: { running: boolean; fontStep: number }) {
  * what to do; keep the original only when nothing more useful is known.
  */
 export function friendlyError(message: string): string {
+  if (/ip_not_authorized/i.test(message))
+    return '目前網路 IP 未在 OpenAI 白名單內。請切換至公司 Wi-Fi 或改用 Gemini。';
   if (/unsupported|auth|invalid_api_key|\b40[0134]\b/i.test(message))
     return '金鑰無法使用。請到「設定」測試或更換金鑰。';
   if (/rate-limit|\b429\b|quota/i.test(message)) return '服務目前限流或額度已用完，請稍後再試。';
@@ -228,7 +285,7 @@ export function friendlyError(message: string): string {
     return '沒有麥克風權限。請在瀏覽器的網站設定中允許麥克風後再試。';
   if (/NotFound|no_audio|audio track/i.test(message)) return '找不到可用的麥克風。';
   if (/network|timed? ?out|\b50[234]\b|fetch/i.test(message))
-    return '連不上服務，請檢查網路後再試。';
+    return '連不上服務，請檢查網路、權限或瀏覽器跨來源限制後再試。';
   return `無法開始：${message}`;
 }
 
@@ -521,18 +578,27 @@ function Settings({
 // ─── App ─────────────────────────────────────────────────────────────────────
 
 export function MobileApp() {
-  const gemini = useGeminiLive();
-  const openai = useOpenAIRealtime();
+  const gemini = useGeminiLive(undefined, MOBILE_PROVIDER_OPTIONS);
+  const openai = useOpenAIRealtime(undefined, MOBILE_PROVIDER_OPTIONS);
   const keys = useDeviceKeys();
   const provider = useSettingsStore((s) => s.onlineProvider);
   const bilingual = useSettingsStore((s) => s.includeSourceTranscript);
-  const transport = useSettingsStore((s) => s.health.transport.state);
-  const audio = useSettingsStore((s) => s.health.audio.state);
+  const transportHealth = useSettingsStore((s) => s.health.transport);
+  const audioHealth = useSettingsStore((s) => s.health.audio);
+  const transport = transportHealth.state;
+  const audio = audioHealth.state;
   const hasText = useCaptionStore((s) => s.segments.length > 0);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [fontStep, setFontStepState] = useState(readFontStep);
   const [notice, setNotice] = useState<string | null>(null);
+  const [fatalError, setFatalError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
+  // Monotonic start token: pressing Stop mid-startup cancels any pending
+  // fallback provider attempt so Stop never revives capture.
+  const startRunRef = useRef(0);
+  const [offline, setOffline] = useState(
+    () => typeof navigator !== 'undefined' && navigator.onLine === false,
+  );
   // First run stays on the key screen until the user moves on, so the result of
   // the key test is seen instead of being replaced by an empty caption view.
   const [onboarding, setOnboarding] = useState(
@@ -542,9 +608,56 @@ export function MobileApp() {
 
   const running = gemini.status === 'running' || openai.status === 'running';
   const hasAnyKey = Boolean(keys.gemini || keys.openai);
+  const otherProvider: DeviceKeyProvider = provider === 'gemini' ? 'openai' : 'gemini';
+  const hasOtherKey = Boolean(keys[otherProvider]);
   const error = running || starting ? (provider === 'gemini' ? gemini.error : openai.error) : null;
-  const lastError = provider === 'gemini' ? gemini.error : openai.error;
+  const lastError = fatalError ?? (provider === 'gemini' ? gemini.error : openai.error);
   useWakeLock(running);
+
+  // Track browser online/offline state so the user immediately sees network drops.
+  useEffect(() => {
+    const onOffline = () => setOffline(true);
+    const onOnline = () => setOffline(false);
+    window.addEventListener('offline', onOffline);
+    window.addEventListener('online', onOnline);
+    return () => {
+      window.removeEventListener('offline', onOffline);
+      window.removeEventListener('online', onOnline);
+    };
+  }, []);
+
+  // Guard against accidental refresh/tab close while captions exist in memory.
+  useEffect(() => {
+    if (!running && !hasText) return undefined;
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [running, hasText]);
+
+  // Auto-dismiss transient confirmation notices (keep in-progress "…" notices).
+  useEffect(() => {
+    if (!notice || notice.endsWith('…')) return undefined;
+    const timer = setTimeout(() => setNotice(null), 4_000);
+    return () => clearTimeout(timer);
+  }, [notice]);
+
+  // If a running provider hits a permanent refusal (e.g. 401/403/400), stop it
+  // instead of leaving the UI stuck on "連線中斷，重試中".
+  const stopOpenAI = openai.stop;
+  const stopGemini = gemini.stop;
+  const currentError = provider === 'gemini' ? gemini.error : openai.error;
+  useEffect(() => {
+    if (!running || starting) return;
+    const failure = transportHealth.recoveryFailure;
+    if (!permanentRecoveryFailure(failure) || failure?.provider !== provider) return;
+    const message = transportHealth.message ?? currentError ?? 'auth';
+    setFatalError(message);
+    stopOpenAI();
+    stopGemini();
+  }, [running, starting, transportHealth, provider, currentError, stopOpenAI, stopGemini]);
 
   // The phone build is microphone-only online translation. Normalise settings
   // once so a value left by another build can never select an absent path.
@@ -571,40 +684,84 @@ export function MobileApp() {
     }
   }, []);
 
-  const start = async () => {
-    const backend = settingsStore.getState().onlineProvider;
-    if (!getDeviceKeys()[backend]) {
+  const start = async (preferredOverride?: DeviceKeyProvider) => {
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      setFatalError('network');
+      return;
+    }
+    const preferred = preferredOverride ?? settingsStore.getState().onlineProvider;
+    const order = resolveStartOrder(preferred, getDeviceKeys());
+    if (order.length === 0) {
       setSettingsOpen(true);
       return;
     }
+    const run = ++startRunRef.current;
     setNotice(null);
+    setFatalError(null);
     setStarting(true);
-    // A manual Start is a fresh attempt: forget an earlier permanent refusal
-    // (for example a key that has since been replaced).
-    clearRecoveryRefusal(backend, 'translation');
-    const peer = backend === 'gemini' ? openai : gemini;
-    peer.stop();
-    const mode = backend === 'gemini' ? 'gemini' : 'real';
-    const captions = captionStore.getState();
-    if (captions.sessionId && captions.segments.length > 0) {
-      // Text is still on screen: continue under it. Only 「清除」 discards it.
-      captionStore.setState({ sessionEndedAt: null });
-      captions.setSessionMode(mode);
-      captions.setSessionPhase('running');
-    } else {
-      captions.beginSession(mode, settingsStore.getState().captionTask, false);
-    }
     try {
-      await (backend === 'gemini' ? gemini.start() : openai.start());
+      for (let idx = 0; idx < order.length; idx++) {
+        if (startRunRef.current !== run) return;
+        const backend = order[idx]!;
+        if (settingsStore.getState().onlineProvider !== backend) {
+          settingsStore.getState().setOnlineProvider(backend);
+        }
+        // A manual Start is a fresh attempt: forget an earlier permanent refusal
+        // (for example a key that has since been replaced or a Wi-Fi change).
+        clearRecoveryRefusal(backend, 'translation');
+        const peer = backend === 'gemini' ? openai : gemini;
+        peer.stop();
+        const mode = backend === 'gemini' ? 'gemini' : 'real';
+        const captions = captionStore.getState();
+        if (captions.sessionId && captions.segments.length > 0) {
+          // Text is still on screen: continue under it. Only 「清除」 discards it.
+          captionStore.setState({ sessionEndedAt: null });
+          captions.setSessionMode(mode);
+          captions.setSessionPhase('running');
+        } else {
+          captions.beginSession(mode, settingsStore.getState().captionTask, false);
+        }
+        const ok = await (backend === 'gemini' ? gemini.start() : openai.start());
+        if (startRunRef.current !== run) return;
+        if (ok) {
+          if (idx > 0) {
+            const firstLabel = order[0] === 'openai' ? 'OpenAI' : 'Gemini';
+            const usedLabel = backend === 'openai' ? 'OpenAI' : 'Gemini';
+            setNotice(`${firstLabel} 無法使用，已自動改用 ${usedLabel}。`);
+          }
+          return;
+        }
+        // If local microphone failed, switching cloud provider cannot help.
+        const currentAudio = settingsStore.getState().health.audio.state;
+        if (currentAudio === 'failed' || currentAudio === 'no_audio_track') return;
+        if (idx + 1 < order.length) {
+          const nextLabel = order[idx + 1] === 'openai' ? 'OpenAI' : 'Gemini';
+          setNotice(
+            `${backend === 'openai' ? 'OpenAI' : 'Gemini'} 無法連線，嘗試改用 ${nextLabel}…`,
+          );
+        }
+      }
     } finally {
-      setStarting(false);
+      if (startRunRef.current === run) setStarting(false);
     }
   };
 
   const stop = () => {
+    startRunRef.current += 1;
+    setStarting(false);
+    setFatalError(null);
     openai.stop();
     gemini.stop();
     captionStore.getState().endSession();
+  };
+
+  const resumeSuspendedAudio = async () => {
+    try {
+      await resumeCaptureContext();
+      setNotice('已恢復收音');
+    } catch {
+      setNotice('無法恢復收音，請按「停止」後重新開始。');
+    }
   };
 
   const fullText = () => {
@@ -616,8 +773,21 @@ export function MobileApp() {
       await navigator.clipboard.writeText(fullText());
       setNotice('已複製全文');
     } catch {
-      setNotice('無法複製，請改用「分享」。');
+      setNotice('無法複製，請改用「下載」或「分享」。');
     }
+  };
+  const downloadTxt = () => {
+    const content = fullText();
+    if (!content) return;
+    const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `captions-${stamp}.txt`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setNotice('已下載文字檔');
   };
   const share = async () => {
     try {
@@ -633,8 +803,11 @@ export function MobileApp() {
     }
   };
 
-  const [tone, label] = statusLabel(running, transport, audio);
+  const [tone, label] = statusLabel(running, transport, audio, offline);
   const canShare = typeof navigator.share === 'function';
+  const showResumeAudio =
+    running && audio === 'degraded' && audioHealth.reason === 'context_suspended';
+  const activeError = error || (!running && !starting && lastError);
 
   return (
     <div
@@ -645,6 +818,7 @@ export function MobileApp() {
         <span className="m-status" data-tone={tone} role="status" data-testid="m-status">
           <i aria-hidden="true" />
           {label}
+          <AudioPulse active={running && transport === 'connected' && audio !== 'silence_detected'} />
         </span>
         <button
           type="button"
@@ -657,10 +831,31 @@ export function MobileApp() {
         </button>
       </header>
 
-      {(error || (!running && !starting && lastError)) && (
-        <p className="m-alert" role="alert" data-testid="m-error">
-          {friendlyError(error ?? lastError ?? '')}
-        </p>
+      {showResumeAudio && (
+        <button
+          type="button"
+          className="m-resume-banner"
+          onClick={() => void resumeSuspendedAudio()}
+          data-testid="m-resume-audio"
+        >
+          收音因切換畫面或鎖屏暫停 — 點此恢復收音
+        </button>
+      )}
+
+      {activeError && (
+        <div className="m-alert" role="alert" data-testid="m-error">
+          <span>{friendlyError(error ?? lastError ?? '')}</span>
+          {!running && !starting && hasOtherKey && (
+            <button
+              type="button"
+              className="m-switch-btn"
+              onClick={() => void start(otherProvider)}
+              data-testid="m-switch-provider"
+            >
+              改用 {otherProvider === 'gemini' ? 'Gemini' : 'OpenAI'}
+            </button>
+          )}
+        </div>
       )}
 
       {hasAnyKey && !onboarding ? (
@@ -707,6 +902,9 @@ export function MobileApp() {
             <div className="m-actions">
               <button type="button" onClick={() => void copy()} data-testid="m-copy">
                 複製全文
+              </button>
+              <button type="button" onClick={downloadTxt} data-testid="m-download">
+                下載
               </button>
               {canShare && (
                 <button type="button" onClick={() => void share()}>

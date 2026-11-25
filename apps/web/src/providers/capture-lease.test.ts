@@ -17,6 +17,7 @@ vi.mock('./capture-audio-retention.js', async () => {
 import {
   armCaptureHandoff,
   leaseCapture,
+  retainedCaptureRange,
   retainCaptureForRecovery,
   releaseCaptureRecovery,
   __resetCaptureLeaseForTests,
@@ -881,4 +882,15 @@ describe('capture lease', () => {
       expect(stoppedTracks).toBe(1);
     },
   );
+
+  it('skips audio retention when retainAudio is false (stateless phone build)', async () => {
+    vi.mocked(createCaptureAudioRetention).mockClear();
+    const lease = leaseCapture({ ...MIC, retainAudio: false });
+    const stream = await lease.acquire(noHealth);
+    expect(createCaptureAudioRetention).not.toHaveBeenCalled();
+    expect(retainedCaptureRange(stream)).toBeNull();
+    expect(lease.captureRangeForNativeFrames?.({} as AudioContext, 0, 512)).toBeNull();
+    lease.release();
+    expect(stoppedTracks).toBe(1);
+  });
 });

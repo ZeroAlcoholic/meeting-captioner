@@ -76,6 +76,7 @@ pnpm -F web exec vitest run src/mobile
 
 ## 未完成的事
 
-- **原始碼尚未提交**：上述新檔與改動都還在工作目錄；分支 `docs/goal-phase-2` 上另有先前累積的大量未提交變更，這次沒有動。
+- **2026-11-25 強化進度**：已完成手機版無用緩衝停用（`retainAudio: false`）、48 kHz 自動降採樣至 16 kHz、iOS `interrupted` 狀態點擊恢復橫幅、永久拒絕狀態機收斂、停用無意義輪詢／重複預熱、啟動雙金鑰順序備援（例如公司 Wi-Fi 先試 OpenAI，失敗自動改試 Gemini）、音量指示、防誤關與 `.txt` 下載，以及線上後端 `routes/gemini.ts` 改用 `x-goog-api-key` header。全專案測試（contracts 37／web 983／online 211／boundaries 3）、typecheck、lint、`build:online`、`build:mobile`（`assets/mobile-CwyWe1rM.js`，gzip 105.12 KB）均通過。
+- **待發佈與實機驗證**：本次變更尚未提交並發佈至 `gh-pages`（需建置後由使用者執行 `git push origin gh-pages`）；真金鑰端到端、實體 iPhone／Android 與 OpenAI 瀏覽器 CORS 仍待實機測試。
 - 沒有自動部署；若要「推到 main 就發佈」，可加 GitHub Actions 工作流程（參考 eng-coach 的 `pages.yml`），並把 Pages 來源改成 workflow。
-- `.playwright-mcp/` 內有這次的驗證截圖（`m1`–`m7`），可刪。
+- `.playwright-mcp/` 內有先前驗證截圖（`m1`–`m7`），可刪。

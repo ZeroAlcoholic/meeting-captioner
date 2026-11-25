@@ -103,12 +103,60 @@ a {
   font-size: 0.95rem;
 }
 .m-alert {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   margin: 0;
   padding: 10px 16px;
   background: color-mix(in srgb, var(--m-bad) 18%, transparent);
   border-bottom: 1px solid var(--m-bad);
   font-size: 0.95rem;
   overflow-wrap: anywhere;
+}
+.m-switch-btn {
+  flex: 0 0 auto;
+  min-height: 36px;
+  padding: 0 12px;
+  font-size: 0.85rem;
+  background: var(--m-accent);
+  border-color: var(--m-accent);
+  color: #fff;
+}
+.m-resume-banner {
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 16px;
+  border: 0;
+  border-bottom: 1px solid var(--m-wait);
+  border-radius: 0;
+  background: color-mix(in srgb, var(--m-wait) 22%, transparent);
+  color: var(--m-text);
+  font-size: 0.95rem;
+  font-weight: 600;
+  text-align: center;
+}
+.m-meter {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 14px;
+  margin-left: 4px;
+}
+.m-meter i {
+  width: 3px;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--m-ok);
+  transform-origin: bottom;
+  transform: scaleY(var(--m-level, 0.2));
+  transition: transform 80ms linear;
+}
+.m-meter i:nth-child(1) {
+  transform: scaleY(calc(var(--m-level, 0.2) * 0.7));
+}
+.m-meter i:nth-child(3) {
+  transform: scaleY(calc(var(--m-level, 0.2) * 0.85));
 }
 
 /* Reader */

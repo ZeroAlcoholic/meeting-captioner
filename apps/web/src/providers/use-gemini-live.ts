@@ -44,8 +44,19 @@ export interface UseGeminiLive {
   getTransport: () => HealthState;
 }
 
-export function useGeminiLive(track?: TranslationTrackScope): UseGeminiLive {
+export interface UseOnlineProviderOptions {
+  disablePolling?: boolean;
+  disableAutoPrewarm?: boolean;
+  retainAudio?: boolean;
+}
+
+export function useGeminiLive(
+  track?: TranslationTrackScope,
+  options?: UseOnlineProviderOptions,
+): UseGeminiLive {
   const trackRef = useRef(track);
+  const optionsRef = useRef(options);
+  optionsRef.current = options;
   const providerRef = useRef<GeminiLiveProvider | null>(null);
   const healthRef = useRef(new Map<HealthEvent['component'], HealthEvent>());
   const handlersRef = useRef<ReturnType<typeof createStoreBoundHandlers> | null>(null);
@@ -64,14 +75,16 @@ export function useGeminiLive(track?: TranslationTrackScope): UseGeminiLive {
 
   // Poll /session/info to learn whether the server has a GEMINI_API_KEY.
   useEffect(() => {
-    const stopPolling = startSessionInfoPolling(
-      INFO_URL,
-      (info) => {
-        const ok = info.hasGeminiKey ?? info.availableProviders?.includes('gemini') ?? false;
-        setGeminiStatus(ok ? 'available' : 'no-key');
-      },
-      () => setGeminiStatus('service-down'),
-    );
+    const stopPolling = optionsRef.current?.disablePolling
+      ? () => {}
+      : startSessionInfoPolling(
+          INFO_URL,
+          (info) => {
+            const ok = info.hasGeminiKey ?? info.availableProviders?.includes('gemini') ?? false;
+            setGeminiStatus(ok ? 'available' : 'no-key');
+          },
+          () => setGeminiStatus('service-down'),
+        );
     return () => {
       stopPolling();
       acceptingHealthRef.current = false;
@@ -88,7 +101,7 @@ export function useGeminiLive(track?: TranslationTrackScope): UseGeminiLive {
   // fresh-guarded; reconnects mint fresh). Hard-gated by selected online
   // mode/backend so Full Offline never mints a cloud token while idle.
   useEffect(() => {
-    if (trackRef.current) return;
+    if (trackRef.current || optionsRef.current?.disableAutoPrewarm) return;
     if (modeId !== 'online_full') {
       if (!trackRef.current) cancelGeminiPrewarm();
       return;
@@ -209,6 +222,9 @@ export function useGeminiLive(track?: TranslationTrackScope): UseGeminiLive {
           kind: isSystemAudio ? 'system' : 'mic',
           micDistance: effectiveMicDistance,
           deviceId: settingsStore.getState().micDeviceId,
+          ...(optionsRef.current?.retainAudio !== undefined
+            ? { retainAudio: optionsRef.current.retainAudio }
+            : {}),
         });
       const provider = new GeminiLiveProvider(
         TOKEN_URL,

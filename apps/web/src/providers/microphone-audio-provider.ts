@@ -1,6 +1,10 @@
 import type { HealthEvent } from '@meeting-audio/contracts';
 import type { AudioSource } from './types.js';
-import { getCaptureContext, resumeCaptureContext } from './audio-engine.js';
+import {
+  getCaptureContext,
+  isAudioContextPaused,
+  resumeCaptureContext,
+} from './audio-engine.js';
 
 function now(): string {
   return new Date().toISOString();
@@ -127,9 +131,25 @@ export class MicrophoneAudioProvider implements AudioSource {
       }
 
       this.visibilityHandler = () => {
-        if (!document.hidden && this.audioCtx?.state === 'suspended') {
+        const ctxState = this.audioCtx?.state as string | undefined;
+        if (!document.hidden && isAudioContextPaused(ctxState)) {
+          const wasInterrupted = ctxState === 'interrupted';
           void resumeCaptureContext(signal).catch((error: unknown) => {
             if (signal.aborted || this.capture !== capture) return;
+            if (wasInterrupted) {
+              // On iOS Safari after lock screen or app switch, resume() outside a
+              // user gesture can be rejected while the mic track is still alive.
+              // Surface degraded so a single tap can resume without tearing down.
+              onHealth({
+                kind: 'health',
+                component: 'audio',
+                state: 'degraded',
+                reason: 'context_suspended',
+                message: '音訊處理已暫停，請點擊畫面恢復收音。',
+                timestamp: now(),
+              });
+              return;
+            }
             this.release();
             onHealth({
               kind: 'health',
