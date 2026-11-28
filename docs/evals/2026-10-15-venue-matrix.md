@@ -2,12 +2,12 @@
 
 2026-10-16 核對；尚未取得可放行的真人品質結果，不調整正式 DSP/VAD 預設。
 
-| 現有證據 | 可證明的範圍 | 尚缺 |
-| --- | --- | --- |
-| `tests/fixtures/mixed-caption/cases.json`：24 個情境題稿 | 已有混語、數字、否定等錄製題材 | 題稿不是實際錄音人工校對稿 |
-| `docs/evals/2026-10-08-real-cloud.json` | 當時合成音訊的真服務整合結果；明列 synthetic | 真人／場域聲學品質、目前版本資格 |
-| `.cache/caption-eval-predictions-openai.json` | synthetic-01、受控上游的評測管線輸出 | 不能計入真人辨識成績 |
-| `scripts/mixed-caption-eval.mjs` | 已有本機 CER/WER、關鍵詞與延遲評分 | speaker/session 留出分組與實際人工稿仍需素材提供者確認 |
+| 現有證據                                                 | 可證明的範圍                                 | 尚缺                                                   |
+| -------------------------------------------------------- | -------------------------------------------- | ------------------------------------------------------ |
+| `tests/fixtures/mixed-caption/cases.json`：24 個情境題稿 | 已有混語、數字、否定等錄製題材               | 題稿不是實際錄音人工校對稿                             |
+| `docs/evals/2026-10-08-real-cloud.json`                  | 當時合成音訊的真服務整合結果；明列 synthetic | 真人／場域聲學品質、目前版本資格                       |
+| `.cache/caption-eval-predictions-openai.json`            | synthetic-01、受控上游的評測管線輸出         | 不能計入真人辨識成績                                   |
+| `scripts/mixed-caption-eval.mjs`                         | 已有本機 CER/WER、關鍵詞與延遲評分           | speaker/session 留出分組與實際人工稿仍需素材提供者確認 |
 
 近講、遠講、低音量、噪音、多人交替／重疊、回聲、混語及關鍵數字／否定的真人驗收均維持待驗。校準與留出集必須依 speaker/session 分開；不把同一錄音切片分放兩組。
 

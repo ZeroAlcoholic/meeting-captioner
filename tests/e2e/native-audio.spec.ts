@@ -123,12 +123,21 @@ for (const { failFirstWorklet, sampleRate, delayFirstWorklet } of [
       releaseWorklet = resolve;
     });
     page.on('request', (request) => {
+      const url = new URL(request.url());
+      if (url.origin !== origin) return;
+      if (url.pathname === '/meetings/lease/release') {
+        writerHeaders = undefined;
+        return;
+      }
       const headers = request.headers();
-      if (new URL(request.url()).origin === origin && headers['x-meeting-lease']) {
+      if (headers['x-meeting-lease']) {
         writerHeaders = {
           origin,
           authorization: headers.authorization,
           'x-meeting-lease': headers['x-meeting-lease'],
+          ...(headers['x-meeting-generation']
+            ? { 'x-meeting-generation': headers['x-meeting-generation'] }
+            : {}),
         };
       }
     });
@@ -176,7 +185,7 @@ for (const { failFirstWorklet, sampleRate, delayFirstWorklet } of [
             const audio = message.realtimeInput.audio;
             assert.equal(
               audio.mimeType,
-              `audio/pcm;rate=${sampleRate}`,
+              `audio/pcm;rate=${sampleRate > 16000 ? 16000 : sampleRate}`,
               `Unexpected PCM MIME type: ${String(audio.mimeType)}`,
             );
             const pcm = Buffer.from(audio.data, 'base64');

@@ -133,10 +133,10 @@ Set these in your shell profile (`~/.bashrc`, `~/.zshrc`, `~/.profile`) or via W
 
 ### Web app (`apps/web`, build-time only — `VITE_` prefix)
 
-| Variable                | Required | Default                 | Purpose                                                |
-| ----------------------- | -------- | ----------------------- | ------------------------------------------------------ |
-| `VITE_ONLINE_BASE_URL`  | no       | `http://localhost:8787` | Online service URL the browser hits.                   |
-| `VITE_OFFLINE_BASE_URL` | no       | `http://localhost:8000` | Offline service URL.                                   |
+| Variable                | Required | Default                 | Purpose                                                       |
+| ----------------------- | -------- | ----------------------- | ------------------------------------------------------------- |
+| `VITE_ONLINE_BASE_URL`  | no       | `http://localhost:8787` | Online service URL the browser hits.                          |
+| `VITE_OFFLINE_BASE_URL` | no       | `http://localhost:8000` | Offline service URL.                                          |
 | `VITE_DEPLOYMENT_MODE`  | no       | `full`                  | `online` 排除地端 bundle；需要編譯隔離時使用 `build:online`。 |
 
 ### Setting `OPENAI_API_KEY`

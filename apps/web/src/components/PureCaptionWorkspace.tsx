@@ -21,6 +21,7 @@ import type { AudioSource, CaptionProviderHandlers } from '../providers/types.js
 import { PureLiveCaptions } from './PureCaptionText.js';
 import { MicDevicePicker } from './MicDevicePicker.js';
 import { MicLevelBar } from './MicLevelBar.js';
+import { PostMeetingBar } from './PostMeetingBar.js';
 import './PureCaptionWorkspace.css';
 
 function RecentText() {
@@ -455,6 +456,7 @@ export function PureCaptionWorkspace() {
     remoteLease.current?.release();
     remoteLease.current = null;
     try {
+      const finishedId = meetingArchive.getCurrentMeeting()?.meetingId;
       await Promise.all([controller.current?.stop(), remoteController.current?.stop()]);
       remoteHandlers.current?.finish();
       closeGap();
@@ -463,6 +465,14 @@ export function PureCaptionWorkspace() {
       await meetingArchive.finalize();
       await meetingArchive.release();
       await refresh();
+      if (finishedId && mounted.current) {
+        try {
+          setPage(await meetingArchive.loadMeeting(finishedId, 0));
+          setOffset(0);
+        } catch {
+          /* ignore auto-load error so stop() never shows a false save failure */
+        }
+      }
     } catch {
       setError('收音已停止，但逐字稿尚未完成保存或結案。請保留此分頁並重試保存。');
     } finally {
@@ -760,6 +770,19 @@ export function PureCaptionWorkspace() {
                 匯出完整原始紀錄 JSON
               </button>
             </div>
+            {!running && page.segments.length > 0 && (
+              <PostMeetingBar
+                pureArchiveMeeting={{
+                  meetingId: page.meeting.meetingId,
+                  title: page.meeting.title,
+                  createdAt: page.meeting.createdAt,
+                  segments: page.segments,
+                  ...(page.manifest?.gaps.length
+                    ? { gaps: page.manifest.gaps.map((g) => g.cause || '收音或連線中斷缺口') }
+                    : {}),
+                }}
+              />
+            )}
             {page.segments.map((s) => (
               <TranscriptEditor
                 key={`${s.segmentId}:${s.revision}`}

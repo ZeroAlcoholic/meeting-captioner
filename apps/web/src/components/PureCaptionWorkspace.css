@@ -1,26 +1,32 @@
 .pure-workspace {
-  max-width: 1280px;
+  max-width: 1360px;
   margin: 0 auto;
-  padding: 1.5rem;
+  padding: 1rem 1.5rem;
   color: var(--text-primary, #f4f4f5);
 }
 .pure-workspace h1 {
-  font-size: 1.7rem;
-  margin-bottom: 0.4rem;
+  font-size: 1.45rem;
+  margin: 0 0 0.25rem;
+}
+.pure-workspace header p {
+  margin: 0 0 0.5rem;
+  font-size: 0.9rem;
+  color: #b7c1ce;
 }
 .pure-workspace h2 {
-  font-size: 1.2rem;
+  font-size: 1.15rem;
 }
 .pure-controls {
   display: flex;
-  gap: 0.75rem;
+  gap: 0.65rem;
   flex-wrap: wrap;
   align-items: end;
-  margin: 1rem 0;
+  margin: 0.65rem 0;
 }
 .pure-controls label {
   display: grid;
-  gap: 0.35rem;
+  gap: 0.3rem;
+  font-size: 0.875rem;
 }
 .pure-workspace button,
 .pure-workspace input,
@@ -32,7 +38,7 @@
   background: #20242d;
   color: #fafafa;
   border-radius: 0.4rem;
-  padding: 0.55rem 0.8rem;
+  padding: 0.45rem 0.75rem;
 }
 .pure-workspace button:disabled,
 .purpose-switch button:disabled {
@@ -48,11 +54,11 @@
   color: #fca5a5;
 }
 .pure-live {
-  padding: 2rem;
-  background: #151922;
-  border: 1px solid #364152;
-  border-radius: 0.7rem;
-  min-height: 180px;
+  padding: 2rem 2.25rem;
+  background: #080c15;
+  border: 1px solid #1e293a;
+  border-radius: 0.65rem;
+  min-height: 200px;
   min-width: 0;
 }
 .pure-track-pair {

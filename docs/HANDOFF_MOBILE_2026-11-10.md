@@ -76,6 +76,7 @@ pnpm -F web exec vitest run src/mobile
 
 ## 未完成的事
 
+- **2026-11-27 雲端雙版本會後一鍵下載、商務精準摘要與部署收尾**：(1) `device-broker.ts` 新增 `POST /summarize`，支援 `gemini-3.8-flash`（`x-goog-api-key` + `thinkingConfig: { thinkingLevel: 'low' }`）與 `gpt-5.4-mini` 雙向自動備援（OpenAI 401/403/429/逾時自動無縫轉移 Gemini），`MobileApp.tsx` 會後工具列新增「✦ 精準摘要」可收合卡片、一鍵複製摘要，且下載 `.txt` 自動整合「AI 會議精準摘要＋完整逐字稿」；(2) `audio-engine.ts` `resamplePcm()` 升級為 Boxcar 區間均值抗混疊降採樣（消除 48 kHz → 16 kHz / 24 kHz 高頻摺疊失真）；(3) 重新打包 `apps/web/dist-mobile/`（`assets/mobile-CXzKLKiz.js`，gzip 108.50 KB）與桌面雲端版 `release/meeting-audio-online-20261127-234045.zip`（web `assets/index-n-htsUVN.js`），全專案單元（contracts 37／web 991／online 216）、服務測試（25 項）與原生 Chrome 37 + 16 項 E2E 全過，並同步部署至 `gh-pages` 與 `main`。
 - **2026-11-25 強化進度**：已完成手機版無用緩衝停用（`retainAudio: false`）、48 kHz 自動降採樣至 16 kHz、iOS `interrupted` 狀態點擊恢復橫幅、永久拒絕狀態機收斂、停用無意義輪詢／重複預熱、啟動雙金鑰順序備援（例如公司 Wi-Fi 先試 OpenAI，失敗自動改試 Gemini）、音量指示、防誤關與 `.txt` 下載，以及線上後端 `routes/gemini.ts` 改用 `x-goog-api-key` header。全專案測試（contracts 37／web 983／online 211／boundaries 3）、typecheck、lint、`build:online`、`build:mobile`（`assets/mobile-CwyWe1rM.js`，gzip 105.12 KB）均通過。
 - **待發佈與實機驗證**：本次變更尚未提交並發佈至 `gh-pages`（需建置後由使用者執行 `git push origin gh-pages`）；真金鑰端到端、實體 iPhone／Android 與 OpenAI 瀏覽器 CORS 仍待實機測試。
 - 沒有自動部署；若要「推到 main 就發佈」，可加 GitHub Actions 工作流程（參考 eng-coach 的 `pages.yml`），並把 Pages 來源改成 workflow。

@@ -15,6 +15,11 @@ import { settingsStore, useSettingsStore } from '../settings/use-settings-store.
 import type { LangPair, MicDistance, OnlineProvider } from '../settings/settings-store.js';
 import { captionStore, useCaptionStore } from '../store/use-caption-store.js';
 import type { CaptionSegment, CaptionTranslation } from '../store/caption-store.js';
+import {
+  buildSummaryTranscript,
+  requestMeetingSummary,
+  type SummaryResult,
+} from '../export/summary-client.js';
 import { deviceBrokerFetch } from './device-broker.js';
 import {
   getDeviceKeys,
@@ -593,6 +598,9 @@ export function MobileApp() {
   const [notice, setNotice] = useState<string | null>(null);
   const [fatalError, setFatalError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
+  const [summarizing, setSummarizing] = useState(false);
+  const [summaryResult, setSummaryResult] = useState<SummaryResult | null>(null);
+  const [summaryOpen, setSummaryOpen] = useState(false);
   // Monotonic start token: pressing Stop mid-startup cancels any pending
   // fallback provider attempt so Stop never revives capture.
   const startRunRef = useRef(0);
@@ -776,9 +784,12 @@ export function MobileApp() {
       setNotice('無法複製，請改用「下載」或「分享」。');
     }
   };
-  const downloadTxt = () => {
-    const content = fullText();
-    if (!content) return;
+  const downloadTxt = (withSummary?: string) => {
+    const raw = fullText();
+    if (!raw) return;
+    const content = withSummary?.trim()
+      ? `=== 會議精準摘要 ===\n${withSummary.trim()}\n\n=== 完整逐字稿 ===\n${raw}`
+      : raw;
     const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
     const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
@@ -787,11 +798,52 @@ export function MobileApp() {
     link.download = `captions-${stamp}.txt`;
     link.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-    setNotice('已下載文字檔');
+    setNotice(withSummary ? '已下載摘要＋完整逐字稿' : '已下載文字檔');
+  };
+  const summarize = async () => {
+    const state = captionStore.getState();
+    const transcript = buildSummaryTranscript(
+      state.segments,
+      state.translations,
+      state.sessionStartMs,
+    );
+    if (!transcript) return;
+    setSummarizing(true);
+    setNotice('正在生成精準摘要…');
+    try {
+      const result = await requestMeetingSummary({
+        transcript,
+        preferredProvider: provider,
+      });
+      setSummaryResult(result);
+      setSummaryOpen(true);
+      setNotice(
+        result.fallbackUsed
+          ? `已自動改由 ${result.provider === 'gemini' ? 'Gemini' : 'OpenAI'} 完成摘要`
+          : '已產生會議精準摘要',
+      );
+    } catch (err) {
+      setNotice(err instanceof Error ? err.message : '摘要生成失敗，請稍後再試。');
+    } finally {
+      setSummarizing(false);
+    }
+  };
+  const copySummary = async () => {
+    if (!summaryResult) return;
+    try {
+      await navigator.clipboard.writeText(summaryResult.summary);
+      setNotice('已複製摘要');
+    } catch {
+      setNotice('無法複製摘要，請改用下載或分享。');
+    }
   };
   const share = async () => {
     try {
-      await navigator.share({ text: fullText() });
+      const raw = fullText();
+      const text = summaryResult?.summary
+        ? `=== 會議精準摘要 ===\n${summaryResult.summary}\n\n=== 完整逐字稿 ===\n${raw}`
+        : raw;
+      await navigator.share({ text });
     } catch {
       /* user dismissed the share sheet */
     }
@@ -799,6 +851,8 @@ export function MobileApp() {
   const clear = () => {
     if (window.confirm('清除目前畫面上的字幕？此動作無法復原。')) {
       captionStore.getState().clear();
+      setSummaryResult(null);
+      setSummaryOpen(false);
       setNotice(null);
     }
   };
@@ -818,7 +872,9 @@ export function MobileApp() {
         <span className="m-status" data-tone={tone} role="status" data-testid="m-status">
           <i aria-hidden="true" />
           {label}
-          <AudioPulse active={running && transport === 'connected' && audio !== 'silence_detected'} />
+          <AudioPulse
+            active={running && transport === 'connected' && audio !== 'silence_detected'}
+          />
         </span>
         <button
           type="button"
@@ -859,7 +915,42 @@ export function MobileApp() {
       )}
 
       {hasAnyKey && !onboarding ? (
-        <Reader running={running} fontStep={fontStep} />
+        <>
+          {!running && hasText && summaryResult && summaryOpen && (
+            <section
+              className="m-summary-card"
+              aria-label="會議精準摘要"
+              data-testid="m-summary-card"
+            >
+              <header className="m-summary-head">
+                <strong>
+                  AI 精準摘要（{summaryResult.provider === 'gemini' ? 'Gemini' : 'OpenAI'}）
+                </strong>
+                <div className="m-summary-actions">
+                  <button
+                    type="button"
+                    onClick={() => void copySummary()}
+                    data-testid="m-copy-summary"
+                  >
+                    複製摘要
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => downloadTxt(summaryResult.summary)}
+                    data-testid="m-download-report"
+                  >
+                    下載報告
+                  </button>
+                  <button type="button" className="m-quiet" onClick={() => setSummaryOpen(false)}>
+                    收起
+                  </button>
+                </div>
+              </header>
+              <pre className="m-summary-body">{summaryResult.summary}</pre>
+            </section>
+          )}
+          <Reader running={running} fontStep={fontStep} />
+        </>
       ) : (
         <main className="m-reader m-onboard" data-testid="m-onboard">
           <h1>即時翻譯字幕</h1>
@@ -903,8 +994,26 @@ export function MobileApp() {
               <button type="button" onClick={() => void copy()} data-testid="m-copy">
                 複製全文
               </button>
-              <button type="button" onClick={downloadTxt} data-testid="m-download">
+              <button
+                type="button"
+                onClick={() => downloadTxt(summaryResult?.summary)}
+                data-testid="m-download"
+              >
                 下載
+              </button>
+              <button
+                type="button"
+                disabled={summarizing}
+                onClick={() => {
+                  if (summaryResult && !summaryOpen) {
+                    setSummaryOpen(true);
+                  } else {
+                    void summarize();
+                  }
+                }}
+                data-testid="m-summarize"
+              >
+                {summarizing ? '摘要中…' : summaryResult ? '✦ 摘要' : '✦ 精準摘要'}
               </button>
               {canShare && (
                 <button type="button" onClick={() => void share()}>

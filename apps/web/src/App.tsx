@@ -9,6 +9,7 @@ import { GeminiPricingPanel } from './components/GeminiPricingPanel.js';
 import { MicLevelBar } from './components/MicLevelBar.js';
 import { StartRealButton } from './components/StartRealButton.js';
 import { ExportMenu } from './components/ExportMenu.js';
+import { PostMeetingBar } from './components/PostMeetingBar.js';
 import { FieldTestControls } from './components/FieldTestControls.js';
 import { RestoredSessionChip } from './components/RestoredSessionChip.js';
 import {
@@ -128,7 +129,11 @@ function TranslationArchiveStatus() {
   );
   if (!sessionId || (status.meetingId !== sessionId && status.state !== 'read_only')) return null;
   return (
-    <section aria-label="翻譯保存狀態" data-testid="translation-persistence-status">
+    <section
+      className="translation-archive-bar"
+      aria-label="翻譯保存狀態"
+      data-testid="translation-persistence-status"
+    >
       {status.state === 'read_only' && status.error !== 'archive_generation_changed' && (
         <button
           disabled={retrying}
@@ -1445,6 +1450,8 @@ function TranslationApp() {
       )}
 
       {resumable && <ContinueBanner resumable={resumable} onContinue={handleContinue} />}
+
+      {idle && !resumable && segmentCount > 0 && <PostMeetingBar />}
 
       {autoSwitch && (
         <AutoSwitchNotice

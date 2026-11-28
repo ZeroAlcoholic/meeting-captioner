@@ -639,10 +639,10 @@ pnpm service:start
 
 三條路徑要分開驗收：
 
-| 路徑 | 設定與成功證據 |
-| --- | --- |
-| Node → provider HTTPS | Node 代理與 CA；兩家的實際 token mint 各自成功才算該路徑可達 |
-| Chrome → provider WSS | 由 Chrome/系統的網路與憑證設定決定；Node 代理不會替瀏覽器轉送音訊 |
+| 路徑                         | 設定與成功證據                                                               |
+| ---------------------------- | ---------------------------------------------------------------------------- |
+| Node → provider HTTPS        | Node 代理與 CA；兩家的實際 token mint 各自成功才算該路徑可達                 |
+| Chrome → provider WSS        | 由 Chrome/系統的網路與憑證設定決定；Node 代理不會替瀏覽器轉送音訊            |
 | Chrome → OpenAI WebRTC media | 另驗實際媒體傳輸與有效字幕；既有 WebSocket fallback 成功也只證明那條替代路徑 |
 
 token 成功但無新字幕時，不能回報整體網路正常；一家不可達由既有雙向備援處理，兩家都受阻則保留內容並顯示失敗/重試。無法從瀏覽器確定 DNS、TLS、代理或防火牆細因時，不猜測。公司/VPN 實測與雙向切換仍待授權環境驗收。
@@ -652,7 +652,6 @@ token 成功但無新字幕時，不能回報整體網路正常；一家不可�
 原生 Chrome WSS 證據另見 `.cache/w09-network/browser-wss-result.json`。預設 Chrome 拒絕 Node 已信任的測試憑證；成功往返只使用隔離測試瀏覽器的單一 SPKI 例外，不能作為正式部署的憑證設定方式或公司 CA 已驗收的證明。瀏覽器代理的目標 CONNECT 407 另測且拒絕連線。W09.1 本機工程驗收完成，W09.2 公司網路及真服務資格仍待驗。
 
 後端 token 請求的日誌只記固定診斷代碼；不輸出原始例外或上游正文。`UPSTREAM_DNS` 請查 DNS/代理名稱，`UPSTREAM_TLS` 請查憑證與授權 CA，`UPSTREAM_CONNECTION_REFUSED`/`UPSTREAM_CONNECTION_RESET` 請查代理或出口連線，`UPSTREAM_NETWORK_UNREACHABLE` 請查目前網路，`UPSTREAM_TIMEOUT` 表示期限已到。`CLIENT_ABORTED` 是請求端取消；`UPSTREAM_REQUEST_FAILED` 表示無法由已知代碼判定，不能直接推論為防火牆或代理認證。HTTP 回覆另記狀態碼；實測 Node 對 CONNECT 407 未提供可安全判定的專用 cause，需由公司代理端確認。瀏覽器連線錯誤同樣不猜測細因。
-
 
 ## 資料備份與還原（W07，本機操作已驗）
 

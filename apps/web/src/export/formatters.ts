@@ -11,6 +11,7 @@ export interface SessionMetadata {
   segments: CaptionSegment[];
   translations: Record<string, CaptionTranslation>;
   sessionStartMs: number | null;
+  summary?: string | undefined;
 }
 
 function pad(n: number, width: number): string {
@@ -75,11 +76,14 @@ function resolveOpts(opts?: ExportOptions): Required<ExportOptions> {
  * transcript without timestamps or markup.
  */
 export function toPlainText(
-  { segments, translations }: SessionMetadata,
+  { segments, translations, summary }: SessionMetadata,
   opts?: ExportOptions,
 ): string {
   const o = resolveOpts(opts);
   const lines: string[] = [];
+  if (summary?.trim()) {
+    lines.push(`=== 會議精準摘要 ===\n${summary.trim()}\n=== 完整逐字稿 ===`);
+  }
   for (const seg of segments) {
     const tr = translations[seg.segmentId];
     const block: string[] = [];
@@ -123,7 +127,7 @@ export function toSrt(
  * segment block: `[M:SS]` timestamp, source line, indented translation.
  */
 export function toMarkdown(
-  { segments, translations, sessionStartMs }: SessionMetadata,
+  { segments, translations, sessionStartMs, summary }: SessionMetadata,
   opts?: ExportOptions,
 ): string {
   const o = resolveOpts(opts);
@@ -134,6 +138,14 @@ export function toMarkdown(
   lines.push('');
   lines.push(`*Started: ${startedLabel} · ${segments.length} segments*`);
   lines.push('');
+  if (summary?.trim()) {
+    lines.push('## 會議精準摘要');
+    lines.push('');
+    lines.push(summary.trim());
+    lines.push('');
+    lines.push('---');
+    lines.push('');
+  }
   for (const seg of segments) {
     const tr = translations[seg.segmentId];
     const stamp = formatClock(elapsedMs(seg.startMs, sessionStartMs));

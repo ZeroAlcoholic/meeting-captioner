@@ -54,28 +54,24 @@ describe('separate track live state', () => {
   it('orders equal-time dual-source finals by segment ID like the SQLite archive', () => {
     const store = createCaptionStore({ persistKey: null });
     store.getState().beginSession('real', translatedTask, true);
-    store
-      .getState()
-      .applyTranscript(
-        transcript({
-          segmentId: 'z-remote',
-          source: 'browser_system',
-          status: 'final',
-          text: 'remote',
-          startMs: 100,
-        }),
-      );
-    store
-      .getState()
-      .applyTranscript(
-        transcript({
-          segmentId: 'a-mic',
-          source: 'microphone',
-          status: 'final',
-          text: 'mic',
-          startMs: 100,
-        }),
-      );
+    store.getState().applyTranscript(
+      transcript({
+        segmentId: 'z-remote',
+        source: 'browser_system',
+        status: 'final',
+        text: 'remote',
+        startMs: 100,
+      }),
+    );
+    store.getState().applyTranscript(
+      transcript({
+        segmentId: 'a-mic',
+        source: 'microphone',
+        status: 'final',
+        text: 'mic',
+        startMs: 100,
+      }),
+    );
     expect(store.getState().segments.map((segment) => segment.segmentId)).toEqual([
       'a-mic',
       'z-remote',

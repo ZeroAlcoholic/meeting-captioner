@@ -16,8 +16,10 @@ export interface ResampleState {
 }
 
 /**
- * Linear-interpolate `input` (at `inputRate`) to `targetRate`, carrying `state`
- * so consecutive chunks join without a step discontinuity (no seam clicks).
+ * Resample `input` (at `inputRate`) to `targetRate`, carrying `state` so
+ * consecutive chunks join without a step discontinuity (no seam clicks).
+ * Uses linear interpolation when upsampling (`inputRate <= targetRate`) and
+ * boxcar (area-average) anti-aliasing integration when downsampling.
  */
 export function resamplePcm(
   input: Float32Array,
@@ -35,18 +37,64 @@ export function resamplePcm(
   const out = new Float32Array(Math.max(1, Math.ceil((input.length - state.pos) / ratio)));
   let pos = state.pos;
   let n = 0;
-  while (pos < input.length) {
-    const i = Math.floor(pos);
-    const frac = pos - i;
-    const a = i < 0 ? state.last : (input[i] ?? 0);
-    if (frac === 0) {
-      out[n++] = a;
-    } else {
-      const next = input[i + 1];
-      if (next === undefined) break;
-      out[n++] = a + (next - a) * frac;
+  if (ratio > 1) {
+    // Boxcar anti-aliasing filter for downsampling (e.g. 48 kHz -> 16 kHz / 24 kHz).
+    // Averages input energy across each output sample's [start, end) window,
+    // placing natural spectral nulls at integer multiples of targetRate.
+    while (pos < input.length) {
+      const end = Math.min(pos + ratio, input.length);
+      let cursor = pos;
+      let sum = 0;
+      let weight = 0;
+      if (cursor < 0) {
+        const span = Math.min(0, end) - cursor;
+        sum += state.last * span;
+        weight += span;
+        cursor = 0;
+      }
+      const firstIdx = Math.floor(cursor);
+      const lastIdx = Math.floor(end);
+      if (firstIdx === lastIdx) {
+        const span = end - cursor;
+        if (span > 0 && firstIdx < input.length) {
+          sum += (input[firstIdx] ?? 0) * span;
+          weight += span;
+        }
+      } else {
+        if (firstIdx < input.length) {
+          const firstSpan = firstIdx + 1 - cursor;
+          sum += (input[firstIdx] ?? 0) * firstSpan;
+          weight += firstSpan;
+        }
+        for (let idx = firstIdx + 1; idx < lastIdx && idx < input.length; idx++) {
+          sum += input[idx] ?? 0;
+          weight += 1;
+        }
+        if (lastIdx < input.length) {
+          const lastSpan = end - lastIdx;
+          if (lastSpan > 0) {
+            sum += (input[lastIdx] ?? 0) * lastSpan;
+            weight += lastSpan;
+          }
+        }
+      }
+      out[n++] = weight > 0 ? sum / weight : 0;
+      pos += ratio;
     }
-    pos += ratio;
+  } else {
+    while (pos < input.length) {
+      const i = Math.floor(pos);
+      const frac = pos - i;
+      const a = i < 0 ? state.last : (input[i] ?? 0);
+      if (frac === 0) {
+        out[n++] = a;
+      } else {
+        const next = input[i + 1];
+        if (next === undefined) break;
+        out[n++] = a + (next - a) * frac;
+      }
+      pos += ratio;
+    }
   }
   state.pos = pos - input.length;
   state.last = input[input.length - 1] ?? state.last;

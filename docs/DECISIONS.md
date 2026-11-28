@@ -404,11 +404,9 @@ OpenAI 主用 OPENAI_API_KEY、備用 OPENAI_API_KEY_AUDIO 目前都連官方端
 
 同一 manual activity 允許多個 final。僅 generationComplete 才能退休該 activity，釋放下一段送音與 Stop 等待；不能以收到 final 或短暫無新文字替代協定完成。收音尾幀不自行建立空文字片段；推估時間使用同活動擷取範圍，無新增音訊的多 final 可重疊，不產生零長度或借用下一段時間。缺 final／缺完成訊號仍留下缺口。見 [重現、驗證與限制](evals/2026-10-08-review-followup.md)。
 
-
 ### 2026-10-16 — 還原晚到內容沿既有舊世代保留區保存
 
 明確勾選後，已套用還原的舊待存事件與會議資訊在同一 IDB 交易移入既有 identity 的 retired:世代 前綴，沿用 loss 保留模式，不增加資料庫/依賴/管理器。新世代不自動接收舊事件，舊 store 寫入仍被世代檢查拒絕。重新載入後可下載 JSONL 原始紀錄，下載不刪除本機副本；此檔供資料取回/人工核對，不宣稱可自動重播或重建完整原會議。完整原資料仍以還原前安全備份為準。真 Chrome 同交易失敗回滾、兩目的晚到事件取回與新 SQLite 隔離通過，見 W07 證據。
-
 
 ### 2026-10-16 — managed archive 重啟身分核對
 

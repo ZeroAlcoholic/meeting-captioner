@@ -15,9 +15,19 @@
 import { getDeviceKeys } from './device-keys.js';
 
 const OPENAI_CLIENT_SECRETS_URL = 'https://api.openai.com/v1/realtime/translations/client_secrets';
+const OPENAI_CHAT_URL = 'https://api.openai.com/v1/chat/completions';
+const OPENAI_SUMMARY_MODEL = 'gpt-5.4-mini';
 const GEMINI_AUTH_TOKENS_URL = 'https://generativelanguage.googleapis.com/v1beta/auth_tokens';
 /** Kept identical to the server allowlist (services/online/src/config.ts). */
 const GEMINI_LIVE_MODEL = 'models/gemini-3.5-live-translate-preview';
+const GEMINI_SUMMARY_MODEL = 'gemini-3.8-flash';
+const GEMINI_GENERATE_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_SUMMARY_MODEL}:generateContent`;
+const SUMMARY_SYSTEM_PROMPT =
+  '你是專業商務會議記錄專家。會議常涉及金融保險（如核保、理賠、保費、法遵）、AI／軟體工程（如模型指標、架構、延遲、部署）或商務決策。' +
+  '請嚴格根據提供的逐字稿與時間戳記，以台灣繁體中文慣用語輸出精準摘要（僅針對實際討論內容摘要，未提及之領域切勿套用；嚴禁「討論了…」等空洞描述；所有關鍵金額、百分比、指標、專有名詞與英文縮寫須完整保留並標註 [MM:SS] 時間錨點）：\n' +
+  '【一、核心結論與重點】條列具體決議、主張與關鍵數據（附 [MM:SS]）。\n' +
+  '【二、待辦事項與下一步】條列「具體行動｜負責方｜時程」（若無則寫「無明確待辦事項」）。\n' +
+  '【三、待確認議題與風險】未定案爭議、技術／法規限制或收音中斷缺口（若無則省略；不得跨缺口臆測）。';
 const UPSTREAM_TIMEOUT_MS = 10_000;
 /** OpenAI translation sessions cap near 30 min; renew earlier (server default). */
 const SESSION_RENEW_MS = 25 * 60 * 1000;
@@ -192,6 +202,152 @@ async function mintGemini(init: RequestInit | undefined): Promise<Response> {
   return json(200, { token: data.name, model: GEMINI_LIVE_MODEL });
 }
 
+async function summarizeDevice(init: RequestInit | undefined): Promise<Response> {
+  const keys = getDeviceKeys();
+  if (!keys.gemini && !keys.openai) {
+    return json(503, { error: 'No API key is saved on this device' });
+  }
+  let body: Record<string, unknown> = {};
+  try {
+    if (typeof init?.body === 'string' && init.body) body = JSON.parse(init.body);
+  } catch {
+    return json(400, { error: 'Invalid request body' });
+  }
+  const transcript = typeof body['transcript'] === 'string' ? body['transcript'].trim() : '';
+  const preferred =
+    body['preferredProvider'] === 'openai' || body['preferredProvider'] === 'gemini'
+      ? body['preferredProvider']
+      : 'gemini';
+  const rawGaps = body['gaps'];
+  const gaps =
+    Array.isArray(rawGaps) && rawGaps.every((g) => typeof g === 'string')
+      ? (rawGaps as string[]).map((g) => g.trim()).filter(Boolean)
+      : undefined;
+  if (!transcript || transcript.length > 200_000) {
+    return json(400, { error: 'Invalid request body' });
+  }
+  const userPrompt =
+    gaps && gaps.length > 0
+      ? `已知收音／連線中斷缺口（此區間無紀錄，請於風險段標註並切勿臆測）：${gaps.join('；')}\n\n逐字稿：\n${transcript}`
+      : `逐字稿：\n${transcript}`;
+
+  const order: Array<'gemini' | 'openai'> = [];
+  const other: 'gemini' | 'openai' = preferred === 'openai' ? 'gemini' : 'openai';
+  if (keys[preferred]) order.push(preferred);
+  if (keys[other]) order.push(other);
+
+  let lastStatus = 502;
+  let lastError = 'Summary upstream error';
+  let lastHeaders: Record<string, string> = {};
+
+  for (let idx = 0; idx < order.length; idx++) {
+    const candidate = order[idx]!;
+    if (candidate === 'gemini') {
+      const res = await upstream(
+        GEMINI_GENERATE_URL,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-goog-api-key': keys.gemini!,
+          },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: SUMMARY_SYSTEM_PROMPT }] },
+            contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+            generationConfig: {
+              thinkingConfig: { thinkingLevel: 'low' },
+            },
+          }),
+        },
+        init?.signal,
+      );
+      if (res === 'timeout') {
+        lastStatus = 504;
+        lastError = 'Gemini summary request timed out';
+        continue;
+      }
+      if (!res.ok) {
+        await res.body?.cancel().catch(() => {});
+        lastStatus = res.status < 500 ? res.status : 502;
+        lastError =
+          res.status === 401 || res.status === 403
+            ? 'Upstream rejected the Gemini API key'
+            : res.status === 429
+              ? 'Gemini rate-limited; retry shortly'
+              : `Gemini returned ${res.status}`;
+        lastHeaders = res.status === 429 ? retryAfter(res) : {};
+        continue;
+      }
+      const data = (await res.json()) as {
+        candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+      };
+      const summary =
+        data.candidates?.[0]?.content?.parts
+          ?.map((p) => p.text ?? '')
+          .join('')
+          .trim() ?? '';
+      if (summary) {
+        return json(200, {
+          summary,
+          provider: 'gemini',
+          model: GEMINI_SUMMARY_MODEL,
+          fallbackUsed: idx > 0,
+        });
+      }
+    } else {
+      const res = await upstream(
+        OPENAI_CHAT_URL,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${keys.openai!}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: OPENAI_SUMMARY_MODEL,
+            messages: [
+              { role: 'system', content: SUMMARY_SYSTEM_PROMPT },
+              { role: 'user', content: userPrompt },
+            ],
+          }),
+        },
+        init?.signal,
+      );
+      if (res === 'timeout') {
+        lastStatus = 504;
+        lastError = 'OpenAI summary request timed out';
+        continue;
+      }
+      if (!res.ok) {
+        await res.body?.cancel().catch(() => {});
+        lastStatus = res.status < 500 ? res.status : 502;
+        lastError =
+          res.status === 401 || res.status === 403
+            ? 'Upstream rejected the API key'
+            : res.status === 429
+              ? 'Upstream rate-limited; retry shortly'
+              : `Upstream returned ${res.status}`;
+        lastHeaders = res.status === 429 ? retryAfter(res) : {};
+        continue;
+      }
+      const data = (await res.json()) as {
+        choices?: Array<{ message?: { content?: string } }>;
+      };
+      const summary = data.choices?.[0]?.message?.content?.trim() ?? '';
+      if (summary) {
+        return json(200, {
+          summary,
+          provider: 'openai',
+          model: OPENAI_SUMMARY_MODEL,
+          fallbackUsed: idx > 0,
+        });
+      }
+    }
+  }
+
+  return json(lastStatus, { error: lastError }, lastHeaders);
+}
+
 /** Drop-in for `fetch` on the service paths; anything else is a 404, never the network. */
 export const deviceBrokerFetch: typeof fetch = async (input, init) => {
   const href = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
@@ -200,5 +356,6 @@ export const deviceBrokerFetch: typeof fetch = async (input, init) => {
   if (method === 'GET' && path.endsWith('/session/info')) return sessionInfo();
   if (method === 'POST' && path.endsWith('/session/gemini')) return mintGemini(init);
   if (method === 'POST' && path.endsWith('/session')) return mintOpenAI(init);
+  if (method === 'POST' && path.endsWith('/summarize')) return summarizeDevice(init);
   return json(404, { error: 'Not available in the phone build' });
 };

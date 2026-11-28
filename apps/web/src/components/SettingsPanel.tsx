@@ -100,7 +100,7 @@ function LanguageBlock({ sessionActive = false }: { sessionActive?: boolean }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
       <span style={{ fontSize: 12, opacity: 0.65, textTransform: 'uppercase', letterSpacing: 1 }}>
-        Language
+        語言與雙語顯示
       </span>
       <div style={{ display: 'flex', gap: 6 }}>
         {LANG_PAIR_OPTIONS.map((opt) => (
@@ -202,7 +202,7 @@ function OnlineProviderBlock({ sessionActive = false }: { sessionActive?: boolea
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
       <span style={{ fontSize: 12, opacity: 0.65, textTransform: 'uppercase', letterSpacing: 1 }}>
-        Online backend
+        雲端翻譯服務
       </span>
       <div style={{ display: 'flex', gap: 6 }}>
         {ONLINE_PROVIDER_OPTIONS.map((opt) => (
@@ -246,7 +246,7 @@ function MicDistanceBlock() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
       <span style={{ fontSize: 12, opacity: 0.65, textTransform: 'uppercase', letterSpacing: 1 }}>
-        Mic distance
+        收音距離與降噪
       </span>
       <div style={{ display: 'flex', gap: 6 }}>
         {MIC_DISTANCE_OPTIONS.map((opt) => (
@@ -288,7 +288,7 @@ function TranscriptRetentionBlock() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxWidth: 240 }}>
       <span style={{ fontSize: 12, opacity: 0.65, textTransform: 'uppercase', letterSpacing: 1 }}>
-        Privacy
+        瀏覽器快取與隱私
       </span>
       <label
         style={{

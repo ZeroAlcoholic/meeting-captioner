@@ -4,7 +4,10 @@ import { meetingArchive } from '../store/meeting-archive.js';
 import { buildExport, type ExportFormat } from './formatters.js';
 
 /** Online translation exports use the complete archive, never the bounded display history. */
-export async function downloadArchivedTranslation(format: ExportFormat): Promise<boolean> {
+export async function downloadArchivedTranslation(
+  format: ExportFormat,
+  summary?: string,
+): Promise<boolean> {
   const state = captionStore.getState();
   if (
     !state.sessionId ||
@@ -15,17 +18,21 @@ export async function downloadArchivedTranslation(format: ExportFormat): Promise
   const meetingId = state.sessionId;
   meetingArchive.checkpoint();
   await meetingArchive.flushPending();
+  const useSnapshot = format === 'md' || (format === 'txt' && Boolean(summary?.trim()));
   const blob = await meetingArchive.exportMeeting(
     meetingId,
     'corrected',
-    format === 'md' ? 'json' : format,
+    useSnapshot ? 'json' : format,
   );
-  if (format === 'md') {
+  if (useSnapshot) {
     const snapshot = JSON.parse(await blob.text()) as {
       segments: CaptionSegment[];
       translations: Record<string, CaptionTranslation>;
     };
-    const artifact = buildExport({ ...snapshot, sessionStartMs: state.sessionStartMs }, 'md');
+    const artifact = buildExport(
+      { ...snapshot, sessionStartMs: state.sessionStartMs, summary },
+      format,
+    );
     triggerDownload(artifact.body, artifact.filename, artifact.mime);
   } else {
     triggerDownload(await blob.text(), `${meetingId}-corrected.${format}`, blob.type);

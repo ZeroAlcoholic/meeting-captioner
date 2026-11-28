@@ -4,7 +4,7 @@ import { config } from '../config.js';
 import { fetchWithOpenAIKeyFailover, hasAnyOpenAIKey } from '../openai-keys.js';
 
 const OPENAI_CHAT_URL = 'https://api.openai.com/v1/chat/completions';
-const TRANSLATE_MODEL = 'gpt-4.1-mini';
+const TRANSLATE_MODEL = 'gpt-5.4-mini';
 
 const TranslateBodySchema = z
   .object({

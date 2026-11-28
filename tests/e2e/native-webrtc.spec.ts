@@ -9,10 +9,30 @@ for (const closeCandidate of [false, true]) {
     baseURL,
   }) => {
     const origin = new URL(baseURL!).origin;
+    let writerHeaders: Record<string, string> | undefined;
     let exchanges = 0;
     let releaseFailure!: () => void;
     const heldFailure = new Promise<void>((resolve) => {
       releaseFailure = resolve;
+    });
+    page.on('request', (request) => {
+      const url = new URL(request.url());
+      if (url.origin !== origin) return;
+      if (url.pathname === '/meetings/lease/release') {
+        writerHeaders = undefined;
+        return;
+      }
+      const headers = request.headers();
+      if (headers['x-meeting-lease']) {
+        writerHeaders = {
+          origin,
+          authorization: headers.authorization,
+          'x-meeting-lease': headers['x-meeting-lease'],
+          ...(headers['x-meeting-generation']
+            ? { 'x-meeting-generation': headers['x-meeting-generation'] }
+            : {}),
+        };
+      }
     });
     await context.route('**/*', async (route) => {
       const url = new URL(route.request().url());
@@ -491,6 +511,13 @@ for (const closeCandidate of [false, true]) {
       releaseFailure();
       await context.unrouteAll({ behavior: 'wait' });
       await page.evaluate(() => window.__rtcLoopback.cleanup());
+      await page.close();
+      if (writerHeaders) {
+        const released = await context.request.post(origin + '/meetings/lease/release', {
+          headers: writerHeaders,
+        });
+        expect(released.ok()).toBe(true);
+      }
     }
   });
 }

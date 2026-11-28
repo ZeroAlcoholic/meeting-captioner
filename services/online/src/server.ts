@@ -8,6 +8,7 @@ import { config } from './config.js';
 import { registerHealthz } from './routes/healthz.js';
 import { registerSession } from './routes/session.js';
 import { registerTranslate } from './routes/translate.js';
+import { registerSummarize } from './routes/summarize.js';
 import { registerGemini } from './routes/gemini.js';
 import { registerTranscription } from './routes/transcription.js';
 import { registerGeminiTranscription } from './routes/gemini-transcription.js';
@@ -64,6 +65,7 @@ export async function buildApp(
   await registerTranscription(app);
   await registerGeminiTranscription(app);
   await registerTranslate(app);
+  await registerSummarize(app);
   await registerGemini(app);
   await registerMeetings(app, {
     ...(options.serviceIdentity ? { serviceIdentity: options.serviceIdentity } : {}),
@@ -99,7 +101,8 @@ export async function buildApp(
           urlPath.startsWith('/healthz') ||
           urlPath.startsWith('/meetings') ||
           urlPath.startsWith('/local') ||
-          urlPath.startsWith('/translate')
+          urlPath.startsWith('/translate') ||
+          urlPath.startsWith('/summarize')
         ) {
           return reply.code(404).send({ error: 'Not found' });
         }

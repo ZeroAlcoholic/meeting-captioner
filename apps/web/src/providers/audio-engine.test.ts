@@ -294,4 +294,25 @@ describe('audio-engine', () => {
     expect(outA[0]).toBeCloseTo(0.5, 5);
     expect(outB[511]).toBeCloseTo(-0.25, 5);
   });
+
+  it('attenuates high-frequency aliasing while preserving speech band during 48kHz -> 16kHz downsampling', () => {
+    const totalSamples = 4800; // 100 ms @ 48 kHz
+    const speech1kHz = new Float32Array(totalSamples);
+    const alias16kHz = new Float32Array(totalSamples);
+    for (let i = 0; i < totalSamples; i++) {
+      // 1 kHz speech fundamental + phase offset that would alias to DC under naive point decimation
+      speech1kHz[i] = Math.sin((2 * Math.PI * 1000 * i) / 48_000);
+      alias16kHz[i] = Math.cos((2 * Math.PI * 16_000 * i) / 48_000);
+    }
+    const speechOut = resamplePcm(speech1kHz, 48_000, 16_000, { pos: 0, last: 0 });
+    const aliasOut = resamplePcm(alias16kHz, 48_000, 16_000, { pos: 0, last: 0 });
+    const rms = (arr: Float32Array) =>
+      Math.sqrt(arr.reduce((sum, x) => sum + x * x, 0) / arr.length);
+
+    // 1 kHz speech fundamental retains strong energy (~0.676 RMS vs 0.707 original).
+    expect(rms(speechOut)).toBeGreaterThan(0.6);
+    // 16 kHz interference (which folds straight to 0 Hz DC under naive decimation with RMS=1.0)
+    // is completely nulled out by the 3-sample boxcar anti-aliasing filter.
+    expect(rms(aliasOut)).toBeLessThan(1e-5);
+  });
 });

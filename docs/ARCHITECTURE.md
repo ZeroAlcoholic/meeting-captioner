@@ -7,16 +7,16 @@
 
 `services/online` 與 `services/offline` 的 Node／Python 程序分離維持不變。前端地端專屬實作與 Hybrid 編排已各自收攏；這是現行依賴邊界，不以搬資料夾替代離線品質驗收。
 
-| 位置 | 責任／允許依賴 |
-| --- | --- |
-| `apps/web/src/providers/offline/` | 地端 WebSocket adapter、STT hook 與專屬測試；可用共用 capture／contracts，不匯入雲端 adapter。 |
-| `apps/web/src/providers/hybrid/` | 地端 STT＋雲端文字 MT 的唯一編排點；依賴 offline adapter 與文字端點，不把 cloud client 放進 Python。 |
-| `apps/web/src/providers/local-mode-controller.ts` | UI 能力介面；不依賴任一地端實作。 |
-| `apps/web/src/providers/local-mode-unavailable.ts` | 雲端版明確不可用能力；不連地端、不取得音源，Start 明確拒絕。 |
-| `apps/web/src/providers/` 其他現有模組 | 雲端 adapter、共用 capture／PCM／VAD、恢復、事件交付及跨模式測試；本輪保留雲端檔案位置。 |
-| `packages/contracts/` | 共用標準化事件，provider 不得把原始服務格式傳給 UI；修改此層須評估兩端。 |
-| `services/offline/app/capture/`、`app/pipeline/` | WASAPI、ASR、stabilizer、MT dispatcher、MT、後處理與事件工廠；維持現有職責拆分。 |
-| `services/online/src/storage/` | 目前與 API broker 同程序的本機 SQLite 保存；它是本機平台功能，不能因目錄名稱就當成需要外送的雲端模型。 |
+| 位置                                               | 責任／允許依賴                                                                                         |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `apps/web/src/providers/offline/`                  | 地端 WebSocket adapter、STT hook 與專屬測試；可用共用 capture／contracts，不匯入雲端 adapter。         |
+| `apps/web/src/providers/hybrid/`                   | 地端 STT＋雲端文字 MT 的唯一編排點；依賴 offline adapter 與文字端點，不把 cloud client 放進 Python。   |
+| `apps/web/src/providers/local-mode-controller.ts`  | UI 能力介面；不依賴任一地端實作。                                                                      |
+| `apps/web/src/providers/local-mode-unavailable.ts` | 雲端版明確不可用能力；不連地端、不取得音源，Start 明確拒絕。                                           |
+| `apps/web/src/providers/` 其他現有模組             | 雲端 adapter、共用 capture／PCM／VAD、恢復、事件交付及跨模式測試；本輪保留雲端檔案位置。               |
+| `packages/contracts/`                              | 共用標準化事件，provider 不得把原始服務格式傳給 UI；修改此層須評估兩端。                               |
+| `services/offline/app/capture/`、`app/pipeline/`   | WASAPI、ASR、stabilizer、MT dispatcher、MT、後處理與事件工廠；維持現有職責拆分。                       |
+| `services/online/src/storage/`                     | 目前與 API broker 同程序的本機 SQLite 保存；它是本機平台功能，不能因目錄名稱就當成需要外送的雲端模型。 |
 
 App 透過 `@meeting-audio/offline-stt`／`@meeting-audio/hybrid` 取得控制器。完整版本的 TypeScript／Vite 對應真實實作；雲端版本對應 unavailable 能力。舊 Offline／Hybrid 會議在雲端版仍可檢視／匯出，但 Continue 明確停用並說明原因，不能靜默改成雲端送音。
 

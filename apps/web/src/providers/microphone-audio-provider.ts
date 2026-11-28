@@ -1,10 +1,6 @@
 import type { HealthEvent } from '@meeting-audio/contracts';
 import type { AudioSource } from './types.js';
-import {
-  getCaptureContext,
-  isAudioContextPaused,
-  resumeCaptureContext,
-} from './audio-engine.js';
+import { getCaptureContext, isAudioContextPaused, resumeCaptureContext } from './audio-engine.js';
 
 function now(): string {
   return new Date().toISOString();

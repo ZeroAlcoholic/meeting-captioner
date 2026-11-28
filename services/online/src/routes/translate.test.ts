@@ -92,7 +92,7 @@ describe('POST /translate', () => {
     const [url, init] = mockFetch.mock.calls[0] as [string, RequestInit];
     expect(url).toContain('chat/completions');
     const reqBody = JSON.parse(init.body as string);
-    expect(reqBody.model).toBe('gpt-4.1-mini');
+    expect(reqBody.model).toBe('gpt-5.4-mini');
     expect(reqBody.messages[0].role).toBe('system');
     expect(reqBody.messages[1].content).toBe('Hello world');
   });

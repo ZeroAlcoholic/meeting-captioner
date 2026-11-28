@@ -232,6 +232,53 @@ describe('device broker', () => {
     }
     expect(upstream).not.toHaveBeenCalled();
   });
+
+  it('summarizes via gemini-3.8-flash and automatically falls back from restricted OpenAI key to Gemini', async () => {
+    setDeviceKey('openai', OPENAI_KEY);
+    setDeviceKey('gemini', GEMINI_KEY);
+    upstream
+      .mockResolvedValueOnce(upstreamJson(401, { error: 'ip_not_authorized' }))
+      .mockResolvedValueOnce(
+        upstreamJson(200, {
+          candidates: [
+            {
+              content: {
+                parts: [{ text: '【一、核心結論與重點】\n- [00:10] 理賠自動化上線。' }],
+              },
+            },
+          ],
+        }),
+      );
+
+    const res = await deviceBrokerFetch('/summarize', {
+      method: 'POST',
+      body: JSON.stringify({
+        transcript: '[00:10] Claim automation goes live.',
+        preferredProvider: 'openai',
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({
+      summary: '【一、核心結論與重點】\n- [00:10] 理賠自動化上線。',
+      provider: 'gemini',
+      model: 'gemini-3.8-flash',
+      fallbackUsed: true,
+    });
+    expect(upstream).toHaveBeenCalledTimes(2);
+    const [openaiUrl, openaiInit] = upstream.mock.calls[0]!;
+    expect(openaiUrl).toBe('https://api.openai.com/v1/chat/completions');
+    expect(JSON.parse(openaiInit.body).model).toBe('gpt-5.4-mini');
+    const [geminiUrl, geminiInit] = upstream.mock.calls[1]!;
+    expect(geminiUrl).toBe(
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent',
+    );
+    expect(geminiUrl).not.toContain(GEMINI_KEY);
+    expect(geminiInit.headers['x-goog-api-key']).toBe(GEMINI_KEY);
+    expect(JSON.parse(geminiInit.body).generationConfig).toEqual({
+      thinkingConfig: { thinkingLevel: 'low' },
+    });
+  });
 });
 
 describe('transcriptText', () => {

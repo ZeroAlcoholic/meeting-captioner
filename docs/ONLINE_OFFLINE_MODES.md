@@ -55,12 +55,12 @@ audio → local STT (services/offline) → local MT (OPUS-MT / CTranslate2) → 
 
 ## Component Responsibilities by Mode
 
-| Component     | Online Full    | Hybrid Privacy | Full Offline   |
-| ------------- | -------------- | -------------- | -------------- |
-| Audio capture | browser/native | browser/native | browser/native |
-| STT           | OpenAI / Gemini | local          | local          |
+| Component     | Online Full     | Hybrid Privacy | Full Offline    |
+| ------------- | --------------- | -------------- | --------------- |
+| Audio capture | browser/native  | browser/native | browser/native  |
+| STT           | OpenAI / Gemini | local          | local           |
 | Translation   | OpenAI / Gemini | online (text)  | local (OPUS-MT) |
-| Summary       | OpenAI (later) | online (text)  | local or off   |
+| Summary       | OpenAI (later)  | online (text)  | local or off    |
 
 ---
 

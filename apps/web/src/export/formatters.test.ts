@@ -200,4 +200,20 @@ describe('buildExport', () => {
     const a = buildExport(meta([], {}, null), 'txt');
     expect(a.filename).toMatch(/^meeting-.+\.txt$/);
   });
+
+  it('includes structured AI summary at the top of md and txt exports when provided', () => {
+    const m = {
+      ...meta([seg('s1', 'Premium is $1,200.', 5000)], { s1: tr('s1', '保費為 1,200 美元。') }),
+      summary: '【一、核心結論與重點】\n- [0:05] 保費為 $1,200。',
+    };
+    const md = buildExport(m, 'md');
+    expect(md.body).toContain('## 會議精準摘要');
+    expect(md.body).toContain('【一、核心結論與重點】\n- [0:05] 保費為 $1,200。');
+    expect(md.body).toContain('**[0:05]** Premium is $1,200.');
+
+    const txt = buildExport(m, 'txt');
+    expect(txt.body).toContain('=== 會議精準摘要 ===');
+    expect(txt.body).toContain('【一、核心結論與重點】\n- [0:05] 保費為 $1,200。');
+    expect(txt.body).toContain('Premium is $1,200.\n保費為 1,200 美元。');
+  });
 });
